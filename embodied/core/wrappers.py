@@ -4,13 +4,15 @@ import time
 import numpy as np
 
 from . import base
+from . import space as spacelib
 
 
 class TimeLimit(base.Wrapper):
 
-  def __init__(self, env, duration):
+  def __init__(self, env, duration, reset=True):
     super().__init__(env)
     self._duration = duration
+    self._reset = reset
     self._step = 0
     self._done = False
 
@@ -18,8 +20,14 @@ class TimeLimit(base.Wrapper):
     if action['reset'] or self._done:
       self._step = 0
       self._done = False
-      action.update(reset=True)
-      return self.env.step(action)
+      if self._reset:
+        action.update(reset=True)
+        return self.env.step(action)
+      else:
+        action.update(reset=False)
+        obs = self.env.step(action)
+        obs['is_first'] = True
+        return obs
     self._step += 1
     obs = self.env.step(action)
     if self._duration and self._step >= self._duration:
@@ -63,7 +71,7 @@ class NormalizeAction(base.Wrapper):
   def act_space(self):
     low = np.where(self._mask, -np.ones_like(self._low), self._low)
     high = np.where(self._mask, np.ones_like(self._low), self._high)
-    space = base.Space(np.float32, None, low, high)
+    space = spacelib.Space(np.float32, None, low, high)
     return {**self.env.act_space, self._key: space}
 
   def step(self, action):
@@ -82,26 +90,59 @@ class OneHotAction(base.Wrapper):
   @property
   def act_space(self):
     shape = (self._count,)
-    space = base.Space(np.float32, shape, 0, 1)
+    space = spacelib.Space(np.float32, shape, 0, 1)
     space.sample = functools.partial(self._sample_action, self._count)
     space.discrete = True
     return {**self.env.act_space, self._key: space}
 
   def step(self, action):
-    index = np.argmax(action[self._key]).astype(int)
-    reference = np.zeros_like(action[self._key])
-    reference[index] = 1
     if not action['reset']:
-      if not np.allclose(reference, action[self._key]):
-        raise ValueError(f'Invalid one-hot action:\n{action}')
+      assert (action[self._key].min() == 0.0).all(), action
+      assert (action[self._key].max() == 1.0).all(), action
+      assert (action[self._key].sum() == 1.0).all(), action
+    index = np.argmax(action[self._key])
     return self.env.step({**action, self._key: index})
 
   @staticmethod
   def _sample_action(count):
     index = np.random.randint(0, count)
-    reference = np.zeros(count, dtype=np.float32)
-    reference[index] = 1.0
-    return reference
+    action = np.zeros(count, dtype=np.float32)
+    action[index] = 1.0
+    return action
+
+
+class DiscretizeAction(base.Wrapper):
+
+  def __init__(self, env, key='action', bins=5):
+    super().__init__(env)
+    self._dims = np.squeeze(env.act_space[key].shape, 0).item()
+    self._values = np.linspace(-1, 1, bins)
+    self._key = key
+
+  @property
+  def act_space(self):
+    shape = (self._dims, len(self._values))
+    space = spacelib.Space(np.float32, shape, 0, 1)
+    space.sample = functools.partial(
+        self._sample_action, self._dims, self._values)
+    space.discrete = True
+    return {**self.env.act_space, self._key: space}
+
+  def step(self, action):
+    if not action['reset']:
+      assert (action[self._key].min(-1) == 0.0).all(), action
+      assert (action[self._key].max(-1) == 1.0).all(), action
+      assert (action[self._key].sum(-1) == 1.0).all(), action
+    indices = np.argmax(action[self._key], axis=-1)
+    continuous = np.take(self._values, indices)
+    return self.env.step({**action, self._key: continuous})
+
+  @staticmethod
+  def _sample_action(dims, values):
+    indices = np.random.randint(0, len(values), dims)
+    action = np.zeros((dims, len(values)), dtype=np.float32)
+    action[np.arange(dims), indices] = 1.0
+    return action
 
 
 class ResizeImage(base.Wrapper):
@@ -122,7 +163,7 @@ class ResizeImage(base.Wrapper):
     spaces = self.env.obs_space
     for key in self._keys:
       shape = self._size + spaces[key].shape[2:]
-      spaces[key] = base.Space(np.uint8, shape)
+      spaces[key] = spacelib.Space(np.uint8, shape)
     return spaces
 
   def step(self, action):
@@ -148,7 +189,7 @@ class RenderImage(base.Wrapper):
   @property
   def obs_space(self):
     spaces = self.env.obs_space
-    spaces[self._key] = base.Space(np.uint8, self._shape)
+    spaces[self._key] = spacelib.Space(np.uint8, self._shape)
     return spaces
 
   def step(self, action):
@@ -159,21 +200,33 @@ class RenderImage(base.Wrapper):
 
 class RestartOnException(base.Wrapper):
 
-  def __init__(self, constructor, exceptions=(Exception,), delay=60):
+  def __init__(
+      self, ctor, exceptions=(Exception,), window=300, maxfails=2, wait=20):
     if not isinstance(exceptions, (tuple, list)):
         exceptions = [exceptions]
-    self._constructor = constructor
+    self._ctor = ctor
     self._exceptions = tuple(exceptions)
-    self._delay = delay
-    super().__init__(self._constructor())
+    self._window = window
+    self._maxfails = maxfails
+    self._wait = wait
+    self._last = time.time()
+    self._fails = 0
+    super().__init__(self._ctor())
 
   def step(self, action):
     try:
       return self.env.step(action)
     except self._exceptions as e:
+      if time.time() > self._last + self._window:
+        self._last = time.time()
+        self._fails = 1
+      else:
+        self._fails += 1
+      if self._fails > self._maxfails:
+        raise RuntimeError('The env crashed too many times.')
       message = f'Restarting env after crash with {type(e).__name__}: {e}'
       print(message, flush=True)
-      time.sleep(self._delay)
-      self.env = self._constructor()
+      time.sleep(self._wait)
+      self.env = self._ctor()
       action['reset'] = np.ones_like(action['reset'])
       return self.env.step(action)

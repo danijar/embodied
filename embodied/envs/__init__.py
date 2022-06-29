@@ -1,39 +1,68 @@
 import functools
-import pathlib
-
-from .atari import Atari
-from .crafter import Crafter
-from .dmc import DMC
-from .dummy import Dummy
-from .gym import Gym
 
 import embodied
 
 
-def load_env(task, amount=1, parallel='none', **kwargs):
-  ctor = functools.partial(load_single_env, task, **kwargs)
-  if parallel != 'none':
-    ctor = functools.partial(embodied.Parallel, ctor, parallel)
-  envs = [ctor() for _ in range(amount)]
+def load_env(
+    task, amount=1, parallel='none', daemon=False, restart=False, seed=None,
+    **kwargs):
+  ctors = []
+  for index in range(amount):
+    ctor = functools.partial(load_single_env, task, **kwargs)
+    if seed is not None:
+      ctor = functools.partial(ctor, seed=hash((seed, index)) % (2 ** 31 - 1))
+    if parallel != 'none':
+      ctor = functools.partial(embodied.Parallel, ctor, parallel, daemon)
+    if restart:
+      ctor = functools.partial(embodied.wrappers.RestartOnException, ctor)
+    ctors.append(ctor)
+  envs = [ctor() for ctor in ctors]
   return embodied.BatchEnv(envs, parallel=(parallel != 'none'))
 
 
 def load_single_env(
     task, size=(64, 64), repeat=1, mode='train', camera=-1, gray=False,
-    length=0, logdir=''):
+    length=0, logdir='/dev/null', discretize=0, sticky=True, lives=False,
+    episodic=True, again=False, termination=False, weaker=1.0,
+    seed=None):
   suite, task = task.split('_', 1)
   if suite == 'dummy':
-    env = Dummy(task, size, length or 100)
+    from . import dummy
+    env = dummy.Dummy(task, size, length or 100)
   elif suite == 'gym':
-    env = Gym(task)
+    from . import gym
+    env = gym.Gym(task)
   elif suite == 'dmc':
-    env = DMC(task, repeat, size, camera)
+    from . import dmc
+    env = dmc.DMC(task, repeat, size, camera)
   elif suite == 'atari':
-    env = Atari(task, repeat, size, gray)
+    from . import atari
+    env = atari.Atari(task, repeat, size, gray, lives=lives, sticky=sticky)
   elif suite == 'crafter':
+    from . import crafter
     assert repeat == 1
-    outdir = pathlib.Path(logdir) / 'crafter' if mode == 'train' else None
-    env = Crafter(task, size, outdir)
+    # outdir = embodied.Path(logdir) / 'crafter' if mode == 'train' else None
+    outdir = None
+    env = crafter.Crafter(task, size, outdir)
+  elif suite == 'dmlab':
+    from . import dmlab
+    env = dmlab.DMLab(task, repeat, size, mode, seed=seed, episodic=episodic)
+  elif suite == 'robodesk':
+    from . import robodesk
+    env = robodesk.RoboDesk(task, mode, repeat, length or 2000)
+  elif suite == 'minecraft':
+    from . import minecraft
+    env = minecraft.Minecraft(task, repeat, size, length or 24000)
+  elif suite == 'loconav':
+    from . import loconav
+    env = loconav.LocoNav(
+        task, repeat, size, camera,
+        again=again, termination=termination, weaker=weaker)
+  elif suite == 'pinpad':
+    from . import pinpad
+    assert repeat == 1
+    assert size == (64, 64)
+    env = pinpad.PinPad(task, length or 2000)
   else:
     raise NotImplementedError(suite)
   for name, space in env.act_space.items():
@@ -41,6 +70,8 @@ def load_single_env(
       continue
     if space.discrete:
       env = embodied.wrappers.OneHotAction(env, name)
+    elif discretize:
+      env = embodied.wrappers.DiscretizeAction(env, name, discretize)
     else:
       env = embodied.wrappers.NormalizeAction(env, name)
   if length:

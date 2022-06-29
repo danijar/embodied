@@ -1,4 +1,4 @@
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 try:
   import rich.traceback
@@ -8,6 +8,7 @@ except ImportError:
 
 from .core import *
 
+from . import replay
 from . import envs
 from . import run
 from . import agents

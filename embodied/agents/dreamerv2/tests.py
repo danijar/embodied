@@ -8,6 +8,7 @@ directory = pathlib.Path(__file__).parent
 sys.path.append(str(directory.parent))
 sys.path.append(str(directory.parent.parent.parent))
 __package__ = directory.name
+sys.argv[0] = str(pathlib.Path(__file__))
 
 import embodied
 import numpy as np
@@ -20,14 +21,14 @@ from . import agent as agnt
 class XLATest(tf.test.TestCase):
 
   TIMES_V100 = {
-      'train_compile_nostate': 77.5,
-      'train_compile_state': 43.4,
-      'train_run': 1.5,
-      'policy_compile_nostate': 5.1,
-      'policy_compile_state': 0.9,
+      'train_compile_nostate': 38.1,
+      'train_compile_state': 25.7,
+      'train_run': 0.3,
+      'policy_compile_nostate': 3.0,
+      'policy_compile_state': 0.3,
       'policy_run': 0.2,
-      'report_compile': 18.9,
-      'report_run': 0.3,
+      'report_compile': 23.5,
+      'report_run': 0.12,
   }
 
   @parameterized.expand([
@@ -114,8 +115,9 @@ class Timer:
     yield self
     duration = time.time() - start
     target = self.times[self.name]
-    print(f'{self.name} duration: {duration:.1f}s, target: {target:.1f}s')
-    assert self.slack * duration <= target, 'too slow'
+    print(f'{self.name} duration: {duration:.3f}s, target: {target:.3f}s')
+    assert self.slack * duration <= target, (
+        f'{name} with target {target} took {duration}.')
 
 
 if __name__ == '__main__':

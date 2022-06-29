@@ -1,17 +1,21 @@
-from .base import Space, Agent, Env, Wrapper, Replay
+from .base import Agent, Env, Wrapper, Replay
 
+from .space import Space
+from .path import Path
 from .checkpoint import Checkpoint
 from .config import Config
 from .counter import Counter
 from .driver import Driver
 from .flags import Flags
 from .logger import Logger
+from .parallel import Parallel
 from .timer import Timer
+from .convert import convert
+from .worker import Worker
+from .prefetch import Prefetch
 
 from .batch import BatchEnv
-from .parallel import Parallel
 from .random import RandomAgent
-from .replay import SequenceReplay
 
 from . import logger
 from . import when

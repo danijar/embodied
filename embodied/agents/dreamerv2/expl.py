@@ -30,7 +30,7 @@ class Plan2Explore(tfutils.Module):
     self.config = config
     self.reward = reward
     self.wm = wm
-    self.ac = agent.ActorCritic(config, act_space)
+    self.ac = agent.ActorCritic(config, act_space, config.expl_episodic)
     self.actor = self.ac.actor
     stoch_size = config.rssm.stoch
     if config.rssm.discrete:

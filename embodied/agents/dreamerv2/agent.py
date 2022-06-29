@@ -1,4 +1,5 @@
 import pathlib
+import sys
 
 import embodied
 import ruamel.yaml as yaml
@@ -12,9 +13,10 @@ from . import tfutils
 class Agent(tfutils.Module, embodied.Agent):
 
   configs = yaml.YAML(typ='safe').load((
-      pathlib.Path(__file__).parent / 'configs.yaml').read_text())
+      pathlib.Path(sys.argv[0]).parent / 'configs.yaml').read_text())
 
   def __init__(self, obs_space, act_space, step, config):
+    tfutils.setup(**config.tf)
     self.config = config
     self.obs_space = obs_space
     self.act_space = act_space['action']
@@ -73,7 +75,8 @@ class Agent(tfutils.Module, embodied.Agent):
     if self.config.expl_behavior != 'greedy':
       mets = self._expl_behavior.train(start, outputs, data)[-1]
       metrics.update({'expl_' + key: value for key, value in mets.items()})
-    return state, metrics
+    outs = {}
+    return outs, state, metrics
 
   @tf.function
   def report(self, data):
@@ -288,8 +291,7 @@ class ActorCritic(tfutils.Module):
     elif self.config.actor_grad == 'reinforce':
       baseline = self._target_critic(seq['feat'][:-2]).mode()
       advantage = tf.stop_gradient(target[1:] - baseline)
-      action = tf.stop_gradient(seq['action'][1:-1])
-      objective = policy.log_prob(action) * advantage
+      objective = policy.log_prob(seq['action'][1:-1]) * advantage
     elif self.config.actor_grad == 'both':
       baseline = self._target_critic(seq['feat'][:-2]).mode()
       advantage = tf.stop_gradient(target[1:] - baseline)

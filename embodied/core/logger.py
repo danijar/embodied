@@ -1,9 +1,11 @@
 import concurrent.futures
 import json
-import pathlib
+import re
 import time
 
 import numpy as np
+
+from . import path
 
 
 class Logger:
@@ -23,7 +25,7 @@ class Logger:
   def add(self, mapping, prefix=None):
     step = int(self._step) * self._multiplier
     for name, value in dict(mapping).items():
-      name = f'{prefix}_{name}' if prefix else name
+      name = f'{prefix}/{name}' if prefix else name
       value = np.array(value)
       if len(value.shape) not in (0, 2, 3, 4):
         raise ValueError(
@@ -84,12 +86,27 @@ class AsyncOutput:
 
 class TerminalOutput:
 
+  def __init__(self, pattern=r'.*'):
+    self._pattern = re.compile(pattern)
+    try:
+      import rich.console
+      self._console = rich.console.Console()
+    except ImportError:
+      self._console = None
+
   def __call__(self, summaries):
     step = max(s for s, _, _, in summaries)
     scalars = {k: float(v) for _, k, v in summaries if len(v.shape) == 0}
+    scalars = {k: v for k, v in scalars.items() if self._pattern.search(k)}
     formatted = {k: self._format_value(v) for k, v in scalars.items()}
-    message = ' / '.join(f'{k} {v}' for k, v in formatted.items())
-    print(f'[{step}]', message, flush=True)
+    if self._console:
+      self._console.rule(f'[green bold]Step {step}')
+      self._console.print(' [blue]/[/blue] '.join(
+          f'{k} {v}' for k, v in formatted.items()))
+      print('')
+    else:
+      message = ' / '.join(f'{k} {v}' for k, v in formatted.items())
+      print(f'[{step}]', message, flush=True)
 
   def _format_value(self, value):
     if value == 0:
@@ -111,14 +128,19 @@ class TerminalOutput:
 
 class JSONLOutput(AsyncOutput):
 
-  def __init__(self, logdir, parallel=True):
+  def __init__(
+      self, logdir, filename='metrics.jsonl', pattern=r'.*', parallel=True):
     super().__init__(self._write, parallel)
-    self._logdir = pathlib.Path(logdir)
+    self._filename = filename
+    self._pattern = re.compile(pattern)
+    self._logdir = path.Path(logdir)
+    self._logdir.mkdirs()
 
   def _write(self, summaries):
     scalars = {k: float(v) for _, k, v in summaries if len(v.shape) == 0}
+    scalars = {k: v for k, v in scalars.items() if self._pattern.search(k)}
     step = max(s for s, _, _, in summaries)
-    with (self._logdir / 'metrics.jsonl').open('a') as f:
+    with (self._logdir / self._filename).open('a') as f:
       f.write(json.dumps({'step': step, **scalars}) + '\n')
 
 
@@ -140,7 +162,7 @@ class TensorBoardOutput(AsyncOutput):
     self._writer.set_as_default()
     for step, name, value in summaries:
       if len(value.shape) == 0:
-        tf.summary.scalar('scalars/' + name, value, step)
+        tf.summary.scalar(name, value, step)
       elif len(value.shape) == 2:
         tf.summary.image(name, value, step)
       elif len(value.shape) == 3:
@@ -165,6 +187,56 @@ class TensorBoardOutput(AsyncOutput):
     except (IOError, OSError) as e:
       print('GIF summaries require ffmpeg in $PATH.', e)
       tf.summary.image(name, video, step)
+
+
+class MlflowOutput:
+
+  def __init__(self, run_name=None, resume_id=None, params={}, prefix=''):
+    import os
+    run_name = run_name or os.environ.get('MLFLOW_RUN_NAME')
+    resume_id = resume_id or os.environ.get('MLFLOW_RESUME_ID')
+    self._start_or_resume(run_name, resume_id)
+    if params:
+      self._log_params(params)
+    self.prefix = prefix
+
+  def __call__(self, summaries):
+    import mlflow
+    import datetime
+    scalars = {k: float(v) for _, k, v in summaries if len(v.shape) == 0}
+    step = max(s for s, _, _, in summaries)
+    scalars['step'] = step
+    scalars['timestamp'] = datetime.datetime.now().timestamp()
+    if self.prefix:
+      scalars = {f'{self.prefix}{k}': v for k, v in scalars.items()}
+    mlflow.log_metrics(scalars, step=step)
+
+  def _start_or_resume(self, run_name, resume_id=None):
+    import os
+    import mlflow
+    resume_run_id = None
+    print('Mlflow tracking uri:', os.environ.get('MLFLOW_TRACKING_URI', 'local'))
+    if resume_id:
+        runs = mlflow.search_runs(filter_string=f'tags.resume_id="{resume_id}"')
+        if len(runs) > 0:
+            resume_run_id = runs['run_id'].iloc[0]
+    if resume_run_id:
+      run = mlflow.start_run(run_name=run_name, run_id=resume_run_id)
+      print(f'Resumed mlflow run {run.info.run_id} ({resume_id}) in experiment {run.info.experiment_id}')
+    else:
+      run = mlflow.start_run(run_name=run_name, tags={'resume_id': resume_id or ''})
+      print(f'Started mlflow run {run.info.run_id} ({resume_id}) in experiment {run.info.experiment_id}')
+    return run
+
+  def _log_params(self, params):
+    import mlflow
+    kvs = list(params.items())
+    for i in range(0, len(kvs), 100):  # log_params() allows max 100
+      try:
+        mlflow.log_params(dict(kvs[i:i+100]))
+      except Exception as ex:
+        # This is normal when resuming run, mlflow complains when trying to change value of params
+        print(f'WARN: error logging parameters ({ex})')
 
 
 def _encode_gif(frames, fps):

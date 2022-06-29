@@ -7,7 +7,10 @@ import numpy as np
 
 class Timer:
 
-  def __init__(self):
+  def __init__(self, columns=('frac', 'min', 'avg', 'max', 'count')):
+    available = ('frac', 'sum', 'avg', 'min', 'max', 'count')
+    assert all(x in available for x in columns), columns
+    self._columns = columns
     self._durations = collections.defaultdict(list)
     self._start = time.time()
 
@@ -27,24 +30,30 @@ class Timer:
       decorator = self.scope(f'{name}.{method}')
       setattr(obj, method, decorator(getattr(obj, method)))
 
-  def stats(self, log=True):
+  def stats(self, reset=True, log=False):
     metrics = {}
     metrics['duration'] = time.time() - self._start
     for name, durs in self._durations.items():
-      metrics[f'{name}_frac'] = np.sum(durs) / metrics['duration']
-      metrics[f'{name}_sum'] = np.sum(durs)
-      metrics[f'{name}_avg'] = np.mean(durs)
-      metrics[f'{name}_min'] = np.min(durs)
-      metrics[f'{name}_max'] = np.max(durs)
+      available = {}
+      available['frac'] = np.sum(durs) / metrics['duration']
+      available['sum'] = np.sum(durs)
+      available['avg'] = np.mean(durs)
+      available['min'] = np.min(durs)
+      available['max'] = np.max(durs)
+      available['count'] = len(durs)
+      for key, value in available.items():
+        if key in self._columns:
+          metrics[f'{name}_{key}'] = value
     if log:
       self._log(metrics)
+    if reset:
+      self.reset()
     return metrics
 
   def _log(self, metrics):
     names = self._durations.keys()
     names = sorted(names, key=lambda k: -metrics[f'{k}_frac'])
-    cols = ('frac', 'sum', 'avg', 'min', 'max')
-    print('Timer:'.ljust(20), ' '.join(x.rjust(8) for x in cols))
+    print('Timer:'.ljust(20), ' '.join(x.rjust(8) for x in self._columns))
     for name in names:
-      values = [metrics[f'{name}_{col}'] for col in cols]
+      values = [metrics[f'{name}_{col}'] for col in self._columns]
       print(f'{name.ljust(20)}', ' '.join((f'{x:8.4f}' for x in values)))

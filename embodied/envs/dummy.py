@@ -16,7 +16,8 @@ class Dummy(embodied.Env):
   def obs_space(self):
     return {
         'image': embodied.Space(np.uint8, self._size + (3,)),
-        'step': embodied.Space(np.int32, (), 0),
+        'vector': embodied.Space(np.float32, (7,)),
+        'step': embodied.Space(np.int32, (), 0, self._length),
         'reward': embodied.Space(np.float32),
         'is_first': embodied.Space(bool),
         'is_last': embodied.Space(bool),
@@ -38,16 +39,18 @@ class Dummy(embodied.Env):
       return self._obs(0.0, is_first=True)
     action = action['action']
     if self._task == 'continuous':
-      assert (-1 <= action).all() and (action <= 1).all(), action
+      pass
+      # assert (-1 <= action).all() and (action <= 1).all(), action
     else:
       assert action in range(5), action
     self._step += 1
     self._done = (self._step >= self._length)
-    return self._obs(1.0, is_last=self._done)
+    return self._obs(1.0, is_last=self._done, is_terminal=self._done)
 
   def _obs(self, reward, is_first=False, is_last=False, is_terminal=False):
     return dict(
         image=np.zeros(self._size + (3,), np.uint8),
+        vector=np.zeros(7, np.float32),
         step=self._step,
         reward=reward,
         is_first=is_first,

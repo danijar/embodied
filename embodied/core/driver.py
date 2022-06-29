@@ -2,8 +2,17 @@ import collections
 
 import numpy as np
 
+from .convert import convert
+
 
 class Driver:
+
+  _CONVERSION = {
+      np.floating: np.float32,
+      np.signedinteger: np.int32,
+      np.uint8: np.uint8,
+      bool: bool,
+  }
 
   def __init__(self, env, **kwargs):
     assert len(env) > 0
@@ -15,7 +24,7 @@ class Driver:
 
   def reset(self):
     self._obs = {
-        k: np.zeros((len(self._env),) + v.shape, v.dtype)
+        k: convert(np.zeros((len(self._env),) + v.shape, v.dtype))
         for k, v in self._env.obs_space.items()}
     self._obs['is_last'] = np.ones(len(self._env), bool)
     self._eps = [collections.defaultdict(list) for _ in range(len(self._env))]
@@ -40,8 +49,12 @@ class Driver:
           k: v * self._expand(1 - self._obs['is_last'], len(v.shape))
           for k, v in acts.items()}
       acts['reset'] = self._obs['is_last']
+    acts = {k: convert(v) for k, v in acts.items()}
+    assert all(len(x) == len(self._env) for x in acts.values()), acts
     self._obs = self._env.step(acts)
-    trns = {k: self._convert(v) for k, v in {**self._obs, **acts}.items()}
+    assert all(len(x) == len(self._env) for x in self._obs.values()), self._obs
+    self._obs = {k: convert(v) for k, v in self._obs.items()}
+    trns = {**self._obs, **acts}
     if self._obs['is_first'].any():
       for i, first in enumerate(self._obs['is_first']):
         if not first:
@@ -56,7 +69,7 @@ class Driver:
       for i, done in enumerate(self._obs['is_last']):
         if not done:
           continue
-        ep = {k: self._convert(v) for k, v in self._eps[i].items()}
+        ep = {k: convert(v) for k, v in self._eps[i].items()}
         [fn(ep.copy(), i, **self._kwargs) for fn in self._on_episodes]
         episode += 1
     return step, episode
@@ -64,14 +77,4 @@ class Driver:
   def _expand(self, value, dims):
     while len(value.shape) < dims:
       value = value[..., None]
-    return value
-
-  def _convert(self, value):
-    value = np.array(value)
-    if np.issubdtype(value.dtype, np.floating):
-      return value.astype(np.float32)
-    elif np.issubdtype(value.dtype, np.signedinteger):
-      return value.astype(np.int32)
-    elif np.issubdtype(value.dtype, np.uint8):
-      return value.astype(np.uint8)
     return value

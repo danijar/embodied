@@ -9,6 +9,7 @@ class Crafter(embodied.Env):
     import crafter
     self._env = crafter.Env(size=size, reward=(task == 'reward'), seed=seed)
     if outdir:
+      embodied.Path(outdir).mkdirs()
       self._env = crafter.Recorder(
           self._env, outdir,
           save_stats=True,

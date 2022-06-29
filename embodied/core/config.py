@@ -1,12 +1,13 @@
 import json
-import pathlib
 import re
+
+from . import path
 
 
 class Config(dict):
 
-  _SEP = '.'
-  _IS_PATTERN = re.compile(r'.*[^A-Za-z0-9_.-].*')
+  SEP = '.'
+  IS_PATTERN = re.compile(r'.*[^A-Za-z0-9_.-].*')
 
   def __init__(self, *args, **kwargs):
     mapping = dict(*args, **kwargs)
@@ -24,7 +25,7 @@ class Config(dict):
     return self._flat.copy()
 
   def save(self, filename):
-    filename = pathlib.Path(filename)
+    filename = path.Path(filename)
     if filename.suffix == '.json':
       filename.write_text(json.dumps(dict(self)))
     elif filename.suffix in ('.yml', '.yaml'):
@@ -36,7 +37,7 @@ class Config(dict):
 
   @classmethod
   def load(cls, filename):
-    filename = pathlib.Path(filename)
+    filename = path.Path(filename)
     if filename.suffix == '.json':
       return cls(json.loads(filename.read_text()))
     elif filename.suffix in ('.yml', '.yaml'):
@@ -62,8 +63,11 @@ class Config(dict):
 
   def __getitem__(self, name):
     result = self._nested
-    for part in name.split(self._SEP):
-      result = result[part]
+    for part in name.split(self.SEP):
+      try:
+        result = result[part]
+      except TypeError:
+        raise KeyError
     if isinstance(result, dict):
       result = type(self)(result)
     return result
@@ -102,7 +106,7 @@ class Config(dict):
     result = self._flat.copy()
     inputs = self._flatten(dict(*args, **kwargs))
     for key, new in inputs.items():
-      if self._IS_PATTERN.match(key):
+      if self.IS_PATTERN.match(key):
         pattern = re.compile(key)
         keys = {k for k in result if pattern.match(k)}
       else:
@@ -128,10 +132,10 @@ class Config(dict):
     for key, value in mapping.items():
       if isinstance(value, dict):
         for k, v in self._flatten(value).items():
-          if self._IS_PATTERN.match(key) or self._IS_PATTERN.match(k):
-            combined = f'{key}\\{self._SEP}{k}'
+          if self.IS_PATTERN.match(key) or self.IS_PATTERN.match(k):
+            combined = f'{key}\\{self.SEP}{k}'
           else:
-            combined = f'{key}{self._SEP}{k}'
+            combined = f'{key}{self.SEP}{k}'
           result[combined] = v
       else:
         result[key] = value
@@ -140,7 +144,7 @@ class Config(dict):
   def _nest(self, mapping):
     result = {}
     for key, value in mapping.items():
-      parts = key.split(self._SEP)
+      parts = key.split(self.SEP)
       node = result
       for part in parts[:-1]:
         if part not in node:
@@ -151,7 +155,7 @@ class Config(dict):
 
   def _ensure_keys(self, mapping):
     for key in mapping:
-      assert not self._IS_PATTERN.match(key), key
+      assert not self.IS_PATTERN.match(key), key
     return mapping
 
   def _ensure_values(self, mapping):

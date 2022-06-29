@@ -1,16 +1,23 @@
 import re
 import sys
 
+from . import config
+
 
 class Flags:
 
   def __init__(self, *args, **kwargs):
-    from .config import Config
-    self._config = Config(*args, **kwargs)
+    self._config = config.Config(*args, **kwargs)
 
-  def parse(self, argv=None, known_only=False, help_exists=None):
-    if help_exists is None:
-      help_exists = not known_only
+  def parse(self, argv=None, help_exists=True):
+    parsed, remaining = self.parse_known(argv)
+    for flag in remaining:
+      if flag.startswith('--'):
+        raise ValueError(f"Flag '{flag}' did not match any config keys.")
+    assert not remaining, remaining
+    return parsed
+
+  def parse_known(self, argv=None, help_exists=False):
     if argv is None:
       argv = sys.argv[1:]
     if '--help' in argv:
@@ -38,14 +45,7 @@ class Flags:
           remaining.append(arg)
     self._submit_entry(key, vals, parsed, remaining)
     parsed = self._config.update(parsed)
-    if known_only:
-      return parsed, remaining
-    else:
-      for flag in remaining:
-        if flag.startswith('--'):
-          raise ValueError(f"Flag '{flag}' did not match any config keys.")
-      assert not remaining, remaining
-      return parsed
+    return parsed, remaining
 
   def _submit_entry(self, key, vals, parsed, remaining):
     if not key and not vals:
@@ -57,7 +57,7 @@ class Flags:
     if '=' in name:
       remaining.extend([key] + vals)
       return
-    if self._config._IS_PATTERN.fullmatch(name):
+    if self._config.IS_PATTERN.fullmatch(name):
       pattern = re.compile(name)
       keys = {k for k in self._config.flat if pattern.fullmatch(k)}
     elif name in self._config:
@@ -89,8 +89,10 @@ class Flags:
         message = f"Expected bool but got '{value}' for key '{key}'."
         raise TypeError(message)
     if isinstance(default, int):
-      value = float(value)  # Allow scientific notation for integers.
-      if float(int(value)) != value:
+      try:
+        value = float(value)  # Allow scientific notation for integers.
+        assert float(int(value)) == value
+      except (TypeError, AssertionError):
         message = f"Expected int but got float '{value}' for key '{key}'."
         raise TypeError(message)
       return int(value)

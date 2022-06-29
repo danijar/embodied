@@ -2,27 +2,38 @@ defaults:
 
   # Trainer
   logdir: /dev/null
+  run: train_fixed_eval
   seed: 0
-  task: dummy_continuous
-  run: train_eval
-  env: {amount: 1, parallel: 'none', repeat: 1, size: [64, 64], camera: -1, gray: False, length: 0}
-  replay: {capacity: 2e6, length: 50, ongoing: False, prioritize_ends: True, parallel: True}
+  task: dummy_discrete
+  env: {amount: 1, parallel: none, daemon: False, repeat: 1, size: [64, 64], camera: -1, gray: False, length: 0, discretize: 0, lives: False, sticky: True, restart: True, seed: 0}
+  replay: fixed
+  replay_size: 1e6
+  replay_fixed: {length: 64, prio_starts: 0.0, prio_ends: 1.0, sync: 0}
+  replay_consec: {length: 64, sync: 0}
+  replay_prio: {length: 64, prio_starts: 0.0, prio_ends: 1.0, sync: 0, fraction: 0.1, softmax: False, temp: 1.0, constant: 0.0, exponent: 0.5}
   tf: {jit: True, platform: gpu, precision: 16}
+  eval_dir: ''
+  filter: '.*'
+  tbtt: 0
   train:
     steps: 1e8
     expl_until: 0
     log_every: 1e4
-    eval_every: 1e5
+    eval_every: 3e4
     eval_eps: 1
-    train_every: 5
+    eval_samples: 1
+    train_every: 4
     train_steps: 1
-    prefill: 10000
-    pretrain: 0
-    log_keys_video: ['image']
+    train_fill: 1e4
+    eval_fill: 1e4
+    pretrain: 1
+    log_zeros: False
+    log_keys_video: [image]
     log_keys_sum: '^$'
     log_keys_mean: '^$'
     log_keys_max: '^$'
     log_timings: True
+    sync_every: 180
 
   # Agent
   batch_size: 16
@@ -79,7 +90,6 @@ defaults:
 nonepisodic: &nonepisodic
 
   pred_discount: False
-  replay.prioritize_ends: False
   grad_heads: [decoder, reward]
 
 atari:
@@ -88,7 +98,7 @@ atari:
   env: {gray: True, repeat: 4}
   train.steps: 5e7
   train.eval_every: 2.5e5
-  train.prefill: 50000
+  train.train_fill: 50000
   train.train_every: 16
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
@@ -101,6 +111,34 @@ atari:
   discount: 0.999
   loss_scales.kl: 0.1
   loss_scales.discount: 5.0
+
+minecraft:
+
+  task: minecraft_diamond
+  train.log_keys_max: '^log_inventory.*'
+    # env: {amount: 8, parallel: thread}
+  env: {amount: 16, parallel: thread}
+  tf.precision: 32  # Only 12% slower than fp16 on A100.
+  # eval_dir: /gcs/xcloud-shared/danijar/data/2022-01-23-diamond-dataset
+  # train.eval_fill: 0
+  train.eval_fill: 3e4
+  run: train_fixed_eval
+  train.eval_samples: 32
+  train.train_every: 16
+  # warm_start_dir: /gcs/xcloud-shared/danijar/data/2021-12-28-minerl-warmstart
+  # train.train_fill: 1e6
+  # replay_type: prio
+
+dmlab:
+
+  task: dmlab_rooms_collect_good_objects_train
+  encoder: {mlp_keys: 'reward', cnn_keys: 'image'}
+  decoder: {mlp_keys: '$^', cnn_keys: 'image'}
+  env.repeat: 4
+  train.steps: 5e7
+  env: {amount: 8, parallel: process}
+  train.train_every: 16
+  loss_scales.kl: 3.0
 
 crafter:
 
@@ -120,7 +158,7 @@ dmc_vision:
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
   train.eval_every: 1e4
-  train.prefill: 1000
+  train.train_fill: 1000
   train.pretrain: 100
   clip_rewards: identity
   rssm: {hidden: 200, deter: 200}
@@ -138,7 +176,7 @@ dmc_proprio:
   encoder: {mlp_keys: '.*', cnn_keys: '$^'}
   decoder: {mlp_keys: '.*', cnn_keys: '$^'}
   train.eval_every: 1e4
-  train.prefill: 1000
+  train.train_fill: 1000
   train.pretrain: 100
   clip_rewards: identity
   rssm: {hidden: 200, deter: 200}
@@ -149,15 +187,17 @@ dmc_proprio:
   kl.free: 1.0
 
 debug:
+
   env.length: 100
   train:
     eval_every: 300
     log_every: 300
-    prefill: 100
+    train_fill: 100
     train_steps: 1
     train_every: 30
   batch_size: 4
-  replay.length: 8
+  replay_size: 500
+  replay_.*\.length: 12
   encoder.cnn_depth: 16
   decoder.cnn_depth: 16
   rssm: {deter: 64, hidden: 64, stoch: 8, discrete: 8}

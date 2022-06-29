@@ -8,8 +8,12 @@ logging.getLogger().setLevel('ERROR')
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import mixed_precision as prec
-from tensorflow.python.distribute import values
 from tensorflow_probability import distributions as tfd
+
+try:
+  from tensorflow.python.distribute import values
+except Exception:
+  from google3.third_party.tensorflow.python.distribute import values
 
 
 tf.tensor = tf.convert_to_tensor
@@ -55,8 +59,7 @@ def setup(jit=True, platform='gpu', precision=16):
     for gpu in tf.config.experimental.list_physical_devices('GPU'):
       tf.config.experimental.set_memory_growth(gpu, True)
     if precision == 16:
-      from tensorflow.keras.mixed_precision import experimental as prec
-      prec.set_policy(prec.Policy('mixed_float16'))
+      prec.set_global_policy(prec.Policy('mixed_float16'))
   else:
     raise NotImplementedError(platform)
 
@@ -237,7 +240,7 @@ class OneHotDist(tfd.OneHotCategorical):
   def sample(self, sample_shape=(), seed=None):
     # Straight through biased gradient estimator.
     sample = super().sample(sample_shape, seed)
-    probs = self._pad(super().probs_parameter(), sample.shape)
+    probs = self._pad(self.probs_parameter(), sample.shape)
     sample += tf.cast(probs - tf.stop_gradient(probs), sample.dtype)
     return sample
 
