@@ -90,7 +90,11 @@ def main(argv=None):
     elif config.run == 'learning':
       env.close()
       port = parsed.learner_addr.split(':')[-1]
-      replay = eval_replay = make_replay(config, server_port=port)
+      replay = make_replay(config, logdir / 'episodes', server_port=port)
+      if config.eval_dir:
+        eval_replay = make_replay(config, config.eval_dir, is_eval=True)
+      else:
+        eval_replay = replay
       embodied.run.learning(agent, replay, eval_replay, logger, args)
 
     elif config.run == 'acting':

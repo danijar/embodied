@@ -1,11 +1,14 @@
 import numpy as np
 
+from .convert import convert
+
 
 class Space:
 
   def __init__(self, dtype, shape=(), low=None, high=None):
     # For integer types, high is the excluside upper bound.
     self.dtype = np.dtype(dtype)
+    assert self.dtype is not object, self.dtype
     self.low = self._infer_low(dtype, shape, low, high)
     self.high = self._infer_high(dtype, shape, low, high)
     self.shape = self._infer_shape(dtype, shape, low, high)
@@ -22,7 +25,7 @@ class Space:
 
   def __contains__(self, value):
     if not isinstance(value, np.ndarray):
-      value = np.array(value)
+      value = convert(value)
     if value.dtype != self.dtype:
       return False
     if value.shape != self.shape:

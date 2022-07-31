@@ -67,7 +67,7 @@ class NormalizeAction(base.Wrapper):
     self._low = np.where(self._mask, space.low, -1)
     self._high = np.where(self._mask, space.high, 1)
 
-  @property
+  @functools.cached_property
   def act_space(self):
     low = np.where(self._mask, -np.ones_like(self._low), self._low)
     high = np.where(self._mask, np.ones_like(self._low), self._high)
@@ -87,7 +87,7 @@ class OneHotAction(base.Wrapper):
     self._count = int(env.act_space[key].high)
     self._key = key
 
-  @property
+  @functools.cached_property
   def act_space(self):
     shape = (self._count,)
     space = spacelib.Space(np.float32, shape, 0, 1)
@@ -111,6 +111,83 @@ class OneHotAction(base.Wrapper):
     return action
 
 
+class ExpandScalars(base.Wrapper):
+
+  def __init__(self, env):
+    super().__init__(env)
+    self._obs_expanded = []
+    self._act_expanded = []
+
+  @functools.cached_property
+  def obs_space(self):
+    spaces = self.env.obs_space.copy()
+    for key, value in spaces.items():
+      if value.shape == () and key != 'reward' and not value.discrete:
+        value.shape = (1,)
+        self._obs_expanded.append(key)
+    return spaces
+
+  @functools.cached_property
+  def act_space(self):
+    spaces = self.env.act_space.copy()
+    for key, value in spaces.items():
+      if value.shape == () and not value.discrete:
+        value.shape = (1,)
+        self._act_expanded.append(key)
+    return spaces
+
+  def step(self, action):
+    action = {
+        key: np.squeeze(value, 0) if key in self._act_expanded else value
+        for key, value in action.items()}
+    obs = self.env.step(action)
+    obs = {
+        key: np.expand_dims(value, 0) if key in self._obs_expanded else value
+        for key, value in obs.items()}
+    return obs
+
+
+class FlattenTwoDimObs(base.Wrapper):
+
+  def __init__(self, env):
+    super().__init__(env)
+    self._keys = []
+    self._obs_space = self.env.obs_space.copy()
+    for key, value in self._obs_space.items():
+      if len(value.shape) == 2:
+        value.shape = (int(np.prod(value.shape)),)
+        self._keys.append(key)
+
+  @functools.cached_property
+  def obs_space(self):
+    return self._obs_space
+
+  def step(self, action):
+    obs = self.env.step(action).copy()
+    for key in self._keys:
+      obs[key] = obs[key].flatten()
+    return obs
+
+
+class CheckSpaces(base.Wrapper):
+
+  def __init__(self, env):
+    super().__init__(env)
+
+  def step(self, action):
+    for key, value in action.items():
+      space = self.env.act_space[key]
+      assert value in space, (
+          value.dtype, value.shape, np.min(value), np.max(value), space)
+    obs = self.env.step(action)
+    for key, value in obs.items():
+      space = self.env.obs_space[key]
+      assert value in space, (
+          key, np.array(value).dtype, np.array(value).shape,
+          np.min(value), np.max(value), space)
+    return obs
+
+
 class DiscretizeAction(base.Wrapper):
 
   def __init__(self, env, key='action', bins=5):
@@ -119,7 +196,7 @@ class DiscretizeAction(base.Wrapper):
     self._values = np.linspace(-1, 1, bins)
     self._key = key
 
-  @property
+  @functools.cached_property
   def act_space(self):
     shape = (self._dims, len(self._values))
     space = spacelib.Space(np.float32, shape, 0, 1)
@@ -158,7 +235,7 @@ class ResizeImage(base.Wrapper):
       from PIL import Image
       self._Image = Image
 
-  @property
+  @functools.cached_property
   def obs_space(self):
     spaces = self.env.obs_space
     for key in self._keys:
@@ -186,7 +263,7 @@ class RenderImage(base.Wrapper):
     self._key = key
     self._shape = self.env.render().shape
 
-  @property
+  @functools.cached_property
   def obs_space(self):
     spaces = self.env.obs_space
     spaces[self._key] = spacelib.Space(np.uint8, self._shape)

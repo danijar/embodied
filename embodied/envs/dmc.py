@@ -6,6 +6,8 @@ import numpy as np
 
 class DMC(embodied.Env):
 
+  # TODO: Simplify using DMEnv.
+
   DEFAULT_CAMERAS = dict(
       locom_rodent=1,
       quadruped=2,

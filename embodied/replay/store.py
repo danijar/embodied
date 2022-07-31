@@ -198,7 +198,7 @@ class Stats:
 
   def __init__(self, store):
     self.store = store
-    self.steps = 0
+    self.steps = self.store.steps
     self.episodes = 0
     self.reward = 0.0
 
@@ -206,7 +206,7 @@ class Stats:
     return {
         **self.store.stats(),
         'episodes': self.episodes,
-        'ep_length': self.episodes and self.store.steps / self.episodes,
+        'ep_length': self.episodes and self.steps / self.episodes,
         'ep_return': self.episodes and self.reward / self.episodes,
     }
 
@@ -230,15 +230,17 @@ class Stats:
   def __setitem__(self, key, traj):
     self.store[key] = traj
     self.reward += traj['reward'].sum()
-    self.steps += len(traj['is_first'])
     self.episodes += traj['is_first'].sum()
+    self.steps += len(traj['is_first'])
+    # print('add traj', len(traj['is_first']), self.steps)
 
   def __delitem__(self, key):
     traj = self.store[key]
     del self.store[key]
     self.reward -= traj['reward'].sum()
-    self.steps -= len(traj['is_first'])
     self.episodes -= traj['is_first'].sum()
+    self.steps -= len(traj['is_first'])
+    # print('del traj', len(traj['is_first']), self.steps)
 
 
 class StoreServer:
@@ -286,6 +288,8 @@ class StoreServer:
       elif method == '__setitem__':
         key, traj = args
         self[key] = traj
+      elif method == 'steps':
+        ret = self.steps
       else:
         raise NotImplementedError(method)
       socket.send(pickle.dumps(ret))
@@ -304,7 +308,8 @@ class StoreClient:
 
   @property
   def steps(self):
-    raise NotImplementedError
+    self._call('steps')
+    return self._result()
 
   def stats(self):
     return {}

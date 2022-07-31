@@ -40,7 +40,7 @@ defaults:
   expl_behavior: None
   transform_rewards: off
   batch_size: 32
-  data_loader: embodied
+  data_loader: tfdata  # embodied
   expl_noise: 0.0
   eval_noise: 0.0
   priority: reward_loss

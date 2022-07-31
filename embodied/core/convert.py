@@ -19,5 +19,5 @@ def convert(value):
           value = value.astype(dst)
         break
     else:
-      raise TypeError(f'Unsupported dtype: {value.dtype}')
+      raise TypeError(f"Object '{value}' has unsupported dtype: {value.dtype}")
   return value

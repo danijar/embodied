@@ -10,9 +10,11 @@ import embodied
 class FixedLength(embodied.Replay):
 
   def __init__(
-      self, store, chunk=64, length=0, prio_starts=0.0, prio_ends=1.0, sync=0):
+      self, store, chunk=64, length=0, prio_starts=0.0, prio_ends=1.0, sync=0,
+      minlen=0):
     self.store = store
     self.chunk = chunk
+    self.minlen = minlen
     self.length = length
     self.prio_starts = prio_starts
     self.prio_ends = prio_ends
@@ -43,7 +45,7 @@ class FixedLength(embodied.Replay):
 
   def add_traj(self, traj):
     length = len(next(iter(traj.values())))
-    if length < self.chunk:
+    if length < self.chunk or length < self.minlen:
       print(f'Skipping short trajectory of length {length}.')
       return
     traj = {k: v for k, v in traj.items() if not k.startswith('log_')}

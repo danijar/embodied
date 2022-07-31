@@ -23,7 +23,7 @@ def load_env(
 def load_single_env(
     task, size=(64, 64), repeat=1, mode='train', camera=-1, gray=False,
     length=0, logdir='/dev/null', discretize=0, sticky=True, lives=False,
-    episodic=True, again=False, termination=False, weaker=1.0,
+    episodic=True, again=False, termination=False, weaker=1.0, checks=False,
     seed=None):
   suite, task = task.split('_', 1)
   if suite == 'dummy':
@@ -32,6 +32,12 @@ def load_single_env(
   elif suite == 'gym':
     from . import gym
     env = gym.Gym(task)
+  elif suite == 'bsuite':
+    import bsuite
+    from . import dmenv
+    env = bsuite.load_from_id(task)
+    env = dmenv.DMEnv(env)
+    env = embodied.wrappers.FlattenTwoDimObs(env)
   elif suite == 'dmc':
     from . import dmc
     env = dmc.DMC(task, repeat, size, camera)
@@ -76,6 +82,9 @@ def load_single_env(
       env = embodied.wrappers.NormalizeAction(env, name)
   if length:
     env = embodied.wrappers.TimeLimit(env, length)
+  env = embodied.wrappers.ExpandScalars(env)
+  if checks:
+    env = embodied.wrappers.CheckSpaces(env)
   return env
 
 
