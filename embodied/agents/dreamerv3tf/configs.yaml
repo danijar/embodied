@@ -2,31 +2,31 @@ defaults:
 
   # Trainer
   logdir: /dev/null
-  run: train_fixed_eval
   seed: 0
   task: dummy_discrete
-  env: {amount: 4, parallel: process, daemon: False, repeat: 1, size: [64, 64], camera: -1, gray: False, length: 0, discretize: 0, lives: False, sticky: True, episodic: True, restart: True, seed: 0}
+  env: {amount: 4, parallel: process, daemon: False, repeat: 1, size: [64, 64], camera: -1, gray: False, length: 0, discretize: 0, lives: False, sticky: True, episodic: True, restart: True, checks: False, resets: True, seed: 0}
   replay: fixed
   replay_size: 1e6
   replay_chunk: 64
-  replay_fixed: {length: 0, prio_starts: 0.0, prio_ends: 1.0, sync: 0}
-  replay_consec: {randomize: False, sync: 0}
-  replay_prio: {prio_starts: 0.0, prio_ends: 1.0, sync: 0, fraction: 0.1, softmax: False, temp: 1.0, constant: 0.0, exponent: 0.5}
+  replay_fixed: {slots: 1024, prio_starts: 0.0, prio_ends: 1.0, sync: 0}
+  replay_consec: {slots: 1024, randomize: False, sync: 0}
+  replay_prio: {slots: 1024, prio_starts: 0.0, prio_ends: 1.0, sync: 0, fraction: 0.1, softmax: False, temp: 1.0, constant: 0.0, exponent: 0.5}
   tf: {jit: True, platform: gpu, precision: float16, debug_nans: False, logical_gpus: 0, dist_dataset: False, dist_policy: False, tensorfloat: True, soft_placement: False, growth: True}
   eval_dir: ''
   filter: '.*'
   tbtt: 0
-  train:
+  run:
+    script: train
     steps: 1e10
     expl_until: 0
-    log_every: 1e4
+    log_every: 60
     eval_every: 1e5
     eval_eps: 1
     eval_samples: 1
-    train_every: 16
-    train_steps: 1
-    train_fill: 1e4
-    eval_fill: 1e4
+    train_ratio: 64
+    batch_steps: -1
+    train_fill: 1024
+    eval_fill: 1024
     pretrain: 1
     log_zeros: False
     log_keys_video: [image]
@@ -48,24 +48,24 @@ defaults:
 
   # World Model
   grad_heads: [decoder, reward, cont]
-  rssm: {units: 1024, deter: 1024, stoch: 32, classes: 32, act: elu, norm: layer, initial: learned2, unimix: 0.01, prior_layers: 3, post_layers: 1, gru_layers: 1, unroll: True}
+  rssm: {units: 1024, deter: 1024, stoch: 32, classes: 32, act: elu, norm: layer, initial: learned, unimix: 0.01, prior_layers: 3, post_layers: 1, gru_layers: 1, unroll: True}
   encoder: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [4, 4, 4, 4], cnn_blocks: 2}
   decoder: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [5, 5, 6, 6], cnn_blocks: 2, image_dist: mse, inputs: [deter, stoch]}
   reward_head: {layers: 4, units: 512, act: elu, norm: layer, dist: symlog, outscale: 0.1, inputs: [deter, stoch]}
   cont_head: {layers: 4, units: 512, act: elu, norm: layer, dist: binary, outscale: 0.1, inputs: [deter, stoch]}
   loss_scales: {kl: 1.0, image: 1.0, reward: 1.0, cont: 1.0}
-  model_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 0.0, wd_pattern: '/(w|kernel)$', warmup: 0}
+  model_opt: {opt: adam, lr: 1e-4, eps: 1e-5, clip: 100.0, wd: 0.0, wd_pattern: '/(w|kernel)$', warmup: 0}
   wmkl: {impl: mult, scale: 0.1, target: 3.5, min: 1e-3, max: 1.0, vel: 0.1}
   wmkl_balance: 0.8
 
   # Actor Critic
   actor: {layers: 4, units: 512, act: elu, norm: layer, minstd: 0.03, maxstd: 1.0, outscale: 0.1, unimix: 0.01, inputs: [deter, stoch]}
   critic: {layers: 4, units: 512, act: elu, norm: layer, dist: symlog, outscale: 0.1, inputs: [deter, stoch]}
-  actor_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 0.0, wd_pattern: '/(w|kernel)$', warmup: 0}
-  critic_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 0.0, wd_pattern: '/(w|kernel)$', warmup: 0}
+  actor_opt: {opt: adam, lr: 1e-4, eps: 1e-5, clip: 100.0, wd: 0.0, wd_pattern: '/(w|kernel)$', warmup: 0}
+  critic_opt: {opt: adam, lr: 1e-4, eps: 1e-5, clip: 100.0, wd: 0.0, wd_pattern: '/(w|kernel)$', warmup: 0}
   actor_dist_disc: onehot
   actor_dist_cont: normal
-  discount: 0.998
+  discount: 0.997
   imag_horizon: 15
   imag_unroll: True
   return_lambda: 0.95
@@ -76,7 +76,7 @@ defaults:
   slow_target: True
   slow_target_update: 100
   slow_target_fraction: 1.0
-  actent: {impl: mult, scale: 3e-3, target: 0.5, min: 1e-5, max: 1.0, vel: 0.1}
+  actent: {impl: mult, scale: 3e-3, target: 0.4, min: 1e-5, max: 1.0, vel: 0.1}
   actent_norm: True
   advnorm: {impl: mean_std, decay: 0.99, max: 1e8}
   retnorm: {impl: off, decay: 0.999, max: 1e8}
@@ -95,14 +95,14 @@ defaults:
   expl_discount: 0.99
   expl_retnorm: {impl: std, decay: 0.999, max: 1e8}
   expl_scorenorm: {impl: off, decay: 0.999, max: 1e8}
-  expl_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 0.0, warmup: 0}
+  expl_opt: {opt: adam, lr: 1e-4, eps: 1e-5, clip: 100.0, wd: 0.0, warmup: 0}
   disag_head: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 1.0, inputs: [deter, stoch, action]}
   disag_target: [stoch]
   disag_models: 8
   ctrl_embed: {layers: 3, units: 512, act: elu, norm: layer, dist: mse, inputs: [deter, stoch]}
   ctrl_head: {layers: 1, units: 128, act: elu, norm: layer, dist: mse, inputs: [current, next]}
   ctrl_size: 32
-  ctrl_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 0.0, warmup: 0}
+  ctrl_opt: {opt: adam, lr: 1e-4, eps: 1e-5, clip: 100.0, wd: 0.0, warmup: 0}
   pbe_inputs: [deter]
   pbe_knn: 16
   expl_enc: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, inputs: [deter], shape: [8, 8]}
@@ -114,105 +114,98 @@ defaults:
   expl_when_every: 50
   expl_when_random: False
 
-qfunction:
-
-  critic_type: qfunction
-  discount: 0.99
-  pengs_qlambda: False  # True
-  return_lambda: 0.5
-
 minecraft:
 
   task: minecraft_discover
-  train.log_keys_max: '^log_inventory.*'
   env: {amount: 16, parallel: thread}
+  run:
+    eval_fill: 1e5
+    train_ratio: 16
+    log_keys_max: '^log_inventory.*'
   encoder: {mlp_keys: 'inventory|equipped|reward|is_terminal', cnn_keys: 'image'}
   decoder: {mlp_keys: 'inventory|equipped', cnn_keys: 'image'}
-  tf.precision: float32
-  train.eval_fill: 1e5
-  train.train_every: 64
+  # jax.precision: float32
 
 dmlab:
 
   task: dmlab_rooms_collect_good_objects_train
+  env: {repeat: 4, episodic: False, amount: 16}
   encoder: {mlp_keys: 'reward', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
-  env: {repeat: 4, episodic: False, amount: 16}
 
 atari:
 
   task: atari_pong
+  env: {gray: True, repeat: 4, amount: 16}
+  run:
+    # script: train_eval
+    steps: 5e7
+    eval_every: 5e5
+    eval_eps: 10
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
-  env: {gray: True, repeat: 4, amount: 16}
-  train.steps: 5e7
-  train.eval_every: 2.5e5
 
 atari100k:
 
   task: atari_pong
-  run: train_eval
-  train: {steps: 2e5, eval_every: 1e5, eval_eps: 10}
-  tf.precision: float32
-  env: {gray: True, repeat: 4}
-  env.sticky: False
+  env: {gray: True, repeat: 4, sticky: False}
+  run:
+    script: train_eval
+    steps: 1.2e5
+    eval_every: 1e5
+    eval_eps: 10
+    train_ratio: 1024
+  jax.precision: float32
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
-  train.train_every: 1
-  train.train_fill: 1000
 
 crafter:
 
   task: crafter_reward
+  run:
+    log_keys_max: '^log_achievement_.*'
+    log_keys_sum: '^log_reward$'
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
-  train.log_keys_max: '^log_achievement_.*'
-  train.log_keys_sum: '^log_reward$'
-  train.train_every: 8
 
 dmc_vision:
 
   task: dmc_walker_walk
+  env.repeat: 2
+  run.train_ratio: 512
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
-  env.repeat: 2
-  train.train_every: 2
 
 dmc_proprio:
 
   task: dmc_walker_walk
+  env.repeat: 2
+  run.train_ratio: 512
   encoder: {mlp_keys: '.*', cnn_keys: '$^'}
   decoder: {mlp_keys: '.*', cnn_keys: '$^'}
-  env.repeat: 2
-  train.train_every: 2
 
 robodesk:
 
-  run: train_eval
   task: robodesk_push_slide_dense
+  env: {amount: 8, repeat: 4, length: 2000}
+  run:
+    script: train_eval
+    eval_every: 2.5e4
+    eval_eps: 8
+    train_ratio: 256
   encoder: {mlp_keys: '^$', cnn_keys: 'image'}
   decoder: {mlp_keys: '^$', cnn_keys: 'image'}
-  env: {parallel: process, amount: 8, repeat: 4, length: 2000}
-  train: {eval_every: 2.5e4, eval_eps: 4, train_every: 4}
   discount: 0.99
 
 loconav_ant:
 
   task: loconav_ant_umaze
+  env.repeat: 2
+  run:
+    train_ratio: 512
+    log_keys_max: '^log_.*'
   encoder: {mlp_keys: '.*', cnn_keys: 'image'}
   decoder: {mlp_keys: '.*', cnn_keys: 'image'}
-  train.log_keys_max: '^log_.*'
-  env.repeat: 2
-  train.train_every: 2
-
-loconav_quadruped:
-
-  task: loconav_quadruped_umaze
-  encoder: {mlp_keys: '.*(joints|act|acc|vel).*', cnn_keys: 'image'}
-  decoder: {mlp_keys: '.*(joints|act|acc|vel).*', cnn_keys: 'image'}
-  train.log_keys_max: '^log_.*'
-  env.repeat: 2
-  train.train_every: 2
 
 hrlgrid:
 
@@ -223,39 +216,37 @@ hrlgrid:
 small:
 
   env.amount: 2
-  train:
+  run:
     eval_every: 1e4
-    log_every: 1e3
+    log_every: 20
     train_fill: 100
     eval_fill: 100
     train_every: 16
   tf.precision: float32
   replay_chunk: 16
+  replay_fixed: {slots: 32}
   rssm.deter: 128
   rssm.units: 128
   rssm.stoch: 8
   .*\.cnn_depth$: 16
-  .*\.wd: 0.0
+  .*\.wd$: 0.0
 
 debug:
 
-  env.length: 100
-  env.restart: False
-  env.amount: 2
-  train:
+  tf: {platform: gpu, jit: False}
+  env: {length: 100, restart: False, amount: 2, checks: True}
+  run:
     eval_every: 300
-    log_every: 300
+    log_every: 10
     train_fill: 100
     eval_fill: 100
-    train_steps: 1
-    train_every: 30
-  batch_size: 8
+  replay_fixed: {slots: 32}
   replay_size: 500
+  batch_size: 8
   replay_chunk: 12
   encoder.cnn_depth: 16
   decoder.cnn_depth: 16
   rssm: {units: 64, stoch: 8, classes: 8}
   .*\.layers: 2
   .*\.units: 64
-  .*\.wd: 0.0
-  tf: {platform: gpu, jit: False}
+  .*\.wd$: 0.0

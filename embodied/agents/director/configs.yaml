@@ -8,9 +8,10 @@ defaults:
   env: {amount: 1, parallel: none, daemon: False, repeat: 1, size: [64, 64], camera: -1, gray: False, length: 0, discretize: 0, lives: False, sticky: True, episodic: True, restart: True, again: False, termination: False, weaker: 1.0, seed: 0}
   replay: fixed
   replay_size: 1e6
-  replay_fixed: {length: 64, prio_starts: 0.0, prio_ends: 1.0, sync: 0}
-  replay_consec: {length: 64, sync: 0}
-  replay_prio: {length: 64, prio_starts: 0.0, prio_ends: 1.0, sync: 0, fraction: 0.1, softmax: False, temp: 1.0, constant: 0.0, exponent: 0.5}
+  replay_chunk: 64
+  replay_fixed: {prio_starts: 0.0, prio_ends: 1.0, sync: 0}
+  replay_consec: {sync: 0}
+  replay_prio: {prio_starts: 0.0, prio_ends: 1.0, sync: 0, fraction: 0.1, softmax: False, temp: 1.0, constant: 0.0, exponent: 0.5}
   tf: {jit: True, platform: gpu, precision: 16, debug_nans: False, logical_gpus: 0, dist_dataset: False, dist_policy: False, tensorfloat: True, placement: False, growth: True}
   eval_dir: ''
   filter: '.*'
@@ -36,7 +37,7 @@ defaults:
     sync_every: 180
 
   # Agent
-  task_behavior: MultiHierarchy
+  task_behavior: Hierarchy
   expl_behavior: None
   batch_size: 16
   transform_rewards: off
@@ -67,7 +68,7 @@ defaults:
   actor_dist_disc: onehot
   actor_dist_cont: normal
   episodic: True
-  discount: 0.99  # TODO
+  discount: 0.99
   imag_discount: 0.99
   imag_horizon: 16
   imag_unroll: True
@@ -79,11 +80,11 @@ defaults:
   slow_target: True
   slow_target_update: 100
   slow_target_fraction: 1.0
-  actent: {impl: mult, scale: 3e-3, target: 0.5, min: 1e-5, max: 1e2, vel: 0.1}  # TODO: was 0.4
+  actent: {impl: mult, scale: 3e-3, target: 0.5, min: 1e-5, max: 1e2, vel: 0.1}
   actent_norm: True
   actent_perdim: True
   advnorm: {impl: mean_std, decay: 0.99, max: 1e8}
-  retnorm: {impl: std, decay: 0.999, max: 1e2}  # TODO: tune retnorm.max
+  retnorm: {impl: std, decay: 0.999, max: 1e2}
   scorenorm: {impl: off, decay: 0.99, max: 1e8}
   adv_slow_critic: True
   pengs_qlambda: False
@@ -92,18 +93,18 @@ defaults:
 
   # HRL
   env_skill_duration: 8
-  train_skill_duration: 8  # 16
+  train_skill_duration: 8
   skill_shape: [8, 8]
-  manager_rews: {extr: 1.0, expl: 0.1, goal: 0.0}  # TODO: expl 0.5
-  worker_rews: {extr: 0.0, expl: 0.0, goal: 1.0}  # TODO: expl 0.1
+  manager_rews: {extr: 1.0, expl: 0.1, goal: 0.0}
+  worker_rews: {extr: 0.0, expl: 0.0, goal: 1.0}
   worker_inputs: [deter, stoch, goal]
   worker_report_horizon: 64
   skill_proposal: manager
   goal_proposal: replay
-  goal_reward: cosine_max  # normed_inner
-  rev: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [deter]}
-  revopt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
-  goal_feat: [deter]
+  goal_reward: cosine_max
+  # rev: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [deter]}
+  # revopt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
+  # goal_feat: [deter]
   goal_encoder: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [goal]}
   goal_decoder: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
   worker_goals: [manager]
@@ -119,27 +120,27 @@ defaults:
   manager_dist: onehot
   manager_grad: reinforce
   manager_actent: 0.5
-  presumptive: 0.0
-  expl_switch: 0  # 100
+  # presumptive: 0.0
+  # expl_switch: 0  # 100
   adver_impl: squared  # elbo_scaled
   manager_delta: False
-  manager_delta_max: 0.0
-  worker_delta: False
-  rsg: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, unimix: 0.0, inputs: [deter, goal]}
-  rsg_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
-  dsg: {layers: 4, units: 512, act: elu, norm: layer, dist: binary, outscale: 0.1, unimix: 0.0, inputs: [deter, goal]}
-  dsg_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
-  jpy: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, unimix: 0.0, inputs: [deter, goal]}
-  jpy_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
-  manager_imag_horizon: 16
-  expl_when_buffer: 1e4
-  expl_when_frac: 0.1
-  expl_when_every: 50
+  # manager_delta_max: 0.0
+  # worker_delta: False
+  # rsg: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, unimix: 0.0, inputs: [deter, goal]}
+  # rsg_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
+  # dsg: {layers: 4, units: 512, act: elu, norm: layer, dist: binary, outscale: 0.1, unimix: 0.0, inputs: [deter, goal]}
+  # dsg_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
+  # jpy: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, unimix: 0.0, inputs: [deter, goal]}
+  # jpy_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
+  # manager_imag_horizon: 16
+  # expl_when_buffer: 1e4
+  # expl_when_frac: 0.1
+  # expl_when_every: 50
   goal_kl: True
-  partial_samples: 128
-  partial_eps: 1e-4
-  partial_normalize: True
-  partial_mask: var
+  # partial_samples: 128
+  # partial_eps: 1e-4
+  # partial_normalize: True
+  # partial_mask: var
 
   # Exploration
   expl_rewards: {extr: 0.0, disag: 0.0, vae: 0.0, ctrl: 0.0, pbe: 0.0}
@@ -177,7 +178,6 @@ dmlab:
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
   env.repeat: 4
   train.steps: 5e7
-  # env: {amount: 1, parallel: process}
   train.train_every: 16
 
 atari:
@@ -185,7 +185,7 @@ atari:
   task: atari_pong
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
-  env: {gray: True, repeat: 4}  # amount: 1, parallel: process}
+  env: {gray: True, repeat: 4}
   train.steps: 5e7
   train.train_every: 16
 
@@ -213,51 +213,12 @@ dmc_proprio:
   env.repeat: 1
   train.train_every: 2
 
-loconav_ant:
+loconav:
 
   task: loconav_ant_maze_m
   encoder: {mlp_keys: '.*(joints|sensors|actuator|effectors|appendages|bodies|height|zaxis).*', cnn_keys: 'image'}
   decoder: {mlp_keys: '.*(joints|sensors|actuator|effectors|appendages|bodies|height|zaxis).*', cnn_keys: 'image'}
   train.log_keys_max: '^log_.*'
-
-loconav_quadruped:
-
-  task: loconav_quadruped_maze_m
-  encoder: {mlp_keys: '.*(joints|act|sensors).*', cnn_keys: 'image'}
-  decoder: {mlp_keys: '.*(joints|act|sensors).*', cnn_keys: 'image'}
-  train.log_keys_max: '^log_.*'
-
-hiro:
-
-  task: hiro_AntPush
-  run: train_hiro
-  env.parallel: process
-  env.length: 500
-  encoder: {mlp_keys: '.*(vector|goal|reward).*', cnn_keys: '$^'}
-  decoder: {mlp_keys: '.*(vector|goal|reward).*', cnn_keys: '$^'}
-
-hrlgrid:
-
-  task: hrlgrid_16
-  encoder: {mlp_keys: '$^', cnn_keys: 'image'}
-  decoder: {mlp_keys: '$^', cnn_keys: 'image'}
-
-small:
-
-  env.amount: 2
-  train:
-    eval_every: 1e4
-    log_every: 1e3
-    train_fill: 100
-    eval_fill: 100
-    train_every: 16
-  tf.precision: 32
-  replay_.*\.length: 12
-  rssm.deter: 128
-  rssm.units: 128
-  rssm.stoch: 8
-  .*\.cnn_depth$: 16
-  .*\.wd: 0.0
 
 debug:
 
@@ -274,7 +235,7 @@ debug:
     log_timings: False
   batch_size: 8
   replay_size: 500
-  replay_.*\.length: 12
+  replay_chunk: 12
   encoder.cnn_depth: 16
   decoder.cnn_depth: 16
   rssm: {units: 64, stoch: 8, classes: 8}

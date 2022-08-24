@@ -10,14 +10,14 @@ import embodied
 class FixedLength(embodied.Replay):
 
   def __init__(
-      self, store, chunk=64, length=0, prio_starts=0.0, prio_ends=1.0, sync=0,
+      self, store, chunk=64, slots=512, prio_starts=0.0, prio_ends=1.0, sync=0,
       minlen=0):
     self.store = store
     self.chunk = chunk
-    self.minlen = minlen
-    self.length = length
+    self.slots = slots
     self.prio_starts = prio_starts
     self.prio_ends = prio_ends
+    self.minlen = minlen
     self.random = np.random.RandomState(seed=0)
     self.ongoing = collections.defaultdict(
         lambda: collections.defaultdict(list))
@@ -36,15 +36,15 @@ class FixedLength(embodied.Replay):
     return {f'replay_{k}': v for k, v in self.store.stats().items()}
 
   def add(self, tran, worker=0):
-    if tran['is_first']:
+    if tran['is_first'] and not self.slots:
       self.ongoing[worker].clear()
     ep = self.ongoing[worker]
     [ep[k].append(v) for k, v in tran.items()]
-    if tran['is_last'] or (self.length and len(ep['is_first']) >= self.length):
+    if (len(ep['is_first']) >= self.slots) if self.slots else tran['is_last']:
       self.add_traj(self.ongoing.pop(worker))
 
   def add_traj(self, traj):
-    length = len(next(iter(traj.values())))
+    length = len(traj['is_first'])
     if length < self.chunk or length < self.minlen:
       print(f'Skipping short trajectory of length {length}.')
       return
@@ -66,7 +66,7 @@ class FixedLength(embodied.Replay):
     if not keys:
       return None
     traj = self.store[keys[self.random.randint(0, len(keys))]]
-    total = len(next(iter(traj.values())))
+    total = len(traj['is_first'])
     lower = 0
     upper = total - self.chunk + 1
     if self.prio_starts:

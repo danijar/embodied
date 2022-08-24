@@ -1,4 +1,12 @@
+import builtins
+
 import numpy as np
+
+try:
+  import rich.console
+  console = rich.console.Console()
+except ImportError:
+  console = None
 
 
 CONVERSION = {
@@ -10,8 +18,7 @@ CONVERSION = {
 
 
 def convert(value):
-  if not isinstance(value, np.ndarray):
-    value = np.array(value)
+  value = np.asarray(value)
   if value.dtype not in CONVERSION.values():
     for src, dst in CONVERSION.items():
       if np.issubdtype(value.dtype, src):
@@ -21,3 +28,11 @@ def convert(value):
     else:
       raise TypeError(f"Object '{value}' has unsupported dtype: {value.dtype}")
   return value
+
+
+def print(value):
+  global console
+  if console:
+    console.print(value)
+  else:
+    builtins.print(value)

@@ -159,7 +159,7 @@ class Optimizer(Module):
     if warmup:
       self._lr = lambda: lr * tf.clip_by_value(
           self._step.astype(tf.float32) / warmup, 0.0, 1.0)
-    self._mixed = (COMPUTE_DTYPE == tf.float16)
+    self._mixed = (COMPUTE_DTYPE != tf.float32)
     if self._mixed:
       self._grad_scale = tf.Variable(1e4, trainable=False, dtype=tf.float32)
       self._good_steps = tf.Variable(0, trainable=False, dtype=tf.int64)
@@ -176,7 +176,7 @@ class Optimizer(Module):
     return variables
 
   def __call__(self, tape, loss, modules):
-    assert loss.dtype is tf.float32, (self._name, loss.dtype)
+    assert loss.dtype == tf.float32, (self._name, loss.dtype)
     assert len(loss.shape) == 0, (self._name, loss.shape)
     metrics = {}
 

@@ -9,6 +9,8 @@ class Gym(embodied.Env):
 
   def __init__(self, env, obs_key='image', act_key='action'):
     self._env = gym.make(env) if isinstance(env, str) else env
+    self._obs_dict = hasattr(self._env.observation_space, 'spaces')
+    self._act_dict = hasattr(self._env.action_space, 'spaces')
     self._obs_key = obs_key
     self._act_key = act_key
     self._done = True
@@ -21,8 +23,7 @@ class Gym(embodied.Env):
   @functools.cached_property
   def obs_space(self):
     if self._obs_dict:
-      spaces = self._env.observation_space.spaces.copy()
-      spaces = self._flatten(spaces)
+      spaces = self._flatten(self._env.observation_space.spaces)
     else:
       spaces = {self._obs_key: self._env.observation_space}
     spaces = {k: self._convert(v) for k, v in spaces.items()}
@@ -37,8 +38,7 @@ class Gym(embodied.Env):
   @functools.cached_property
   def act_space(self):
     if self._act_dict:
-      spaces = self._env.action_space.spaces.copy()
-      spaces = self._flatten(spaces)
+      spaces = self._flatten(self._env.action_space.spaces)
     else:
       spaces = {self._act_key: self._env.action_space}
     spaces = {k: self._convert(v) for k, v in spaces.items()}
@@ -65,7 +65,7 @@ class Gym(embodied.Env):
     if not self._obs_dict:
       obs = {self._obs_key: obs}
     obs = self._flatten(obs)
-    obs = {k: np.array(v) for k, v in obs.items()}
+    obs = {k: np.asarray(v) for k, v in obs.items()}
     obs.update(
         reward=np.float32(reward),
         is_first=is_first,

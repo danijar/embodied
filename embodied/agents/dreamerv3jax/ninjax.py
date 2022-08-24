@@ -2,47 +2,289 @@ import contextlib
 import functools
 import inspect
 import re
+from functools import partial as bind
 
 import jax
 import jax.numpy as jnp
 
 
-STATE = [None]
+###############################################################################
+# State
+###############################################################################
+
+
+# When running an impure function that accesses state, it will find the state
+# in this global variable. The pure() wrapper populates this global variable
+# with the provided state, calls the inner function, and then the takes the
+# resulting state out of the global variable to return it back to the user.
+CONTEXT = [None]
+
+
+class Context(dict):
+
+  def __init__(self, entries, rng, create, modify, ignore, reserve):
+    super().__init__(entries)
+    self.create = create  # Allow creating new state entries.
+    self.modify = modify  # Allow modifying existing state entries.
+    self.ignore = ignore  # Ignore modifications to existing state entries.
+    self.rng = rng
+    self.reserve = reserve
+
+  def update(self, entries):
+    for key, value in dict(entries).items():
+      self[key] = value
+
+  def __setitem__(self, key, value):
+    if not self.modify:
+      raise RuntimeError(
+          'Cannot modify state entries here. If you want to modify '
+          'state inside of scan() set modify=True.')
+    if self.ignore and key in self:
+      return  # Do not overwrite existing entries.
+    if not self.create and key not in self:
+      raise RuntimeError('Can only create state entries during first call.')
+    super().__setitem__(key, value)
+
+
+def pure(fun, nested=False):
+  """Wrap an impure function that uses global state to explicitly pass the
+  state in and out. The result is a pure function that is composable with JAX
+  transformation. The pure function can be used as follows:
+  `out, state = fun(state, rng, *args, **kwargs)`."""
+  def purified(
+      state, rng, *args, create=None, modify=None, ignore=None, **kwargs):
+    global CONTEXT
+    if CONTEXT[0]:
+      create = create if create is not None else CONTEXT[0].create
+      modify = modify if modify is not None else CONTEXT[0].modify
+      ignore = ignore if ignore is not None else CONTEXT[0].ignore
+      assert CONTEXT[0].create or not create, 'Parent context disabled create.'
+      assert CONTEXT[0].modify or not modify, 'Parent context disabled modify.'
+      assert not CONTEXT[0].ignore or ignore, 'Parent context enabled ignore.'
+    else:
+      create = create if create is not None else True
+      modify = modify if modify is not None else True
+      ignore = ignore if ignore is not None else False
+    if not isinstance(state, dict):
+      raise ValueError('Must provide a dict as state.')
+    if CONTEXT[0] and (not nested):
+      raise RuntimeError('If you want to nest run() calls, use nested=True.')
+    before = CONTEXT[0]
+    try:
+      CONTEXT[0] = Context(state.copy(), rng, create, modify, ignore, [])
+      out = fun(*args, **kwargs)
+      state = dict(CONTEXT[0])
+      return out, state
+    finally:
+      CONTEXT[0] = before
+  purified.pure = True
+  return purified
+
+
+def context():
+  """Access and modify the global context from within an impure function. For
+  advanced users only. Prefer to use module methods to access and modify state
+  and rng() to get the next RNG key."""
+  global CONTEXT
+  if CONTEXT[0] is None:
+    raise RuntimeError('Wrap impure functions in pure() before running them.')
+  return CONTEXT[0]
+
+
+@jax.named_scope('rng')
+def rng(amount=None, reserve=16):
+  """Split the global RNG key and return a new local key."""
+  ctx = context()
+  if amount:
+    keys = jax.random.split(ctx.rng, amount + 1)
+    ctx.rng = keys[0]
+    return keys[1:]
+  else:
+    if not ctx.reserve:
+      keys = jax.random.split(ctx.rng, reserve)
+      ctx.rng = keys[0]
+      ctx.reserve = list(keys[1:])
+    return ctx.reserve.pop(0)
+
+
+def creating():
+  """Indicates whether the program is currently allowed to create state
+  entries. Can use used for initialization logic that should be excluded from
+  compiled functions."""
+  return context().create
+
+
+###############################################################################
+# Transformations
+###############################################################################
+
+
+@jax.named_scope('grad')
+def grad(fun, keys, has_aux=False):
+  """Compute the gradient of an impure function with respect to the specified
+  state entries or modules. The transformed function returns a tuple containing
+  the computed value, selected state entries, their gradients, and if
+  applicable auxiliary outputs of the function."""
+  keys = keys if hasattr(keys, '__len__') else (keys,)
+  if getattr(fun, 'pure', False):
+    raise ValueError('Use plain jax.grad() for pure functions.')
+  if not has_aux:
+    fun = lambda *args, _fun=fun, **kwargs: (_fun(*args, *kwargs), {})
+  fun = pure(fun, nested=True)
+  def forward(x1, x2, rng, *args, **kwargs):
+    (y, aux), state = fun({**x1, **x2}, rng, *args, create=False, **kwargs)
+    return y, (aux, state)
+  backward = jax.value_and_grad(forward, has_aux=True)
+  @functools.wraps(backward)
+  def wrapper(*args, **kwargs):
+    _prerun(fun, *args, **kwargs)
+    assert all(isinstance(x, (str, Module)) for x in keys)
+    strs = [x for x in keys if isinstance(x, str)]
+    mods = [x for x in keys if isinstance(x, Module)]
+    for mod in mods:
+      strs += mod.getm()
+    x1 = {k: v for k, v in context().items() if k in strs}
+    x2 = {k: v for k, v in context().items() if k not in strs}
+    (y, (aux, state)), dx = backward(x1, x2, rng(), *args, **kwargs)
+    context().update(state)
+    return (y, x1, dx, aux) if has_aux else (y, x1, dx)
+  return wrapper
+
+
+def jit(fun, static=None, **kwargs):
+  """Compiles a pure function for fast execution. Only the first call of the
+  function is allowed to create state entries."""
+  if not getattr(fun, 'pure', False):
+    raise ValueError('Use pure() before applying jit().')
+  static = static or ()
+
+  @bind(jax.jit, static_argnums=[0], **kwargs)
+  def init(statics, rng, *args, **kwargs):
+    # Return only state so JIT can remove dead code for fast initialization.
+    s = fun({}, rng, *args, ignore=True, **kwargs)[1]
+    return s
+
+  @bind(jax.jit, static_argnums=[0], **kwargs)
+  def apply(statics, state, rng, *args, **kwargs):
+    return fun(state, rng, *args, create=False, **dict(statics), **kwargs)
+
+  @functools.wraps(fun)
+  def wrapper(state, rng, *args, **kwargs):
+    if any([name not in kwargs for name in static]):
+      raise ValueError('Please pass all static arguments by keyword.')
+    state = state.copy()
+    statics = tuple(sorted([(k, v) for k, v in kwargs.items() if k in static]))
+    kwargs = {k: v for k, v in kwargs.items() if k not in static}
+    if not hasattr(wrapper, 'keys'):
+      created = init(statics, rng, *args, **kwargs)
+      wrapper.keys = set(created.keys())
+      for key, value in created.items():
+        if key not in state:
+          state[key] = value
+    selected = {k: v for k, v in state.items() if k in wrapper.keys}
+    out, updated = apply(statics, selected, rng, *args, **kwargs)
+    return out, {**state, **updated}
+  return wrapper
+
+
+def pmap(fun, axis_name=None, static=None, **kwargs):
+  """Compiles n pure function for fast execution across multiple devices. Only
+  the first call of the function is allowed to create state entries."""
+  if not getattr(fun, 'pure', False):
+    raise ValueError('Use pure() before applying jit().')
+  static = static or ()
+
+  @bind(jax.pmap, axis_name=axis_name, static_broadcasted_argnums=[0], **kwargs)
+  def init(statics, rng, *args, **kwargs):
+    # Return only state so JIT can remove dead code for fast initialization.
+    return fun({}, rng, *args, ignore=True, **kwargs)[1]
+
+  @bind(jax.pmap, axis_name=axis_name, static_broadcasted_argnums=[0], **kwargs)
+  def apply(statics, state, rng, *args, **kwargs):
+    return fun(state, rng, *args, create=False, **dict(statics), **kwargs)
+
+  @functools.wraps(fun)
+  def wrapper(state, rng, *args, **kwargs):
+    if any([name not in kwargs for name in static]):
+      raise ValueError('Please pass all static arguments by keyword.')
+    state = state.copy()
+    statics = tuple(sorted([(k, v) for k, v in kwargs.items() if k in static]))
+    kwargs = {k: v for k, v in kwargs.items() if k not in static}
+    if not hasattr(wrapper, 'keys'):
+      created = init(statics, rng, *args, **kwargs)
+      wrapper.keys = set(created.keys())
+      for key, value in created.items():
+        if key not in state:
+          state[key] = value
+    selected = {k: v for k, v in state.items() if k in wrapper.keys}
+    out, updated = apply(statics, selected, rng, *args, **kwargs)
+    return out, {**state, **updated}
+  return wrapper
+
+
+@jax.named_scope('cond')
+def cond(pred, true_fun, false_fun, *operands):
+  true_fun = pure(true_fun, nested=True)
+  false_fun = pure(false_fun, nested=True)
+  _prerun(true_fun, *operands)
+  _prerun(false_fun, *operands)
+  out, state = jax.lax.cond(
+      pred,
+      lambda state, rng1, rng2, *args: true_fun(state, rng1, *args),
+      lambda state, rng1, rng2, *args: false_fun(state, rng2, *args),
+      dict(context()), *rng(2), *operands)
+  context().update(state)
+  return out
+
+
+@jax.named_scope('scan')
+def scan(fun, carry, xs, reverse=False, unroll=1, modify=False):
+  fun = pure(fun, nested=True)
+  _prerun(fun, carry, jax.tree_util.tree_map(lambda x: x[0], xs))
+  length = len(jax.tree_util.tree_leaves(xs)[0])
+  rngs = rng(length)
+  if modify:
+    def inner(carry, x):
+      carry, state = carry
+      x, rng = x
+      (carry, y), state = fun(state, rng, carry, x, create=False)
+      return (carry, state), y
+    (carry, state), ys = jax.lax.scan(
+        inner, (carry, dict(context())), (xs, rngs), length, reverse, unroll)
+    context().update(state)
+  else:
+    def inner(carry, x):
+      x, rng = x
+      (carry, y), state = fun(
+          dict(context()), rng, carry, x, create=False, modify=False)
+      return carry, y
+    carry, ys = jax.lax.scan(inner, carry, (xs, rngs), length, reverse, unroll)
+  return carry, ys
+
+
+@jax.named_scope('_prerun')
+def _prerun(fun, *args, **kwargs):
+  if not context().create:
+    return
+  discarded, state = fun(dict(context()), rng(), *args, ignore=True, **kwargs)
+  jax.tree_util.tree_map(
+      lambda x: hasattr(x, 'delete') and x.delete(), discarded)
+  context().update(state)
+
+
+
+###############################################################################
+# Modules
+###############################################################################
+
+
 SCOPE = ['']
-RNG = [None]
 
 
-def run(fn, state, rng, *args, **kwargs):
-  """Run a function or method that uses the global state or the global RNG
-  key. The new global state and function output are returned."""
-  global STATE
-  if state is None:
-    raise ValueError('Must provide a dict as state.')
-  if STATE[0] is not None:
-    raise RuntimeError('You cannot nest run() calls.')
-  STATE[0] = state
-  RNG[0] = rng
-  out = fn(*args, **kwargs)
-  STATE[0] = None
-  RNG[0] = None
-  return out, state
-
-
-def state():
-  """Access the global state tree. You can modify the state tree inplace."""
-  global STATE
-  if STATE[0] is None:
-    raise RuntimeError('Run stateful functions with run().')
-  return STATE[0]
-
-
-def rng():
-  """Split the global RNG key and return a local key."""
-  global RNG
-  if RNG[0] is None:
-    raise RuntimeError('Run functions that use the global RNG key with run().')
-  RNG[0], rng = jax.random.split(RNG[0])
-  return rng
+def reset():
+  """Clean up previously used scope names to provide a clean starting point for
+  unit tests."""
+  ModuleMeta.COUNTERS.clear()
 
 
 @contextlib.contextmanager
@@ -113,7 +355,8 @@ def _scope_method(method):
   @functools.wraps(method)
   def wrapper(self, *args, **kwargs):
     with scope(self._path, absolute=True):
-      return method(self, *args, **kwargs)
+      with jax.named_scope(self._path.split('/')[-1]):
+        return method(self, *args, **kwargs)
   return wrapper
 
 
@@ -131,37 +374,34 @@ class Module(object, metaclass=ModuleMeta):
     return self._path
 
   def get(self, name, *args, **kwargs):
-    # TODO: Add separate functions for accessing modules and numeric state.
     """Retrieve or create a state entry that belongs to this module."""
-    state_ = state()
     path = self.path + '/' + name
     if name in self._submodules:
       return self._submodules[name]
-    if path in state_:
-      return state_[path]
+    if path in context():
+      return context()[path]
     ctor, *args = args
     if 'name' in inspect.signature(ctor).parameters:
       kwargs['name'] = name
     value = ctor(*args, **kwargs)
     flat, _ = jax.tree_util.tree_flatten(value)
     if all(isinstance(x, jnp.ndarray) for x in flat):
-      state_[path] = value
+      context()[path] = value
     else:
       self._submodules[name] = value
     return value
 
   def put(self, name, value):
     """Update or create a single state entry that belongs to this module."""
-    self.set_state({self.path + '/' + name: value})
+    self.putm({self.path + '/' + name: value})
     return value
 
-  def get_state(self, pattern=r'.*', allow_empty=False):
+  def getm(self, pattern=r'.*', allow_empty=False):
     """Read the state entries of this module, optionally filtered by regex."""
-    state_ = state()
     pattern = re.compile(pattern)
     prefix = self.path + '/'
     results = {}
-    for key, value in state_.items():
+    for key, value in context().items():
       if not key.startswith(prefix):
         continue
       if pattern.match(key[len(prefix):]):
@@ -170,13 +410,13 @@ class Module(object, metaclass=ModuleMeta):
       raise KeyError(f'Pattern {pattern} matched no state keys.')
     return results
 
-  def set_state(self, mapping):
+  def putm(self, mapping):
     """Update or create multiple state entries that belong to this module."""
     prefix = self.path + '/'
     for key in mapping:
       if not key.startswith(prefix):
         raise KeyError(f'Key {key} does not belong to module {self.path}.')
-    state().update(mapping)
+    context().update(mapping)
 
 
 class Variable(Module):
@@ -193,23 +433,9 @@ class Variable(Module):
     return self.put('value', value)
 
 
-def grad(fn, keys, has_aux=False):
-  """Compute the value and gradient of a function with respect to the state
-  entries of the provided keys."""
-  state_ = state()
-  before = state_.copy()
-  def inner(x, *args, **kwargs):
-    state_.update(x)
-    out = fn(*args, **kwargs)
-    return out
-  grad_fn = jax.value_and_grad(inner, has_aux=has_aux)
-  @functools.wraps(grad_fn)
-  def wrapper(*args, **kwargs):
-    x = {k: state_[k] for k in keys}
-    out = grad_fn(x, *args, **kwargs)
-    state_.update(before)
-    return out
-  return wrapper
+###############################################################################
+# Integrations
+###############################################################################
 
 
 class HaikuModule(Module):
@@ -240,11 +466,11 @@ class OptaxModule(Module):
   def __init__(self, ctor, *args, **kwargs):
     self.opt = ctor(*args, **kwargs)
 
-  def __call__(self, params, loss, *args, **kwargs):
+  def __call__(self, loss, keys, *args, **kwargs):
     import optax
-    loss, grads = grad(loss, params.keys())(*args, **kwargs)
+    loss, params, grads = grad(loss, keys)(*args, **kwargs)
     optstate = self.get('state', self.opt.init, params)
     updates, optstate = self.opt.update(grads, optstate)
     self.put('state', optstate)
-    state().update(optax.apply_updates(params, updates))
+    context().update(optax.apply_updates(params, updates))
     return {'loss': loss.mean(), 'grad_norm': optax.global_norm(grads)}

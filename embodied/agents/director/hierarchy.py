@@ -11,7 +11,7 @@ from . import nets
 from . import tfutils
 
 
-class MultiHierarchy(tfutils.Module):
+class Hierarchy(tfutils.Module):
 
   def __init__(self, wm, act_space, config):
     self.wm = wm
@@ -92,15 +92,6 @@ class MultiHierarchy(tfutils.Module):
     goal = sg(switch(carry['goal'], new_goal))
     delta = goal - self.feat(latent).astype(tf.float32)
     dist = self.worker.actor(sg({**latent, 'goal': goal, 'delta': delta}))
-
-    if self.config.expl_switch:
-      act_goal = dist.sample()
-      act_expl = self.explorer.actor(latent).sample()
-      exploring = (carry['step'] % (2 * self.config.expl_switch)) < (
-          self.config.expl_switch)
-      act = tf.where(exploring[:, None], act_expl, act_goal)
-      dist = tfd.Deterministic(act)
-
     outs = {'action': dist}
     if 'image' in self.wm.heads['decoder'].shapes:
       outs['log_goal'] = self.wm.heads['decoder']({
@@ -405,10 +396,7 @@ class MultiHierarchy(tfutils.Module):
     enc = self.enc({'goal': feat, 'context': context})
     dec = self.dec({'skill': enc.sample(), 'context': context})
     ll = dec.log_prob(feat)
-    if self.config.goal_kl:
-      kl = tfd.kl_divergence(enc, self.prior)
-    else:
-      kl = 0.0
+    kl = tfd.kl_divergence(enc, self.prior)
     if self.config.adver_impl == 'abs':
       return tf.abs(dec.mode() - feat).mean(-1)[1:]
     elif self.config.adver_impl == 'squared':
@@ -493,11 +481,7 @@ class MultiHierarchy(tfutils.Module):
         worker, start, self.config.worker_report_horizon)
     # Decoder into images.
     initial = decoder(start)
-    if self.config.goal_feat == ('deter', 'stoch'):
-      n = self.config.rssm.deter
-      target = decoder({'deter': goal[..., :n], 'stoch': goal[..., n:]})
-    elif self.config.goal_feat == ('deter',):
-      target = decoder({'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal)})
+    target = decoder({'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal)})
     rollout = decoder(traj)
     # Stich together into videos.
     videos = {}

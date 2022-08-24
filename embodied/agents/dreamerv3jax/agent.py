@@ -7,7 +7,7 @@ import numpy as np
 import ruamel.yaml as yaml
 from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
-sg = lambda x: jax.tree_map(jax.lax.stop_gradient, x)
+sg = lambda x: jax.tree_util.tree_map(jax.lax.stop_gradient, x)
 
 import logging
 logger = logging.getLogger()
@@ -26,8 +26,8 @@ from . import ninjax as nj
 @jaxagent.Wrapper
 class Agent(nj.Module):
 
-  configs = yaml.YAML(typ='safe').load((
-      embodied.Path(sys.argv[0]).parent / 'configs.yaml').read())
+  configs = yaml.YAML(typ='safe').load(
+      (embodied.Path(__file__).parent / 'configs.yaml').read())
 
   def __init__(self, obs_space, act_space, step, config):
     self.config = config
@@ -57,7 +57,7 @@ class Agent(nj.Module):
   def policy(self, obs, state=None, mode='train'):
     self.config.jax.jit and print('Tracing policy function.')
     if state is None:
-      state = self._initial_policy_state(obs)
+      state = self.initial_policy_state(obs)
     obs = self.preprocess(obs)
     latent, task_state, expl_state, action = state
     embed = self.wm.encoder(obs)
@@ -82,12 +82,12 @@ class Agent(nj.Module):
     self.config.jax.jit and print('Tracing train function.')
     metrics = {}
     if state is None:
-      state = self._initial_train_state(data)
+      state = self.initial_train_state(data)
     data = self.preprocess(data)
     state, wm_outs, mets = self.wm.train(data, state)
     metrics.update(mets)
     context = {**data, **wm_outs['post']}
-    start = jax.tree_map(
+    start = jax.tree_util.tree_map(
         lambda x: x.reshape([-1] + list(x.shape[2:])), context)
     _, mets = self.task_behavior.train(self.wm.imagine, start, context)
     metrics.update(mets)
@@ -118,8 +118,9 @@ class Agent(nj.Module):
         workers=8, prefetch=4)
 
   def save(self):
-    data = jax.tree_util.tree_flatten(jax.tree_map(jnp.asarray, self.state))[0]
-    data = [np.array(x) for x in data]
+    data = jax.tree_util.tree_flatten(jax.tree_util.tree_map(
+        jnp.asarray, self.state))[0]
+    data = [np.asarray(x) for x in data]
     return data
 
   def load(self, state):
@@ -131,7 +132,7 @@ class Agent(nj.Module):
       if key.startswith('log_') or key in ('key',):
         continue
       if len(value.shape) > 3 and value.dtype == jnp.uint8:
-        value = value.astype(jnp.float32) / 255.0
+        value = jaxutils.cast_to_compute(value) / 255.0
       else:
         value = value.astype(jnp.float32)
       obs[key] = value
@@ -159,7 +160,6 @@ class WorldModel(nj.Module):
     self.wmkl = jaxutils.AutoAdapt((), **self.config.wmkl, inverse=False)
 
   def train(self, data, state=None):
-    self.loss(data)  # Create variables.
     modules = [self.encoder, self.rssm, *self.heads.values()]
     mets, (state, outs, metrics) = self.opt(
         modules, self.loss, data, state, training=True, has_aux=True)
@@ -410,7 +410,7 @@ class VFunction(nj.Module):
   def update_slow(self):
     if not self.config.slow_target:
       return
-    assert self.net.get_state()
+    assert self.net.getm()
     updates = self.get('updates', lambda: jnp.zeros((), jnp.int32))
     period = self.config.slow_target_update
     fraction = self.config.slow_target_fraction
@@ -419,8 +419,8 @@ class VFunction(nj.Module):
     mix = jnp.clip(1.0 * need_init + fraction * need_update, 0, 1)
     source = {
         k.replace('/net/', '/target_net/'): v
-        for k, v in self.net.get_state().items()}
-    self.target_net.set_state(jax.tree_map(
+        for k, v in self.net.getm().items()}
+    self.target_net.putm(jax.tree_util.tree_map(
         lambda s, d: mix * s + (1 - mix) * d,
-        source, self.target_net.get_state()))
+        source, self.target_net.getm()))
     self.put('updates', updates + 1)

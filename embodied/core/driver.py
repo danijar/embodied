@@ -2,7 +2,7 @@ import collections
 
 import numpy as np
 
-from .convert import convert
+from .basics import convert
 
 
 class Driver:

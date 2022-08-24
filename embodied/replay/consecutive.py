@@ -9,9 +9,10 @@ import embodied
 
 class Consecutive(embodied.Replay):
 
-  def __init__(self, store, chunk=64, randomize=False, sync=0):
+  def __init__(self, store, chunk=64, slots=512, randomize=False, sync=0):
     self.store = store
     self.chunk = chunk
+    self.slots = slots
     # TODO: Initial time step is too unlikely right now I think.
     self.randomize = randomize
     self.random = np.random.RandomState(seed=0)
@@ -32,11 +33,11 @@ class Consecutive(embodied.Replay):
     return {f'replay_{k}': v for k, v in self.store.stats().items()}
 
   def add(self, tran, worker=0):
-    if tran['is_first']:
+    if tran['is_first'] and not self.slots:
       self.ongoing[worker].clear()
-    episode = self.ongoing[worker]
-    [episode[k].append(v) for k, v in tran.items()]
-    if tran['is_last']:
+    ep = self.ongoing[worker]
+    [ep[k].append(v) for k, v in tran.items()]
+    if (len(ep['is_first']) >= self.slots) if self.slots else tran['is_last']:
       self.add_traj(self.ongoing.pop(worker))
 
   def add_traj(self, traj):

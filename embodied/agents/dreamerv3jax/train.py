@@ -32,8 +32,15 @@ def main(argv=None):
   config = embodied.Flags(config).parse(other)
 
   config = config.update(logdir=str(embodied.Path(config.logdir)))
-  args = embodied.Config(logdir=config.logdir, **config.train)
-  args = args.update(expl_until=args.expl_until // config.env.repeat)
+  args = embodied.Config(logdir=config.logdir, **config.run)
+  min_fill = config.replay_fixed.slots * config.env.amount
+  args = args.update(
+      expl_until=args.expl_until // config.env.repeat,
+      train_fill=max(min_fill, args.train_fill),
+      eval_fill=max(min_fill, args.eval_fill),
+      batch_steps=config.batch_size * config.replay_chunk,
+      # train_every=config.batch_size * config.replay_chunk / args.train_ratio,
+  )
   print(config)
 
   logdir = embodied.Path(config.logdir)
@@ -41,10 +48,10 @@ def main(argv=None):
 
   outdir = logdir
   multiplier = config.env.repeat
-  if config.run == 'acting':
+  if args.script == 'acting':
     outdir /= f'worker{parsed.worker}'
     multiplier *= parsed.workers
-  elif config.run == 'learning':
+  elif args.script == 'learning':
     outdir /= 'learner'
     multiplier = 1
   logger = embodied.Logger(step, [
@@ -53,6 +60,11 @@ def main(argv=None):
       embodied.logger.JSONLOutput(outdir, 'scores.jsonl', 'episode/score'),
       embodied.logger.TensorBoardOutput(outdir),
   ], multiplier)
+  try:
+    import google3
+    logger.outputs.append(embodied.logger.XDataOutput())
+  except ImportError:
+    pass
 
   cleanup = []
   try:
@@ -62,11 +74,11 @@ def main(argv=None):
     agent = agnt.Agent(env.obs_space, env.act_space, step, config)
     cleanup.append(env)
 
-    if config.run == 'train':
+    if args.script == 'train':
       replay = make_replay(config, logdir / 'episodes')
       embodied.run.train(agent, env, replay, logger, args)
 
-    elif config.run == 'train_eval':
+    elif args.script == 'train_eval':
       eval_env = embodied.envs.load_env(
           config.task, mode='eval', logdir=logdir, **config.env)
       replay = make_replay(config, logdir / 'episodes')
@@ -75,7 +87,7 @@ def main(argv=None):
           agent, env, eval_env, replay, eval_replay, logger, args)
       cleanup.append(eval_env)
 
-    elif config.run == 'train_fixed_eval':
+    elif args.script == 'train_fixed_eval':
       if config.eval_dir:
         assert not config.train.eval_fill
         eval_replay = make_replay(config, config.eval_dir, is_eval=True)
@@ -87,18 +99,23 @@ def main(argv=None):
       embodied.run.train_fixed_eval(
           agent, env, replay, eval_replay, logger, args)
 
-    elif config.run == 'learning':
+    elif args.script == 'learning':
       env.close()
       port = parsed.learner_addr.split(':')[-1]
-      replay = eval_replay = make_replay(config, server_port=port)
+      #replay = make_replay(config, logdir / 'episodes', server_port=port)
+      replay = make_replay(config, server_port=port)
+      if config.eval_dir:
+        eval_replay = make_replay(config, config.eval_dir, is_eval=True)
+      else:
+        eval_replay = replay
       embodied.run.learning(agent, replay, eval_replay, logger, args)
 
-    elif config.run == 'acting':
+    elif args.script == 'acting':
       replay = make_replay(config, remote_addr=parsed.learner_addr)
       embodied.run.acting(agent, env, replay, logger, outdir, args)
 
     else:
-      raise NotImplementedError(config.run)
+      raise NotImplementedError(args.script)
   finally:
     for obj in cleanup:
       obj.close()

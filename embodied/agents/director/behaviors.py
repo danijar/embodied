@@ -5,10 +5,7 @@ from . import agent
 from . import expl
 from . import tfutils
 
-from .goal_hierarchy import GoalHierarchy  # noqa
-from .multi_hierarchy import MultiHierarchy  # noqa
-from .partial_hierarchy import PartialHierarchy  # noqa
-from .abstract_hierarchy import AbstractHierarchy  # noqa
+from .hierarchy import Hierarchy  # noqa
 
 
 class Greedy(tfutils.Module):

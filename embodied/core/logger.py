@@ -1,5 +1,8 @@
+import collections
 import concurrent.futures
+import datetime
 import json
+import os
 import re
 import time
 
@@ -11,22 +14,18 @@ from . import path
 class Logger:
 
   def __init__(self, step, outputs, multiplier=1):
-    self._step = step
-    self._outputs = outputs
-    self._multiplier = multiplier
+    self.step = step
+    self.outputs = outputs
+    self.multiplier = multiplier
     self._last_step = None
     self._last_time = None
     self._metrics = []
 
-  @property
-  def step(self):
-    return self._step
-
   def add(self, mapping, prefix=None):
-    step = int(self._step) * self._multiplier
+    step = int(self.step) * self.multiplier
     for name, value in dict(mapping).items():
       name = f'{prefix}/{name}' if prefix else name
-      value = np.array(value)
+      value = np.asarray(value)
       if len(value.shape) not in (0, 2, 3, 4):
         raise ValueError(
             f"Shape {value.shape} for name '{name}' cannot be "
@@ -49,12 +48,12 @@ class Logger:
         self.scalar('fps', value)
     if not self._metrics:
       return
-    for output in self._outputs:
+    for output in self.outputs:
       output(tuple(self._metrics))
     self._metrics.clear()
 
   def _compute_fps(self):
-    step = int(self._step) * self._multiplier
+    step = int(self.step) * self.multiplier
     if self._last_step is None:
       self._last_time = time.time()
       self._last_step = step
@@ -109,6 +108,7 @@ class TerminalOutput:
       print(f'[{step}]', message, flush=True)
 
   def _format_value(self, value):
+    value = float(value)
     if value == 0:
       return '0'
     elif 0.01 < abs(value) < 10000:
@@ -137,11 +137,15 @@ class JSONLOutput(AsyncOutput):
     self._logdir.mkdirs()
 
   def _write(self, summaries):
-    scalars = {k: float(v) for _, k, v in summaries if len(v.shape) == 0}
-    scalars = {k: v for k, v in scalars.items() if self._pattern.search(k)}
-    step = max(s for s, _, _, in summaries)
+    bystep = collections.defaultdict(dict)
+    for step, name, value in summaries:
+      if len(value.shape) == 0 and self._pattern.search(name):
+        bystep[step][name] = float(value)
+    lines = ''.join([
+        json.dumps({'step': step, **scalars}) + '\n'
+        for step, scalars in bystep.items()])
     with (self._logdir / self._filename).open('a') as f:
-      f.write(json.dumps({'step': step, **scalars}) + '\n')
+      f.write(lines)
 
 
 class TensorBoardOutput(AsyncOutput):
@@ -189,54 +193,72 @@ class TensorBoardOutput(AsyncOutput):
       tf.summary.image(name, video, step)
 
 
-class MlflowOutput:
+class WandBOutput:
 
-  def __init__(self, run_name=None, resume_id=None, params={}, prefix=''):
-    import os
-    run_name = run_name or os.environ.get('MLFLOW_RUN_NAME')
-    resume_id = resume_id or os.environ.get('MLFLOW_RESUME_ID')
-    self._start_or_resume(run_name, resume_id)
-    if params:
-      self._log_params(params)
-    self.prefix = prefix
+  def __init__(self, **kwargs):
+    import wandb
+    self._wandb = wandb
+    self._wandb.init(**kwargs)
 
   def __call__(self, summaries):
-    import mlflow
-    import datetime
-    scalars = {k: float(v) for _, k, v in summaries if len(v.shape) == 0}
-    step = max(s for s, _, _, in summaries)
-    scalars['step'] = step
-    scalars['timestamp'] = datetime.datetime.now().timestamp()
-    if self.prefix:
-      scalars = {f'{self.prefix}{k}': v for k, v in scalars.items()}
-    mlflow.log_metrics(scalars, step=step)
+    bystep = collections.defaultdict(dict)
+    for step, name, value in summaries:
+      if len(value.shape) == 0 and self._pattern.search(name):
+        name = f'{self._prefix}/{name}' if self._prefix else name
+        bystep[step][name] = float(value)
+    for step, metrics in bystep.items():
+      self._wandb.log_metrics(metrics, step=step)
 
-  def _start_or_resume(self, run_name, resume_id=None):
-    import os
+
+class MLFlowOutput:
+
+  def __init__(self, run_name=None, resume_id=None, config=None, prefix=None):
     import mlflow
-    resume_run_id = None
-    print('Mlflow tracking uri:', os.environ.get('MLFLOW_TRACKING_URI', 'local'))
+    self._mlflow = mlflow
+    self._prefix = prefix
+    self._setup(run_name, resume_id, config)
+
+  def __call__(self, summaries):
+    timestamp = datetime.datetime.now().timestamp()
+    bystep = collections.defaultdict(dict)
+    for step, name, value in summaries:
+      if len(value.shape) == 0 and self._pattern.search(name):
+        name = f'{self._prefix}/{name}' if self._prefix else name
+        bystep[step][name] = float(value)
+    for step, metrics in bystep.items():
+      self._mlflow.log_metrics(metrics, step=step)
+
+  def _setup(self, run_name, resume_id, config):
+    tracking_uri = os.environ.get('MLFLOW_TRACKING_URI', 'local')
+    run_name = run_name or os.environ.get('MLFLOW_RUN_NAME')
+    resume_id = resume_id or os.environ.get('MLFLOW_RESUME_ID')
+    print('MLFlow Tracking URI:', tracking_uri)
+    print('MLFlow Run Name:    ', run_name)
+    print('MLFlow Resume ID:   ', resume_id)
     if resume_id:
-        runs = mlflow.search_runs(filter_string=f'tags.resume_id="{resume_id}"')
-        if len(runs) > 0:
-            resume_run_id = runs['run_id'].iloc[0]
-    if resume_run_id:
-      run = mlflow.start_run(run_name=run_name, run_id=resume_run_id)
-      print(f'Resumed mlflow run {run.info.run_id} ({resume_id}) in experiment {run.info.experiment_id}')
+      runs = self._mlflow.search_runs(None, f'tags.resume_id="{resume_id}"')
+      assert len(runs), ('No runs to resume found.', resume_id)
+      self._mlflow.start_run(run_name=run_name, run_id=runs['run_id'].iloc[0])
+      for key, value in config.items():
+        self._mlflow.log_param(key, value)
     else:
-      run = mlflow.start_run(run_name=run_name, tags={'resume_id': resume_id or ''})
-      print(f'Started mlflow run {run.info.run_id} ({resume_id}) in experiment {run.info.experiment_id}')
-    return run
+      tags = {'resume_id': resume_id or ''}
+      self._mlflow.start_run(run_name=run_name, tags=tags)
 
-  def _log_params(self, params):
-    import mlflow
-    kvs = list(params.items())
-    for i in range(0, len(kvs), 100):  # log_params() allows max 100
-      try:
-        mlflow.log_params(dict(kvs[i:i+100]))
-      except Exception as ex:
-        # This is normal when resuming run, mlflow complains when trying to change value of params
-        print(f'WARN: error logging parameters ({ex})')
+
+class XDataOutput:
+
+  def __init__(self, dataframe='results'):
+    from google3.learning.deepmind.xdata import xdata
+    self._writer = xdata.bt.writer(
+        xdata.get_auto_data_id(), dataframe, stateless=True)
+
+  def __call__(self, summaries):
+    bystep = collections.defaultdict(dict)
+    for step, name, value in summaries:
+      bystep[step][name] = value
+    for step, metrics in bystep.items():
+      self._writer.write({'step': step, **metrics})
 
 
 def _encode_gif(frames, fps):

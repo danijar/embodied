@@ -24,7 +24,7 @@ def load_single_env(
     task, size=(64, 64), repeat=1, mode='train', camera=-1, gray=False,
     length=0, logdir='/dev/null', discretize=0, sticky=True, lives=False,
     episodic=True, again=False, termination=False, weaker=1.0, checks=False,
-    seed=None):
+    resets=True, seed=None):
   suite, task = task.split('_', 1)
   if suite == 'dummy':
     from . import dummy
@@ -32,15 +32,44 @@ def load_single_env(
   elif suite == 'gym':
     from . import gym
     env = gym.Gym(task)
+  elif suite == 'procgen':
+    import procgen
+    from . import gym
+    env = gym.Gym(f'procgen:procgen-{task}-v0')
+
   elif suite == 'bsuite':
-    import bsuite
+
+    try:
+      import bsuite.google as bsuite
+      from . import dmenv
+      env = bsuite.load_from_sweep(task if '/' in task else task + '/0')
+      num_episodes = env.bsuite_num_episodes
+      env = dmenv.DMEnv(env)
+      env = embodied.wrappers.StopAfterEpisodes(env, num_episodes, 600)
+      env = embodied.wrappers.FlattenTwoDimObs(env)
+
+    except ImportError:
+      import bsuite
+      from . import dmenv
+      env = bsuite.load_from_id(task if '/' in task else task + '/0')
+      env = dmenv.DMEnv(env)
+      env = embodied.wrappers.FlattenTwoDimObs(env)
+
+  elif suite == 'bsuiteimg':
+
+    from bsuite import utils
+    import bsuite.google as bsuite
     from . import dmenv
-    env = bsuite.load_from_id(task)
-    env = dmenv.DMEnv(env)
+    env = bsuite.load_from_sweep(task if '/' in task else task + '/0')
+    num_episodes = env.bsuite_num_episodes
+    env = utils.wrappers.ImageObservation(env, (64, 64, 3))
+    env = dmenv.DMEnv(env, obs_key='image')
+    env = embodied.wrappers.StopAfterEpisodes(env, num_episodes, 600)
     env = embodied.wrappers.FlattenTwoDimObs(env)
+
   elif suite == 'dmc':
     from . import dmc
-    env = dmc.DMC(task, repeat, size, camera)
+    env = dmc.DMC(task, repeat, render=True, size=size, camera=camera)
   elif suite == 'atari':
     from . import atari
     env = atari.Atari(task, repeat, size, gray, lives=lives, sticky=sticky)
@@ -81,10 +110,13 @@ def load_single_env(
     else:
       env = embodied.wrappers.NormalizeAction(env, name)
   if length:
-    env = embodied.wrappers.TimeLimit(env, length)
+    env = embodied.wrappers.TimeLimit(env, length, resets)
   env = embodied.wrappers.ExpandScalars(env)
   if checks:
     env = embodied.wrappers.CheckSpaces(env)
+  for name, space in env.act_space.items():
+    if not space.discrete:
+      env = embodied.wrappers.ClipAction(env, name)
   return env
 
 

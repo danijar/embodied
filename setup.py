@@ -6,8 +6,11 @@ import embodied
 
 extras = {}
 extras['tests'] = ['pytest', 'parameterized', 'cloudpickle']
-extras['optional'] = ['rich', 'pillow', 'psutil', 'tensorflow', 'cloudpickle']
-extras['envs'] = ['gym', 'atari_py', 'crafter', 'dm_control']
+extras['optional'] = ['rich', 'pillow', 'tensorflow', 'cloudpickle']
+extras['envs'] = [
+    'gym==0.19.0', 'atari_py', 'crafter', 'dm_control', 'robodesk', 'procgen',
+    'bsuite',
+]
 extras['dreamerv2'] = ['tensorflow', 'tensorflow_probability', 'ruamel.yaml']
 extras['all'] = sorted(set(sum([v for v in extras.values()], [])))
 

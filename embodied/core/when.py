@@ -22,6 +22,25 @@ class Every:
     return False
 
 
+class Ratio:
+
+  def __init__(self, ratio):
+    assert ratio >= 0, ratio
+    self._ratio = ratio
+    self._last = None
+
+  def __call__(self, step):
+    step = int(step)
+    if self._ratio == 0:
+      return 0
+    if self._last is None:
+      self._last = step
+      return 1
+    repeats = int((step - self._last) * self._ratio)
+    self._last += repeats / self._ratio
+    return repeats
+
+
 class Once:
 
   def __init__(self):

@@ -15,8 +15,8 @@ from . import tfutils
 @tfagent.Wrapper
 class Agent(tfutils.Module):
 
-  configs = yaml.YAML(typ='safe').load((
-      embodied.Path(sys.argv[0]).parent / 'configs.yaml').read())
+  configs = yaml.YAML(typ='safe').load(
+      (embodied.Path(__file__).parent / 'configs.yaml').read())
 
   def __init__(self, obs_space, act_space, step, config):
     self.config = config
@@ -468,7 +468,8 @@ class VFunction(tfutils.Module):
     disc = traj['cont'][1:] * self.config.discount
     value = self.target_net(traj).mean()
     if impl == 'gae':
-      advs = [tf.zeros_like(value[0])]
+      # advs = [tf.zeros_like(value[0])]
+      advs = [tf.zeros(value.shape[1:])]
       deltas = reward + disc * value[1:] - value[:-1]
       for t in reversed(range(len(disc))):
         advs.append(deltas[t] + disc[t] * self.config.return_lambda * advs[-1])

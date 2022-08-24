@@ -27,39 +27,28 @@ class RSSM(tfutils.Module):
 
   def initial(self, batch_size):
     if self._classes:
-      state = tfutils.cast_to_compute(dict(
+      state = dict(
           deter=tf.zeros([batch_size, self._deter], tf.float32),
           logit=tf.zeros([batch_size, self._stoch, self._classes], tf.float32),
           stoch=tf.zeros(
-              [batch_size, self._stoch, self._classes], tf.float32)))
+              [batch_size, self._stoch, self._classes], tf.float32))
     else:
-      state = tfutils.cast_to_compute(dict(
+      state = dict(
           deter=tf.zeros([batch_size, self._deter], tf.float32),
           mean=tf.zeros([batch_size, self._stoch], tf.float32),
           std=tf.ones([batch_size, self._stoch], tf.float32),
-          stoch=tf.zeros([batch_size, self._stoch], tf.float32)))
+          stoch=tf.zeros([batch_size, self._stoch], tf.float32))
     if self._initial == 'zeros':
-      return state
+      return self._cast(state)
     elif self._initial == 'learned':
       # This will cut gradients when the state is created outside of the
       # training graph, but this only happens once at the beginning of the
       # training loop. Afterwards, the state is reset inside the obs_step().
-      state['deter'] = tf.repeat(self._cast(self.get(
+      state['deter'] = tf.repeat(tf.math.tanh(self.get(
           'initial_deter', tf.Variable, state['deter'][0].astype(tf.float32),
           trainable=True))[None], batch_size, 0)
-      state['stoch'] = tf.repeat(self._cast(self.get(
-          'initial_stoch', tf.Variable, state['stoch'][0].astype(tf.float32),
-          trainable=True))[None], batch_size, 0)
-      return state
-    elif self._initial == 'learned2':
-      # This will cut gradients when the state is created outside of the
-      # training graph, but this only happens once at the beginning of the
-      # training loop. Afterwards, the state is reset inside the obs_step().
-      state['deter'] = tf.repeat(self._cast(tf.math.tanh(self.get(
-          'initial_deter', tf.Variable, state['deter'][0].astype(tf.float32),
-          trainable=True)))[None], batch_size, 0)
-      state['stoch'] = self.get_stoch(state['deter'])
-      return state
+      state['stoch'] = self.get_stoch(self._cast(state['deter']))
+      return self._cast(state)
     else:
       raise NotImplementedError(self._initial)
 
@@ -97,13 +86,13 @@ class RSSM(tfutils.Module):
     return dist
 
   def obs_step(self, prev_state, prev_action, embed, is_first):
-    prev_state, prev_action, is_first = tf.nest.map_structure(
-        self._cast, (prev_state, prev_action, is_first))
+    prev_action = self._cast(prev_action)
+    is_first = self._cast(is_first)
     prev_state, prev_action = tf.nest.map_structure(
         lambda x: tf.einsum('b...,b->b...', x, 1.0 - is_first),
         (prev_state, prev_action))
     prev_state = tf.nest.map_structure(
-        lambda x, y: x + tf.einsum('b...,b->b...', self._cast(y), is_first),
+        lambda x, y: x + tf.einsum('b...,b->b...', y, is_first),
         prev_state, self.initial(len(is_first)))
     prior = self.img_step(prev_state, prev_action)
     x = tf.concat([prior['deter'], embed], -1)
@@ -112,12 +101,12 @@ class RSSM(tfutils.Module):
     x = self.get('obs_out', Linear, **self._kw)(x)
     stats = self._stats_layer('obs_stats', x)
     dist = self.get_dist(stats)
-    stoch = self._cast(dist.sample())
+    stoch = dist.sample()
     post = {'stoch': stoch, 'deter': prior['deter'], **stats}
-    return post, prior
+    return self._cast(post), self._cast(prior)
 
   def img_step(self, prev_state, prev_action):
-    prev_stoch = self._cast(prev_state['stoch'])
+    prev_stoch = prev_state['stoch']
     prev_action = self._cast(prev_action)
     if self._classes:
       shape = prev_stoch.shape[:-2] + [self._stoch * self._classes]
@@ -133,9 +122,9 @@ class RSSM(tfutils.Module):
       x = self.get(f'img_out_{i}', Linear, **self._kw)(x)
     stats = self._stats_layer('img_stats', x)
     dist = self.get_dist(stats)
-    stoch = self._cast(dist.sample())
+    stoch = dist.sample()
     prior = {'stoch': stoch, 'deter': deter, **stats}
-    return prior
+    return self._cast(prior)
 
   def get_stoch(self, deter):
     # x = self.get('img_out', Linear, **self._kw)(deter)
@@ -255,6 +244,8 @@ class MultiDecoder(tfutils.Module):
       merged = shapes[0][:-1] + (sum(x[-1] for x in shapes),)
       if cnn == 'simple':
         self._cnn = ImageDecoderSimple(merged, cnn_depth, cnn_kernels, **kw)
+      elif cnn == 'upsample':
+        self._cnn = ImageDecoderUpsample(merged, cnn_depth, cnn_kernels, **kw)
       elif cnn == 'resnet':
         self._cnn = ImageDecoderResnet(merged, cnn_depth, cnn_blocks, **kw)
       else:
@@ -323,6 +314,31 @@ class ImageDecoderSimple(tfutils.Module):
       depth //= 2
     x = self.get('out', ConvT, self._shape[-1], self._kernels[-1])(x)
     x = tf.math.sigmoid(x)
+    assert x.shape[-3:] == self._shape, (x.shape, self._shape)
+    return x
+
+
+class ImageDecoderUpsample(tfutils.Module):
+
+  def __init__(self, shape, depth, kernels, **kw):
+    self._shape = shape
+    self._depth = depth
+    self._kernels = kernels
+    self._kw = kw
+
+  def __call__(self, features):
+    depth = self._depth * 2 ** (len(self._kernels) - 2)
+    x = tfutils.cast_to_compute(features)
+    x = self.get('in', Linear, 4 * 4 * depth)(x)
+    x = tf.reshape(x, [-1, 4, 4, depth])
+    x = self.get('norm', Norm, self._kw['norm'])(x)
+    x = get_act(self._kw['act'])(x)
+    for i, kernel in enumerate(self._kernels):
+      last = (i == len(self._kernels) - 1)
+      depth = self._shape[-1] if last else depth // 2
+      kw = {'act': tf.math.sigmoid} if last else self._kw
+      x = tf.repeat(tf.repeat(x, 2, 1), 2, 2)  # Upsample
+      x = self.get(f'conv{i}', Conv2D, depth, kernel, **kw)(x)
     assert x.shape[-3:] == self._shape, (x.shape, self._shape)
     return x
 
@@ -547,7 +563,7 @@ class Conv2D(tfutils.Module):
       x = tf.nn.conv2d_transpose(x, kernel, out, self._stride, self._pad)
     else:
       shape = (self._kernel, self._kernel, x.shape[-1], self._depth)
-      limit = np.sqrt(3.0 / np.mean(shape[-2:]))
+      limit = np.sqrt(3.0 / (np.prod(shape[:-2]) * np.mean(shape[-2:])))
       winit = np.random.uniform(-limit, limit, shape).astype(np.float32)
       kernel = self.get(
           'kernel', tf.Variable, winit, dtype=tf.float32, trainable=True)

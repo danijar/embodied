@@ -9,4 +9,4 @@ apt-get install -y x11-xserver-utils
 apt-get install -y xvfb
 apt-get clean
 
-pip3 install --no-cache-dir minerl
+pip3 install minerl

@@ -1,14 +1,12 @@
 import functools
 import re
 
-import flax.linen as nn
-import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
 from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
-sg = lambda x: jax.tree_map(jax.lax.stop_gradient, x)
+sg = lambda x: jax.tree_util.tree_map(jax.lax.stop_gradient, x)
 
 from . import jaxutils
 from . import ninjax as nj
@@ -26,6 +24,7 @@ class RSSM(nj.Module):
     self._initial = initial
     self._unimix = unimix
     self._kw = kw
+    self._cast = jaxutils.cast_to_compute
 
   def initial(self, bs):
     if self._classes:
@@ -40,7 +39,7 @@ class RSSM(nj.Module):
           std=jnp.ones([bs, self._stoch], jnp.float32),
           stoch=jnp.zeros([bs, self._stoch], jnp.float32))
     if self._initial == 'zeros':
-      return state
+      return self._cast(state)
     elif self._initial == 'learned':
       # This will cut gradients when the state is created outside of the
       # training graph, but this only happens once at the beginning of the
@@ -48,8 +47,8 @@ class RSSM(nj.Module):
       deter = self.get(
           'initial_deter', jnp.zeros, state['deter'][0].shape, jnp.float32)
       state['deter'] = jnp.repeat(jnp.tanh(deter)[None], bs, 0)
-      state['stoch'] = self.get_stoch(state['deter'])
-      return state
+      state['stoch'] = self.get_stoch(self._cast(state['deter']))
+      return self._cast(state)
     else:
       raise NotImplementedError(self._initial)
 
@@ -86,21 +85,13 @@ class RSSM(nj.Module):
     return dist
 
   def obs_step(self, prev_state, prev_action, embed, is_first):
-
-    # prev_state, prev_action = jax.tree_util.tree_map(
-    #     lambda x: jnp.einsum('b...,b->b...', x, 1.0 - is_first),
-    #     (prev_state, prev_action))
-    # prev_state = jax.tree_util.tree_map(
-    #     lambda x, y: x + jnp.einsum('b...,b->b...', y, is_first),
-    #     prev_state, self.initial(len(is_first)))
-
+    prev_action = self._cast(prev_action)
+    is_first = self._cast(is_first)
     prev_state, prev_action = jax.tree_util.tree_map(
-        lambda x: self._mask(x, 1.0 - is_first),
-        (prev_state, prev_action))
+        lambda x: self._mask(x, 1.0 - is_first), (prev_state, prev_action))
     prev_state = jax.tree_util.tree_map(
         lambda x, y: x + self._mask(y, is_first),
         prev_state, self.initial(len(is_first)))
-
     prior = self.img_step(prev_state, prev_action)
     x = jnp.concatenate([prior['deter'], embed], -1)
     x = self.get('obs_out', Linear, **self._kw)(x)
@@ -108,10 +99,11 @@ class RSSM(nj.Module):
     dist = self.get_dist(stats)
     stoch = dist.sample(seed=nj.rng())
     post = {'stoch': stoch, 'deter': prior['deter'], **stats}
-    return post, prior
+    return self._cast(post), self._cast(prior)
 
   def img_step(self, prev_state, prev_action):
     prev_stoch = prev_state['stoch']
+    prev_action = self._cast(prev_action)
     if self._classes:
       shape = prev_stoch.shape[:-2] + (self._stoch * self._classes,)
       prev_stoch = prev_stoch.reshape(shape)
@@ -126,13 +118,13 @@ class RSSM(nj.Module):
     dist = self.get_dist(stats)
     stoch = dist.sample(seed=nj.rng())
     prior = {'stoch': stoch, 'deter': deter, **stats}
-    return prior
+    return self._cast(prior)
 
   def get_stoch(self, deter):
     x = self.get('img_out', Linear, **self._kw)(deter)
     stats = self._stats_layer('img_stats', x)
     dist = self.get_dist(stats)
-    return dist.mode()
+    return self._cast(dist.mode())
 
   def _gru(self, x, deter):
     x = jnp.concatenate([deter, x], -1)
@@ -178,7 +170,7 @@ class MultiEncoder(nj.Module):
 
   def __init__(
       self, shapes, cnn_keys=r'.*', mlp_keys=r'.*', mlp_layers=4,
-      mlp_units=512, cnn='simple', cnn_depth=48, cnn_kernels=(4, 4, 4, 4),
+      mlp_units=512, cnn='stride', cnn_depth=48, cnn_kernels=(4, 4, 4, 4),
       cnn_blocks=2, **kw):
     excluded = ('is_first', 'is_last')
     shapes = {k: v for k, v in shapes.items() if k not in excluded}
@@ -191,8 +183,10 @@ class MultiEncoder(nj.Module):
     self.shapes = {**self.cnn_shapes, **self.mlp_shapes}
     print('Encoder CNN shapes:', self.cnn_shapes)
     print('Encoder MLP shapes:', self.mlp_shapes)
-    if cnn == 'simple':
-      self._cnn = ImageEncoderSimple(cnn_depth, cnn_kernels, **kw)
+    if cnn == 'stride':
+      self._cnn = ImageEncoderStride(cnn_depth, cnn_kernels, **kw)
+    elif cnn == 'resize':
+      self._cnn = ImageEncoderResize(cnn_depth, cnn_kernels, **kw)
     elif cnn == 'resnet':
       self._cnn = ImageEncoderResnet(cnn_depth, cnn_blocks, **kw)
     else:
@@ -217,7 +211,7 @@ class MultiEncoder(nj.Module):
           data[k][..., None] if len(self.shapes[k]) == 0 else data[k]
           for k in self.mlp_shapes]
       inputs = jnp.concatenate([x.astype(jnp.float32) for x in inputs], -1)
-      outputs.append(self._mlp(inputs))
+      outputs.append(self._mlp(jaxutils.cast_to_compute(inputs)))
     outputs = jnp.concatenate(outputs, -1)
     outputs = outputs.reshape(batch_dims + outputs.shape[1:])
     return outputs
@@ -227,7 +221,7 @@ class MultiDecoder(nj.Module):
 
   def __init__(
       self, shapes, inputs=['tensor'], cnn_keys=r'.*', mlp_keys=r'.*',
-      mlp_layers=4, mlp_units=512, cnn='simple', cnn_depth=48,
+      mlp_layers=4, mlp_units=512, cnn='stride', cnn_depth=48,
       cnn_kernels=(5, 5, 6, 6), cnn_blocks=2, image_dist='mse', **kw):
     excluded = ('is_first', 'is_last', 'is_terminal', 'reward')
     shapes = {k: v for k, v in shapes.items() if k not in excluded}
@@ -244,8 +238,10 @@ class MultiDecoder(nj.Module):
       shapes = list(self.cnn_shapes.values())
       assert all(x[:-1] == shapes[0][:-1] for x in shapes)
       merged = shapes[0][:-1] + (sum(x[-1] for x in shapes),)
-      if cnn == 'simple':
-        self._cnn = ImageDecoderSimple(merged, cnn_depth, cnn_kernels, **kw)
+      if cnn == 'stride':
+        self._cnn = ImageDecoderStride(merged, cnn_depth, cnn_kernels, **kw)
+      elif cnn == 'resize':
+        self._cnn = ImageDecoderResize(merged, cnn_depth, cnn_kernels, **kw)
       elif cnn == 'resnet':
         self._cnn = ImageDecoderResnet(merged, cnn_depth, cnn_blocks, **kw)
       else:
@@ -279,7 +275,7 @@ class MultiDecoder(nj.Module):
     raise NotImplementedError(self._image_dist)
 
 
-class ImageEncoderSimple(nj.Module):
+class ImageEncoderStride(nj.Module):
 
   def __init__(self, depth, kernels, **kw):
     self._depth = depth
@@ -288,6 +284,7 @@ class ImageEncoderSimple(nj.Module):
 
   def __call__(self, x):
     Conv = functools.partial(Conv2D, stride=2, pad='valid')
+    x = jaxutils.cast_to_compute(x)
     depth = self._depth
     for i, kernel in enumerate(self._kernels):
       x = self.get(f'conv{i}', Conv, depth, kernel, **self._kw)(x)
@@ -295,7 +292,7 @@ class ImageEncoderSimple(nj.Module):
     return x
 
 
-class ImageDecoderSimple(nj.Module):
+class ImageDecoderStride(nj.Module):
 
   def __init__(self, shape, depth, kernels, **kw):
     self._shape = shape
@@ -305,6 +302,7 @@ class ImageDecoderSimple(nj.Module):
 
   def __call__(self, x):
     ConvT = functools.partial(Conv2D, transp=True, stride=2, pad='valid')
+    x = jaxutils.cast_to_compute(x)
     x = x.reshape([-1, 1, 1, x.shape[-1]])
     depth = self._depth * 2 ** (len(self._kernels) - 2)
     for i, kernel in enumerate(self._kernels[:-1]):
@@ -312,6 +310,51 @@ class ImageDecoderSimple(nj.Module):
       depth //= 2
     x = self.get('out', ConvT, self._shape[-1], self._kernels[-1])(x)
     x = jax.nn.sigmoid(x)
+    assert x.shape[-3:] == self._shape, (x.shape, self._shape)
+    return x
+
+
+class ImageEncoderResize(nj.Module):
+
+  def __init__(self, depth, kernels, **kw):
+    self._depth = depth
+    self._kernels = kernels
+    self._kw = kw
+
+  def __call__(self, x):
+    x = jaxutils.cast_to_compute(x)
+    depth = self._depth
+    for i, kernel in enumerate(self._kernels):
+      x = self.get(f'conv{i}', Conv2D, depth, kernel, **self._kw)(x)
+      # print(x.shape)
+      x = jax.lax.reduce_window(
+          x, 0.0, jax.lax.add, (1, 2, 2, 1), (1, 2, 2, 1), 'SAME') / 4.0
+      # print(x.shape)
+      depth *= 2
+    return x
+
+
+class ImageDecoderResize(nj.Module):
+
+  def __init__(self, shape, depth, kernels, **kw):
+    self._shape = shape
+    self._depth = depth
+    self._kernels = kernels
+    self._kw = kw
+
+  def __call__(self, features):
+    depth = self._depth * 2 ** (len(self._kernels) - 1)
+    x = jaxutils.cast_to_compute(features)
+    x = self.get('in', Linear, (4, 4, depth), **self._kw)(x)
+    # print(x.shape)
+    for i, kernel in enumerate(self._kernels):
+      last = (i == len(self._kernels) - 1)
+      depth = self._shape[-1] if last else depth // 2
+      kw = {'act': jax.nn.sigmoid} if last else self._kw
+      x = jnp.repeat(jnp.repeat(x, 2, 1), 2, 2)  # Upsample
+      # print(x.shape)
+      x = self.get(f'conv{i}', Conv2D, depth, kernel, **kw)(x)
+      # print(x.shape)
     assert x.shape[-3:] == self._shape, (x.shape, self._shape)
     return x
 
@@ -324,11 +367,13 @@ class ImageEncoderResnet(nj.Module):
     self._kw = {**kw, 'preact': True}
 
   def __call__(self, x):
+    x = jaxutils.cast_to_compute(x)
     stages = int(np.log2(x.shape[-2])) - 2
     depth = self._depth
     x = self.get('in', Conv2D, depth, 3)(x)
     for i in range(stages):
-      x = hk.avg_pool(x, [1, 2, 2, 1], [1, 2, 2, 1], 'SAME')
+      x = jax.lax.reduce_window(
+          x, 0.0, jax.lax.add, (1, 2, 2, 1), (1, 2, 2, 1), 'SAME') / 4.0
       for j in range(self._blocks):
         x = self._block(f's{i}b{j}', depth, x)
         # print(i, j, x.shape)
@@ -355,6 +400,7 @@ class ImageDecoderResnet(nj.Module):
     self._kw = {**kw, 'preact': True}
 
   def __call__(self, x):
+    x = jaxutils.cast_to_compute(x)
     stages = int(np.log2(self._shape[0])) - 2
     depth = 2 ** stages * self._depth
     x = self.get('in', Linear, 16 * depth)(x)
@@ -394,7 +440,8 @@ class MLP(nj.Module):
 
   def __call__(self, inputs):
     feat = self._inputs(inputs)
-    x = feat.reshape([-1, feat.shape[-1]])
+    x = jaxutils.cast_to_compute(feat)
+    x = x.reshape([-1, x.shape[-1]])
     for i in range(self._layers):
       x = self.get(f'h{i}', Linear, self._units, **self._dense)(x)
     x = x.reshape(feat.shape[:-1] + (x.shape[-1],))
@@ -481,100 +528,101 @@ class Conv2D(nj.Module):
   def __init__(
       self, depth, kernel, stride=1, transp=False, act='none', norm='none',
       pad='same', bias=True, preact=False):
-    self._kwargs = {
-        'output_channels': depth,
-        'kernel_shape': kernel,
-        'with_bias': bias and (preact or norm == 'none'),
-        'padding': pad.upper(),
-        'stride': stride,
-        'w_init': hk.initializers.VarianceScaling(1.0, 'fan_avg', 'uniform'),
-    }
+    self._depth = depth
+    self._kernel = kernel
+    self._stride = stride
+    self._pad = pad.upper()
     self._transp = transp
     self._act = get_act(act)
     self._norm = Norm(norm)
     self._preact = preact
+    self._bias = bias
 
   def __call__(self, hidden):
-    if self._transp:
-      stride = self._kwargs['stride']
-      kernel = self._kwargs['kernel_shape']
-      shape = (
-          int(hidden.shape[-3] * stride + kernel - 2),
-          int(hidden.shape[-2] * stride + kernel - 2))
-      layer = self.get(
-          'layer', nj.HaikuModule, hk.Conv2DTranspose,
-          output_shape=shape, **self._kwargs)
-    else:
-      layer = self.get('layer', nj.HaikuModule, hk.Conv2D, **self._kwargs)
     if self._preact:
-      return layer(self._act(self._norm(hidden)))
+      hidden = self._norm(hidden)
+      hidden = self._act(hidden)
+      hidden = self._layer(hidden)
     else:
-      return self._act(self._norm(hidden))
+      hidden = self._layer(hidden)
+      hidden = self._norm(hidden)
+      hidden = self._act(hidden)
+    return hidden
 
-
-# class Conv2D(nj.Module):
-
-#   def __init__(
-#       self, depth, kernel, stride=1, transp=False, act='none', norm='none',
-#       pad='same', bias=True, preact=False):
-#     kwargs = {}
-#     # kwargs['with_bias'] = bias and (preact or norm == 'none')
-#     kwargs['padding'] = pad.upper()
-#     kwargs['use_bias'] = bias and (preact or norm == 'none')
-
-#     if transp:
-#       self._conv = nj.HaikuModule(
-#           hk.Conv2DTranspose, depth, kernel, stride, **kwargs)
-#     else:
-#       self._conv = nj.HaikuModule(
-#           Conv2D, depth, kernel, stride, **kwargs)
-
-#     if transp:
-#       self._conv = nj.FlaxModule(
-#           nn.ConvTranspose, depth, [kernel] * 2, [stride] * 2, **kwargs)
-#     else:
-#       self._conv = nj.FlaxModule(
-#           nn.Conv, depth, [kernel] * 2, [stride] * 2, **kwargs)
-
-#     self._norm = Norm(norm)
-#     self._act = get_act(act)
-#     self._preact = preact
-
-#   def __call__(self, x):
-#     if self._preact:
-#       outs = self._conv(self._act(self._norm(x)))
-#     else:
-#       outs = self._act(self._norm(self._conv(x)))
-#     return outs
+  def _layer(self, x):
+    if self._transp:
+      shape = (self._kernel, self._kernel, self._depth, x.shape[-1])
+      limit = np.sqrt(3.0 / (np.prod(shape[:-2]) * np.mean(shape[-2:])))
+      kernel = self.get(
+          'kernel', jax.random.uniform, nj.rng(), shape, jnp.float32,
+          -limit, limit)
+      kernel = jaxutils.cast_to_compute(kernel)
+      x = jax.lax.conv_transpose(
+          x, kernel, (self._stride, self._stride), self._pad,
+          dimension_numbers=('NHWC', 'HWOI', 'NHWC'))
+    else:
+      shape = (self._kernel, self._kernel, x.shape[-1], self._depth)
+      limit = np.sqrt(3.0 / (np.prod(shape[:-2]) * np.mean(shape[-2:])))
+      kernel = self.get(
+          'kernel', jax.random.uniform, nj.rng(), shape, jnp.float32,
+          -limit, limit)
+      kernel = jaxutils.cast_to_compute(kernel)
+      x = jax.lax.conv_general_dilated(
+          x, kernel, (self._stride, self._stride), self._pad,
+          dimension_numbers=('NHWC', 'HWIO', 'NHWC'))
+    if self._bias:
+      bias = self.get('bias', jnp.zeros, self._depth, np.float32)
+      bias = jaxutils.cast_to_compute(bias)
+      x += bias
+    return x
 
 
 class Linear(nj.Module):
 
-  def __init__(
-      self, units, act='none', norm='none', bias=True, outscale=1.0, **kwargs):
-    kwargs['with_bias'] = bias and norm == 'none'
-    kwargs['w_init'] = hk.initializers.VarianceScaling(
-        outscale, 'fan_avg', 'uniform')
-    self._linear = nj.HaikuModule(hk.Linear, units, **kwargs)
-    self._norm = Norm(norm)
+  def __init__(self, units, act='none', norm='none', bias=True, outscale=1.0):
+    self._units = tuple(units) if hasattr(units, '__len__') else (units,)
     self._act = get_act(act)
+    self._norm = norm
+    self._bias = bias and norm == 'none'
+    self._outscale = outscale
 
   def __call__(self, x):
-    return self._act(self._norm(self._linear(x)))
+    fanin, fanout = x.shape[-1], np.prod(self._units)
+    total = np.prod(self._units)
+    limit = np.sqrt(3.0 * self._outscale / np.mean((fanin, fanout)))
+    kernel = self.get(
+        'kernel', jax.random.uniform, nj.rng(), (fanin, fanout), jnp.float32,
+        -limit, limit)
+    kernel = jaxutils.cast_to_compute(kernel)
+    x = x @ kernel
+    if self._bias:
+      bias = self.get('bias', jnp.zeros, fanout, np.float32)
+      bias = jaxutils.cast_to_compute(bias)
+      x += bias
+    if len(self._units) > 1:
+      x = x.reshape(x.shape[:-1] + self._units)
+    x = self.get('norm', Norm, self._norm)(x)
+    x = self._act(x)
+    return x
 
 
 class Norm(nj.Module):
 
   def __init__(self, impl):
-    if impl == 'none':
-      self._norm = lambda x: x
-    elif impl == 'layer':
-      self._norm = nj.HaikuModule(hk.LayerNorm, -1, True, True, eps=1e-3)
-    else:
-      raise NotImplementedError(impl)
+    self._impl = impl
 
   def __call__(self, x):
-    return self._norm(x)
+    dtype = x.dtype
+    if self._impl == 'none':
+      return x
+    elif self._impl == 'layer':
+      x = x.astype(jnp.float32)
+      x = jax.nn.standardize(x, axis=-1, epsilon=1e-3)
+      x *= self.get('scale', jnp.ones, x.shape[-1], jnp.float32)
+      x += self.get('bias', jnp.zeros, x.shape[-1], jnp.float32)
+      return x.astype(dtype)
+    else:
+      raise NotImplementedError(self._impl)
 
 
 class Input:

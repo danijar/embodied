@@ -29,7 +29,7 @@ rm -rf lab
 # Dataset
 mkdir dmlab_data
 cd dmlab_data
-pip3 install --no-cache-dir Pillow
+pip3 install Pillow
 curl https://bradylab.ucsd.edu/stimuli/ObjectsAll.zip -o ObjectsAll.zip
 unzip ObjectsAll.zip
 cd OBJECTSALL

@@ -12,12 +12,13 @@ from . import prios
 class Prioritized(embodied.Replay):
 
   def __init__(
-      self, store, chunk=64, prio_starts=0.0, prio_ends=1.0, sync=0,
+      self, store, chunk=64, slots=512, prio_starts=0.0, prio_ends=1.0, sync=0,
       fraction=0.1, softmax=False, temp=1.0, constant=0.0, exponent=0.5):
     # TODO: We're currently not removing old episodes from the priority table
     # when the store is reaching its capacity.
     self.store = store
     self.chunk = chunk
+    self.slots = slots
     self.prio_starts = prio_starts
     self.prio_ends = prio_ends
     self.random = np.random.RandomState(seed=0)
@@ -53,11 +54,11 @@ class Prioritized(embodied.Replay):
     return metrics
 
   def add(self, tran, worker=0):
-    if tran['is_first']:
+    if tran['is_first'] and not self.slots:
       self.ongoing[worker].clear()
-    episode = self.ongoing[worker]
-    [episode[k].append(v) for k, v in tran.items()]
-    if tran['is_last']:
+    ep = self.ongoing[worker]
+    [ep[k].append(v) for k, v in tran.items()]
+    if (len(ep['is_first']) >= self.slots) if self.slots else tran['is_last']:
       self.add_traj(self.ongoing.pop(worker))
 
   def add_traj(self, traj):
@@ -72,8 +73,8 @@ class Prioritized(embodied.Replay):
     self.prios.add(key, np.full(length, np.inf, np.float64))
 
   def prioritize(self, keys, priorities):
-    keys = np.array(keys, np.int64)[:, 0]  # Key is replicated along time dim.
-    priorities = np.array(priorities, np.float64)
+    keys = np.asarray(keys, np.int64)[:, 0]  # Key is replicated along time dim.
+    priorities = np.asarray(priorities, np.float64)
     assert priorities.shape == (len(keys), self.chunk), priorities.shape
     for key, priority in zip(keys, priorities):
       assert tuple(key.tolist()) in self.handed_out_keys, key

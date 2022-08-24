@@ -1,7 +1,8 @@
+import concurrent.futures
 import io
-import time as timelib
-import threading
 import pickle
+import threading
+import time as timelib
 
 import embodied
 import numpy as np
@@ -63,9 +64,12 @@ class DiskStore:
     self.directory = embodied.Path(directory)
     self.directory.mkdirs()
     self.capacity = capacity
+    self.parallel = parallel
     self.filenames = {}
     self.steps = 0
-    self.worker = embodied.Worker('thread' if parallel else 'none')
+    if parallel:
+      self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+      self.future = None
     self.sync()
 
   def stats(self):
@@ -75,7 +79,7 @@ class DiskStore:
     }
 
   def close(self):
-    self.worker.close()
+    pass
 
   def keys(self):
     return tuple(self.filenames.keys())
@@ -101,7 +105,12 @@ class DiskStore:
     self._enforce_limit()
     # TODO: It can take a while for the trajectory to be written and it causes
     # a not found error if the user tries to access the episode before that.
-    self.worker.run(self._save, filename, traj)
+    if self.parallel:
+      if self.future:
+        self.future.result()
+      self.future = self.executor.submit(self._save, filename, traj)
+    else:
+      self._save(filename, traj)
 
   def __delitem__(self, key):
     filename = self.filenames.pop(key)
@@ -129,7 +138,7 @@ class DiskStore:
       np.savez_compressed(stream, **traj)
       stream.seek(0)
       filename.write(stream.read(), mode='wb')
-    print(f'Saved episode: {filename.name}')
+    print(f'Saved trajectory: {filename.name}')
 
   def _enforce_limit(self):
     if not self.capacity:
@@ -206,8 +215,8 @@ class Stats:
     return {
         **self.store.stats(),
         'episodes': self.episodes,
-        'ep_length': self.episodes and self.steps / self.episodes,
-        'ep_return': self.episodes and self.reward / self.episodes,
+        'duration': self.episodes and self.steps / self.episodes,
+        'return': self.episodes and self.reward / self.episodes,
     }
 
   def __getattr__(self, name):

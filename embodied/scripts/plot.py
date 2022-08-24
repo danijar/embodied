@@ -47,6 +47,8 @@ COLORS = {
         '#0022ff', '#33aa00', '#ff0011', '#ddaa00', '#cc44dd', '#0088aa',
         '#001177', '#117700', '#990022', '#885500', '#553366', '#006666'),
     'gradient': (
+        '#a0da39', '#4ac16d', '#277f8e', '#365c8d', '#46327e', '#440154'),
+    'gradient_more': (
         '#fde725', '#a0da39', '#4ac16d', '#1fa187', '#277f8e', '#365c8d',
         '#46327e', '#440154'),
 }
@@ -65,12 +67,12 @@ def main():
   tasks = []
   for regex in args.tasks:
     found = [x['task'] for x in runs if re.search(regex, x['task'])]
-    [tasks.append(x) for x in sorted(found) if x not in tasks]
+    [tasks.append(x) for x in natsort(found) if x not in tasks]
   methods = []
   for regex in args.methods:
     found = [x['method'] for x in runs if re.search(regex, x['method'])]
-    [methods.append(x) for x in sorted(found) if x not in methods]
-  seeds = sorted(set(run['seed'] for run in runs))
+    [methods.append(x) for x in natsort(found) if x not in methods]
+  seeds = natsort(set(run['seed'] for run in runs))
   console.print(f'Tasks ({len(tasks)}): [cyan]{", ".join(tasks)}[/cyan]')
   console.print(f'Methods ({len(methods)}): [cyan]{", ".join(methods)}[/cyan]')
   console.print(f'Seed ({len(seeds)}): [cyan]{", ".join(seeds)}[/cyan]')
@@ -185,13 +187,13 @@ def compute_stats(runs, stats, bins):
           lambda vals, axis: np.nanmean(np.minimum(vals, 100), axis))
     else:
       raise NotImplementedError(stats)
-  extra_tasks = sorted(set(run['task'] for run in extra_runs))
+  extra_tasks = natsort(set(run['task'] for run in extra_runs))
   return extra_runs, extra_tasks
 
 
 def stats_self_norm(runs, bins, name='mean', aggregator=np.nanmean):
-  methods = sorted(set(run['method'] for run in runs))
-  seeds = sorted(set(run['seed'] for run in runs))
+  methods = natsort(set(run['method'] for run in runs))
+  seeds = natsort(set(run['seed'] for run in runs))
   lengths, mins, maxs = {}, {}, {}
   for run in runs:
     lengths[run['task']] = max(lengths.get(run['task'], 0), max(run['xs']))
@@ -228,8 +230,8 @@ def stats_self_norm(runs, bins, name='mean', aggregator=np.nanmean):
 
 def stats_fixed_norm(
     runs, bins, mins, maxs, name='mean', aggregator=np.nanmean):
-  methods = sorted(set(run['method'] for run in runs))
-  seeds = sorted(set(run['seed'] for run in runs))
+  methods = natsort(set(run['method'] for run in runs))
+  seeds = natsort(set(run['seed'] for run in runs))
   lengths = {}
   for run in runs:
     lengths[run['task']] = max(lengths.get(run['task'], 0), max(run['xs']))
@@ -260,8 +262,8 @@ def stats_fixed_norm(
 
 
 def stats_num_tasks(runs, bins):
-  methods = sorted(set(run['method'] for run in runs))
-  seeds = sorted(set(run['seed'] for run in runs))
+  methods = natsort(set(run['method'] for run in runs))
+  seeds = natsort(set(run['seed'] for run in runs))
   lengths = {}
   for run in runs:
     lengths[run['task']] = max(lengths.get(run['task'], 0), max(run['xs']))
@@ -460,12 +462,18 @@ def reduce(values, reducer=np.nanmean, *args, **kwargs):
     return reducer(values, *args, **kwargs)
 
 
+def natsort(sequence):
+  pattern = re.compile(r'([0-9]+)')
+  return sorted(sequence, key=lambda x: [
+      (int(y) if y.isdigit() else y) for y in pattern.split(x)])
+
+
 def parse_args(argv=None):
   boolean = lambda x: bool(['False', 'True'].index(x))
   parser = argparse.ArgumentParser()
   parser.add_argument('--indirs', nargs='+', type=pathlib.Path, required=True)
   parser.add_argument('--outdir', type=pathlib.Path, required=True)
-  parser.add_argument('--pattern', type=str, default='**/metrics.jsonl')
+  parser.add_argument('--pattern', type=str, default='**/scores.jsonl')
   parser.add_argument('--prefix', type=boolean, default=False)
   parser.add_argument('--xaxis', type=str, default='step')
   parser.add_argument('--yaxis', type=str, default='episode/score')
@@ -499,6 +507,8 @@ def parse_args(argv=None):
       else:
         cmap = args.colors
       args.colors = lambda i: cmap[i % len(cmap)]
+  if args.stats == ['none']:
+    args.stats = []
   return args
 
 

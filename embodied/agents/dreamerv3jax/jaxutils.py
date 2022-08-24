@@ -8,7 +8,13 @@ from tensorflow_probability.substrates import jax as tfp
 from . import ninjax as nj
 
 tfd = tfp.distributions
-sg = lambda x: jax.tree_map(jax.lax.stop_gradient, x)
+tree_map = jax.tree_util.tree_map
+sg = lambda x: tree_map(jax.lax.stop_gradient, x)
+COMPUTE_DTYPE = jnp.float32
+
+
+def cast_to_compute(values):
+  return tree_map(lambda x: x.astype(COMPUTE_DTYPE), values)
 
 
 def parallel():
@@ -19,24 +25,23 @@ def parallel():
     return False
 
 
-def scan(fn, inputs, start, unroll=True):
+def scan(fn, inputs, start, unroll=True, modify=False):
   fn2 = lambda carry, inp: (fn(carry, inp),) * 2
   if not unroll:
-    return jax.lax.scan(fn2, start, inputs)[1]
+    return nj.scan(fn2, start, inputs, modify=modify)[1]
   length = len(jax.tree_util.tree_leaves(inputs)[0])
   carrydef = jax.tree_util.tree_structure(start)
   carry = start
-  carrys = []
-  # fn(start, jax.tree_map(lambda x: x[0], inputs))  # Initialize weights.
+  outs = []
   for index in range(length):
-    carry, out = fn2(carry, jax.tree_map(lambda x: x[index], inputs))
+    carry, out = fn2(carry, tree_map(lambda x: x[index], inputs))
     flat, treedef = jax.tree_util.tree_flatten(out)
     assert treedef == carrydef, (treedef, carrydef)
-    carrys.append(flat)
-  carrys = [
-      jnp.stack([carry[i] for carry in carrys], 0)
-      for i in range(len(carrys[0]))]
-  return carrydef.unflatten(carrys)
+    outs.append(flat)
+  outs = [
+      jnp.stack([carry[i] for carry in outs], 0)
+      for i in range(len(outs[0]))]
+  return carrydef.unflatten(outs)
 
 
 def symlog(x):
@@ -189,7 +194,7 @@ class AutoAdapt(nj.Module):
 
   def scale(self):
     if self._impl == 'fixed':
-      return self._fixed_scale
+      return jnp.float32(self._fixed_scale)
     elif self._impl == 'mult':
       return sg(self.get('scale', jnp.ones, self._shape, jnp.float32))
     elif self._impl == 'prop':
@@ -276,43 +281,73 @@ class Optimizer(nj.Module):
   def __init__(
       self, name, lr, opt='adam', eps=1e-5, clip=100.0, warmup=0, wd=0.0,
       wd_pattern=r'/(w|kernel)$'):
+    assert opt in ('adam',)
     assert wd_pattern[0] not in ('0', '1')
     self.name = name
-    self.wd_pattern = re.compile(wd_pattern)
+    wd_pattern = re.compile(wd_pattern)
     chain = []
     chain.append(optax.clip_by_global_norm(clip))
     chain.append(optax.scale_by_adam(eps=eps))
     if wd:
-      chain.append(optax.additive_weight_decay(wd, self._wdmask))
+      chain.append(optax.additive_weight_decay(wd, lambda params: (
+          tree_map(lambda k: bool(wd_pattern.search(k)), tree_keys(params)))))
     chain.append(optax.scale(-lr))
     self.opt = optax.chain(*chain)
+    self.step = nj.Variable(jnp.array, 0, jnp.int32)
+    self.mixed = (COMPUTE_DTYPE != jnp.float32)
+    if self.mixed:
+      self.opt = optax.apply_if_finite(self.opt, max_consecutive_errors=1000)
+      self.grad_scale = nj.Variable(jnp.array, 1e4, jnp.float32)
+      self.good_steps = nj.Variable(jnp.array, 0, jnp.int32)
 
-  def __call__(self, modules, loss, *args, has_aux=False, **kwargs):
-    loss(*args, **kwargs)  # Ensure parameters are created.
-    modules = modules if isinstance(modules, (tuple, list)) else [modules]
-    # TODO: Exclude non-trainable variables!!!
-    params = {}
-    for module in modules:
-      params.update(module.get_state())
-    outs = nj.grad(loss, params.keys(), has_aux=has_aux)(*args, **kwargs)
-    if has_aux:
-      (loss, aux), grads = outs
-    else:
-      loss, grads = outs
+  def __call__(self, modules, lossfn, *args, has_aux=False, **kwargs):
+    # TODO: Exclude non-trainable variables.
+    def lossfn2(*args, **kwargs):
+      outs = lossfn(*args, **kwargs)
+      loss, aux = outs if has_aux else (outs, None)
+      assert loss.dtype == jnp.float32, (self.name, loss.dtype)
+      assert loss.shape == (), (self.name, loss.shape)
+      if self.mixed:
+        loss *= sg(self.grad_scale.read())
+      return loss, aux
+    metrics = {}
+    loss, params, grads, aux = nj.grad(
+        lossfn2, modules, has_aux=True)(*args, **kwargs)
     if parallel():
-      grads = jax.tree_map(lambda x: jax.lax.pmean(x, 'devices'), grads)
+      grads = tree_map(lambda x: jax.lax.pmean(x, 'devices'), grads)
+    if self.mixed:
+      grads = tree_map(lambda x: x / self.grad_scale.read(), grads)
+      finite = self._update_scale(grads)
+      metrics[f'{self.name}_grad_scale'] = self.grad_scale.read()
+      metrics[f'{self.name}_grad_overflow'] = (~finite).astype(jnp.float32)
     optstate = self.get('state', self.opt.init, params)
     updates, optstate = self.opt.update(grads, optstate, params)
     self.put('state', optstate)
-    nj.state().update(optax.apply_updates(params, updates))
-    metrics = {'loss': loss.mean(), 'grad_norm': optax.global_norm(grads)}
+    nj.context().update(optax.apply_updates(params, updates))
+    norm = optax.global_norm(grads)
+    if self.mixed:
+      norm = jnp.where(jnp.isfinite(norm), norm, jnp.nan)
+    self.step.write(self.step.read() + jnp.isfinite(norm).astype(jnp.int32))
+    metrics['loss'] = loss.mean()
+    metrics['grad_norm'] = norm
+    metrics['grad_steps'] = self.step.read()
     metrics = {f'{self.name}_{k}': v for k, v in metrics.items()}
     return (metrics, aux) if has_aux else metrics
 
-  def _wdmask(self, params):
-    keys = tree_keys(params)
-    mask = jax.tree_map(lambda k: bool(self.wd_pattern.search(k)), keys)
-    return mask
+  def _update_scale(self, grads):
+    finite = jnp.array([
+        jnp.isfinite(x).all() for x in jax.tree_util.tree_leaves(grads)]).all()
+    keep = (finite & (self.good_steps.read() < 1000))
+    incr = (finite & (self.good_steps.read() >= 1000))
+    decr = ~finite
+    self.good_steps.write(
+        keep.astype(jnp.int32) * (self.good_steps.read() + 1))
+    self.grad_scale.write(jnp.clip(
+        keep.astype(jnp.float32) * self.grad_scale.read() +
+        incr.astype(jnp.float32) * self.grad_scale.read() * 2 +
+        decr.astype(jnp.float32) * self.grad_scale.read() / 2,
+        1e-4, 1e4))
+    return finite
 
 
 def tree_keys(params, prefix=''):

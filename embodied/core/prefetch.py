@@ -1,67 +1,86 @@
 import queue as queuelib
+import sys
+import threading
+import traceback
 
 import numpy as np
 
 
 class Prefetch:
-
-  """
-  Implements zip() for iterables that yield dictionaries of Numpy arrays with
-  optional prefetching using multiple threads. The source generator functions
-  are split among the workers. The resulting arrays for each key are stacked,
-  adding a leading batch dimension.
-  """
+  """Implements zip() with multi-threaded prefetching. The sources are expected to
+  yield dicts of Numpy arrays and the iterator will return dicts of batched
+  Numpy arrays."""
 
   def __init__(self, sources, workers=0, prefetch=4):
+    self.workers = workers
     if workers:
+      # Round-robin assign sources to workers.
       self._running = True
+      self._threads = []
       self._queues = []
-      self._creators = []
-      # Round-robin assign sources to workers for balanced workload.
       assignments = [([], []) for _ in range(workers)]
       for index, source in enumerate(sources):
         queue = queuelib.Queue(prefetch)
         self._queues.append(queue)
         assignments[index % workers][0].append(source)
         assignments[index % workers][1].append(queue)
-      import threading
       for args in assignments:
         creator = threading.Thread(
             target=self._creator, args=args, daemon=True)
         creator.start()
-        self._creators.append(creator)
+        self._threads.append(creator)
+      self._batches = queuelib.Queue(prefetch)
+      batcher = threading.Thread(
+          target=self._batcher, args=(self._queues, self._batches),
+          daemon=True)
+      batcher.start()
+      self._threads.append(batcher)
     else:
-      self._creators = None
       self._iterators = [source() for source in sources]
     self._once = False
 
   def close(self):
-    if self._creators:
-      for creator in self._creators:
-        creator.close()
+    if self.workers:
+      self._running = False
+      for thread in self._threads:
+        thread.close()
 
   def __iter__(self):
     if self._once:
       raise RuntimeError(
           'You can only create one iterator per Batcher object to ensure that '
-          'data is consumed in order. You can create another Batcher object '
-          'instead.')
+          'data is consumed in order. Create another Batcher object instead.')
     self._once = True
     return self
 
   def __next__(self):
-    if self._creators:
-      elems = [x.get() for x in self._queues]
+    if self.workers:
+      batch = self._batches.get()
     else:
       elems = [next(x) for x in self._iterators]
-    return {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
+      batch = {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
+    if isinstance(batch, Exception):
+      raise batch
+    return batch
 
-  def _creator(self, sources, queues):
+  def _creator(self, sources, outputs):
     try:
       iterators = [source() for source in sources]
       while self._running:
-        for iterator, queue in zip(iterators, queues):
+        for iterator, queue in zip(iterators, outputs):
           queue.put(next(iterator))
     except Exception as e:
-      queues[0].put(e)
+      e.stacktrace = ''.join(traceback.format_exception(*sys.exc_info()))
+      outputs[0].put(e)
+      raise
+
+  def _batcher(self, sources, output):
+    try:
+      while self._running:
+        elems = [x.get() for x in sources]
+        batch = {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
+        output.put(batch)
+    except Exception as e:
+      e.stacktrace = ''.join(traceback.format_exception(*sys.exc_info()))
+      output.put(e)
       raise
