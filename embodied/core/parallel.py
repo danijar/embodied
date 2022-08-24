@@ -1,48 +1,51 @@
-import functools
+import enum
+from functools import partial as bind
 
 from . import worker
 
 
 class Parallel:
 
-  def __init__(self, ctor, strategy='process', daemon=False):
-    self._worker = worker.Worker(strategy, daemon)
-    self._worker.run_with_state(self._make, ctor)()
-    self._callables = {}
+  def __init__(self, ctor, strategy):
+    import cloudpickle
+    self.worker = worker.Worker(bind(self._respond, ctor), strategy)
+    self.callables = {}
 
   def __getattr__(self, name):
     if name.startswith('_'):
       raise AttributeError(name)
     try:
-      if name not in self._callables:
-        self._callables[name] = self._worker.run_with_state(
-            self._callable, name)()
-      if self._callables[name]:
-        return functools.partial(self._worker.run_with_state, self._call, name)
+      if name not in self.callables:
+        self.callables[name] = self.worker(Message.CALLABLE, name)()
+      if self.callables[name]:
+        return bind(self.worker, Message.CALL, name)
       else:
-        return self._worker.run_with_state(self._access, name)()
+        return self.worker(Message.READ, name)()
     except AttributeError:
       raise ValueError(name)
 
   def __len__(self):
-    return self._worker.run_with_state(self._call, '__len__')()
+    return self.worker(Message.CALL, '__len__')()
 
   def close(self):
-    self._worker.close()
+    self.worker.close()
 
-  @classmethod
-  def _make(cls, ctor, state):
-    state['env'] = ctor()
+  @staticmethod
+  def _respond(ctor, state, message, name, *args, **kwargs):
+    if 'obj' not in state:
+      state['obj'] = ctor()
+    if message == Message.CALLABLE:
+      assert not args and not kwargs, (args, kwargs)
+      return callable(getattr(state['obj'], name))
+    elif message == Message.CALL:
+      return getattr(state['obj'], name)(*args, **kwargs)
+    elif message == Message.READ:
+      assert not args and not kwargs, (args, kwargs)
+      return getattr(state['obj'], name)
 
-  @classmethod
-  def _callable(cls, name, state):
-    return callable(getattr(state['env'], name))
 
-  @classmethod
-  def _call(cls, name, *args, **kwargs):
-    state = kwargs.pop('state')
-    return getattr(state['env'], name)(*args, **kwargs)
+class Message(enum.Enum):
 
-  @classmethod
-  def _access(cls, name, state):
-    return getattr(state['env'], name)
+  CALLABLE = 2
+  CALL = 3
+  READ = 4

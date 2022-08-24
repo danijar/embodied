@@ -8,6 +8,7 @@ import embodied
 import numpy as np
 import pytest
 
+
 ALL_STORES = [
     lambda directory, capacity=None: embodied.replay.RAMStore(capacity),
     embodied.replay.DiskStore,

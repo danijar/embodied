@@ -4,15 +4,14 @@ import embodied
 
 
 def load_env(
-    task, amount=1, parallel='none', daemon=False, restart=False, seed=None,
-    **kwargs):
+    task, amount=1, parallel='none', restart=False, seed=None, **kwargs):
   ctors = []
   for index in range(amount):
     ctor = functools.partial(load_single_env, task, **kwargs)
     if seed is not None:
       ctor = functools.partial(ctor, seed=hash((seed, index)) % (2 ** 31 - 1))
     if parallel != 'none':
-      ctor = functools.partial(embodied.Parallel, ctor, parallel, daemon)
+      ctor = functools.partial(embodied.Parallel, ctor, parallel)
     if restart:
       ctor = functools.partial(embodied.wrappers.RestartOnException, ctor)
     ctors.append(ctor)

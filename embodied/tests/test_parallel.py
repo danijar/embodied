@@ -12,7 +12,18 @@ from embodied.envs import dummy
 
 class TestParallel:
 
-  @pytest.mark.parametrize('parallel', ['thread', 'process'])
+  @pytest.mark.parametrize('parallel', ['blocking', 'thread', 'process'])
+  def test_parallel_object(self, parallel):
+    class Dummy:
+      def __init__(self):
+        self.foo = 12
+      def bar(self):
+        return 42
+    parallel = embodied.Parallel(Dummy, parallel)
+    assert parallel.foo == 12
+    assert parallel.bar()() == 42
+
+  @pytest.mark.parametrize('parallel', ['blocking', 'thread', 'process'])
   def test_parallel_strategy(self, parallel):
     env = embodied.envs.load_env(
         'dummy_discrete', parallel=parallel, amount=4, length=10)
@@ -43,7 +54,7 @@ class TestParallel:
     driver(agent.policy, steps=4)
     duration = time.time() - start
     env.close()
-    assert duration <= 0.2
+    assert duration < 0.2
 
   def test_sequential_slow(self):
     def ctor():
@@ -78,10 +89,10 @@ class TestParallel:
         time.sleep(10)
     class Parent:
       def __init__(self):
-        self.child = embodied.Parallel(Child, 'process', daemon=False)
+        self.child = embodied.Parallel(Child, 'daemon')
       def foo(self):
         return self.child.foo()
-    parallel = embodied.Parallel(Parent, 'process', daemon=False)
+    parallel = embodied.Parallel(Parent, 'process')
     parallel.foo()  # Call method but don't block.
     parallel.close()
     duration = time.time() - start
