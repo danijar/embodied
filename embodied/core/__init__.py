@@ -15,6 +15,7 @@ from .timer import Timer
 from .worker import Worker
 from .prefetch import Prefetch
 from .metrics import Metrics
+from .uuid import uuid
 
 from .batch import BatchEnv
 from .random import RandomAgent

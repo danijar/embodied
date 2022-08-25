@@ -32,8 +32,10 @@ class Agent:
 class Env:
 
   def __len__(self):
-    # Return positive integer for batched envs.
-    return 0
+    return 0  # Return positive integer for batched envs.
+
+  def __bool__(self):
+    return True  # Env is always truthy, despite length zero.
 
   def __repr__(self):
     return (
@@ -72,6 +74,9 @@ class Wrapper:
 
   def __len__(self):
     return len(self.env)
+
+  def __bool__(self):
+    return bool(self.env)
 
   def __getattr__(self, name):
     if name.startswith('__'):

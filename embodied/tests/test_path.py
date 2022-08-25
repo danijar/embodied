@@ -4,7 +4,7 @@ import sys
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
 import embodied
-import pytest
+
 
 class TestDriver:
 
@@ -36,10 +36,10 @@ class TestDriver:
     assert str(embodied.Path('a/')) == 'a'
     assert str(embodied.Path('foo/bar/')) == 'foo/bar'
 
-  @pytest.mark.filterwarnings('ignore::DeprecationWarning')
-  def test_protocols(self):
-    assert str(embodied.Path('gs://')) == ('gs://')
-    assert str(embodied.Path('gs://foo/bar')) == 'gs://foo/bar'
+  # @pytest.mark.filterwarnings('ignore::DeprecationWarning')
+  # def test_protocols(self):
+  #   assert str(embodied.Path('gs://')) == ('gs://')
+  #   assert str(embodied.Path('gs://foo/bar')) == 'gs://foo/bar'
 
   def test_parent(self):
     empty = embodied.Path('.')

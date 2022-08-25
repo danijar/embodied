@@ -16,7 +16,6 @@ CONVERSION = {
     bool: bool,
 }
 
-
 def convert(value):
   value = np.asarray(value)
   if value.dtype not in CONVERSION.values():
@@ -30,9 +29,9 @@ def convert(value):
   return value
 
 
-def print(value):
+def print(*args, **kwargs):
   global console
   if console:
-    console.print(value)
+    console.print(*args, **kwargs)
   else:
-    builtins.print(value)
+    builtins.print(*args, **kwargs)

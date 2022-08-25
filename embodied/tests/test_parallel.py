@@ -9,10 +9,13 @@ import embodied
 import pytest
 from embodied.envs import dummy
 
+ALL = ['blocking', 'thread', 'process', 'daemon', 'process_slow']
+ASYNC = ['thread', 'process', 'daemon', 'process_slow']
+
 
 class TestParallel:
 
-  @pytest.mark.parametrize('parallel', ['blocking', 'thread', 'process'])
+  @pytest.mark.parametrize('parallel', ALL)
   def test_parallel_object(self, parallel):
     class Dummy:
       def __init__(self):
@@ -23,8 +26,8 @@ class TestParallel:
     assert parallel.foo == 12
     assert parallel.bar()() == 42
 
-  @pytest.mark.parametrize('parallel', ['blocking', 'thread', 'process'])
-  def test_parallel_strategy(self, parallel):
+  @pytest.mark.parametrize('parallel', ASYNC)
+  def test_parallel_driver(self, parallel):
     env = embodied.envs.load_env(
         'dummy_discrete', parallel=parallel, amount=4, length=10)
     agent = embodied.RandomAgent(env.act_space)
@@ -40,7 +43,7 @@ class TestParallel:
       assert len(eps[0]['reward']) == 11
       assert len(eps[1]['reward']) == 11
 
-  @pytest.mark.parametrize('parallel', ['thread', 'process'])
+  @pytest.mark.parametrize('parallel', ASYNC)
   def test_parallel_fast(self, parallel):
     def ctor():
       env = dummy.Dummy('discrete')

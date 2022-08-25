@@ -7,8 +7,8 @@ from . import worker
 class Parallel:
 
   def __init__(self, ctor, strategy):
-    import cloudpickle
-    self.worker = worker.Worker(bind(self._respond, ctor), strategy)
+    self.worker = worker.Worker(
+        bind(self._respond, ctor), strategy, state=True)
     self.callables = {}
 
   def __getattr__(self, name):
@@ -32,16 +32,16 @@ class Parallel:
 
   @staticmethod
   def _respond(ctor, state, message, name, *args, **kwargs):
-    if 'obj' not in state:
-      state['obj'] = ctor()
+    state = state or ctor()
     if message == Message.CALLABLE:
       assert not args and not kwargs, (args, kwargs)
-      return callable(getattr(state['obj'], name))
+      result = callable(getattr(state, name))
     elif message == Message.CALL:
-      return getattr(state['obj'], name)(*args, **kwargs)
+      result = getattr(state, name)(*args, **kwargs)
     elif message == Message.READ:
       assert not args and not kwargs, (args, kwargs)
-      return getattr(state['obj'], name)
+      result = getattr(state, name)
+    return state, result
 
 
 class Message(enum.Enum):

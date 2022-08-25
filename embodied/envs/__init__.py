@@ -32,7 +32,7 @@ def load_single_env(
     from . import gym
     env = gym.Gym(task)
   elif suite == 'procgen':
-    import procgen
+    import procgen  # noqa
     from . import gym
     env = gym.Gym(f'procgen:procgen-{task}-v0')
 

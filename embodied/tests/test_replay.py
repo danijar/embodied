@@ -1,4 +1,4 @@
-import functools
+import collections
 import pathlib
 import sys
 
@@ -9,163 +9,177 @@ import numpy as np
 import pytest
 
 
-ALL_STORES = [
-    lambda directory, capacity=None: embodied.replay.RAMStore(capacity),
-    embodied.replay.DiskStore,
-    embodied.replay.CkptRAMStore,
+REPLAYS_ALL = [
+    embodied.replay.UniformDict,
+    embodied.replay.UniformChunks,
 ]
 
-PERSISTENT_STORES = [
-    embodied.replay.DiskStore,
-    embodied.replay.CkptRAMStore,
-]
-
-ALL_REPLAYS = [
-    embodied.replay.FixedLength,
-    embodied.replay.Consecutive,
-    embodied.replay.Prioritized,
-]
-
-UNIFORM_FIXED_LENGTH = [
-    functools.partial(
-        embodied.replay.FixedLength, prio_starts=0.0, prio_ends=0.0),
-    functools.partial(
-        embodied.replay.Prioritized, exponent=0.0,
-        prio_starts=0.0, prio_ends=0.0),
+REPLAYS_UNIFORM = [
+    embodied.replay.UniformDict,
+    # embodied.replay.UniformChunks,
 ]
 
 
 class TestReplay:
 
-  # Example trajectory:
-  # idx: -1    0        1      ...  9      10      11
-  # obs: zeros is_first mid         mid    is_last is_first
-  # act: reset policy   policy      policy reset   policy
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  def test_multiple_keys(self, Replay):
+    replay = Replay(length=5, capacity=10)
+    for step in range(30):
+      replay.add({'image': np.zeros((64, 64, 3)), 'action': np.zeros(12)})
+    seq = next(iter(replay.dataset()))
+    assert set(seq.keys()) == {'id', 'image', 'action'}
+    assert seq['id'].shape == (5, 16)
+    assert seq['image'].shape == (5, 64, 64, 3)
+    assert seq['action'].shape == (5, 12)
 
-  @pytest.mark.parametrize('Replay', ALL_REPLAYS)
-  @pytest.mark.parametrize('Store', ALL_STORES)
-  def test_internal_content(self, tmpdir, Replay, Store):
-    env = embodied.envs.load_env('dummy_discrete', length=10)
-    agent = embodied.RandomAgent(env.act_space)
-    store = Store(tmpdir)
-    replay = Replay(store, chunk=5)
-    driver = embodied.Driver(env)
-    driver.on_step(replay.add)
-    driver(agent.policy, episodes=2)
-    assert len(replay) == 22
-    assert len(store) == 2
-    for key in store.keys():
-      assert len(store[key]['action']) == 11
-      assert (store[key]['step'] == np.arange(11)).all()
-    for ongoing in replay.ongoing.values():
-      assert len(ongoing) == 0
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize(
+      'length,workers,capacity',
+      [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
+  def test_capacity_exact(self, Replay, length, workers, capacity):
+    replay = Replay(length, capacity)
+    for step in range(30):
+      for worker in range(workers):
+        replay.add({'step': step}, worker)
+      target = min(workers * max(0, (step + 1) - length + 1), capacity)
+      assert len(replay) == target
 
-  @pytest.mark.parametrize('Replay', UNIFORM_FIXED_LENGTH)
-  @pytest.mark.parametrize('Store', ALL_STORES)
-  def test_sample_uniform(self, tmpdir, Replay, Store):
-    env = embodied.envs.load_env('dummy_discrete', length=10)
-    agent = embodied.RandomAgent(env.act_space)
-    store = Store(tmpdir)
-    replay = Replay(store, chunk=10)
-    driver = embodied.Driver(env)
-    driver.on_step(replay.add)
-    driver(agent.policy, episodes=1)
-    count1, count2 = 0, 0
-    iterator = replay.dataset()
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize(
+      'length,workers,capacity',
+      [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
+  def test_sample_sequences(self, Replay, length, workers, capacity):
+    replay = Replay(length, capacity)
+    for step in range(30):
+      for worker in range(workers):
+        replay.add({'step': step, 'worker': worker}, worker)
+    dataset = iter(replay.dataset())
+    for _ in range(10):
+      seq = next(dataset)
+      assert (seq['step'] - seq['step'][0] == np.arange(length)).all()
+      assert (seq['worker'] == seq['worker'][0]).all()
+
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize(
+      'length,capacity', [(1, 1), (2, 2), (5, 10), (1, 2), (5, 15), (2, 20)])
+  def test_sample_single(self, Replay, length, capacity):
+    replay = Replay(length, capacity)
+    for step in range(length):
+      replay.add({'step': step})
+    dataset = iter(replay.dataset())
+    for _ in range(10):
+      seq = next(dataset)
+      assert (seq['step'] == np.arange(length)).all()
+
+  @pytest.mark.parametrize('Replay', REPLAYS_UNIFORM)
+  def test_sample_uniform(self, Replay):
+    replay = Replay(capacity=20, length=5, seed=0)
+    for step in range(7):
+      replay.add({'step': step})
+    histogram = collections.defaultdict(int)
+    dataset = iter(replay.dataset())
     for _ in range(100):
-      sample = next(iterator)['step']
-      count1 += (sample == np.arange(0, 10)).all()
-      count2 += (sample == np.arange(1, 11)).all()
-    assert count1 + count2 == 100
-    assert count1 > 30
-    assert count2 > 30
+      seq = next(dataset)
+      histogram[seq['step'][0]] += 1
+    histogram = tuple(histogram.values())
+    assert len(histogram) == 3
+    assert histogram[0] > 20
+    assert histogram[1] > 20
+    assert histogram[2] > 20
 
-  @pytest.mark.parametrize('Replay', ALL_REPLAYS)
-  @pytest.mark.parametrize('Store', PERSISTENT_STORES)
-  def test_reload(self, tmpdir, Replay, Store):
-    env = embodied.envs.load_env('dummy_discrete', length=10)
-    agent = embodied.RandomAgent(env.act_space)
-    old = Replay(Store(tmpdir), chunk=5)
-    driver = embodied.Driver(env)
-    driver.on_step(old.add)
-    driver(agent.policy, episodes=2)
-    store = Store(tmpdir)
-    replay = Replay(store, chunk=5)
-    assert len(replay) == 22
-    assert len(store) == 2
-    for key in store.keys():
-      assert len(store[key]['action']) == 11
-      assert (store[key]['step'] == np.arange(11)).all()
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  def test_workers_simple(self, Replay):
+    replay = Replay(length=2, capacity=20)
+    replay.add({'step': 0}, worker=0)
+    replay.add({'step': 1}, worker=1)
+    replay.add({'step': 2}, worker=0)
+    replay.add({'step': 3}, worker=1)
+    dataset = iter(replay.dataset())
+    for _ in range(10):
+      seq = next(dataset)
+      assert tuple(seq['step']) in ((0, 2), (1, 3))
 
-  @pytest.mark.parametrize(('capacity', 'steps', 'episodes'), [
-      (11, 11, 1),
-      (21, 11, 1),
-      (22, 22, 2),
-  ])
-  @pytest.mark.parametrize('Replay', ALL_REPLAYS)
-  @pytest.mark.parametrize('Store', ALL_STORES)
-  def test_capacity(
-      self, tmpdir, Replay, Store, capacity, steps, episodes):
-    env = embodied.envs.load_env('dummy_discrete', length=10)
-    agent = embodied.RandomAgent(env.act_space)
-    store = Store(tmpdir, capacity)
-    replay = Replay(store, chunk=5)
-    driver = embodied.Driver(env)
-    driver.on_step(replay.add)
-    driver(agent.policy, episodes=3)
-    assert replay.stats['replay_steps'] == steps
-    assert replay.stats['replay_trajs'] == episodes
-    loaded = [store[key] for key in store.keys()]
-    assert len(loaded) == episodes
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  def test_workers_random(self, Replay, length=4, capacity=30):
+    rng = np.random.default_rng(seed=0)
+    replay = Replay(length, capacity)
+    streams = {i: iter(range(10)) for i in range(3)}
+    for _ in range(40):
+      worker = int(rng.integers(0, 3, ()))
+      try:
+        step = {'step': next(streams[worker]), 'stream': worker}
+        replay.add(step, worker=worker)
+      except StopIteration:
+        pass
+    histogram = collections.defaultdict(int)
+    dataset = iter(replay.dataset())
+    for _ in range(10):
+      seq = next(dataset)
+      assert (seq['step'] - seq['step'][0] == np.arange(length)).all()
+      assert (seq['stream'] == seq['stream'][0]).all()
+      histogram[int(seq['stream'][0])] += 1
+    assert all(count > 0 for count in histogram.values())
 
-  @pytest.mark.parametrize(('capacity', 'steps', 'episodes'), [
-      (11, 11, 1),
-      (21, 11, 1),
-      (22, 22, 2),
-  ])
-  @pytest.mark.parametrize('Replay', ALL_REPLAYS)
-  @pytest.mark.parametrize('Store', [
-      embodied.replay.DiskStore, embodied.replay.CkptRAMStore])
-  def test_reload_capacity(
-      self, tmpdir, Replay, Store, capacity, steps, episodes):
-    env = embodied.envs.load_env('dummy_discrete', length=10)
-    agent = embodied.RandomAgent(env.act_space)
-    old = Replay(Store(tmpdir, capacity), chunk=5)
-    driver = embodied.Driver(env)
-    driver.on_step(old.add)
-    driver(agent.policy, episodes=3)
-    store = Store(tmpdir, capacity)
-    replay = Replay(store, chunk=5)
-    assert replay.stats['replay_steps'] == steps
-    assert replay.stats['replay_trajs'] == episodes
-    assert len(store) == episodes
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize(
+      'length,workers,capacity',
+      [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
+  def test_worker_delay(self, Replay, length, workers, capacity):
+    # embodied.uuid.reset(debug=True)
+    replay = Replay(length, capacity)
+    rng = np.random.default_rng(seed=0)
+    streams = [iter(range(10)) for _ in range(workers)]
+    while streams:
+      try:
+        worker = rng.integers(0, len(streams))
+        replay.add({'step': next(streams[worker])}, worker)
+      except StopIteration:
+        del streams[worker]
 
-  @pytest.mark.parametrize('Replay', ALL_REPLAYS)
-  def test_unexpected_reset(self, Replay):
+  # TODO
+  # @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', [embodied.replay.UniformChunks])
+  @pytest.mark.parametrize(
+      'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
+  def test_restore_exact(self, tmpdir, Replay, length, capacity, chunks):
+    embodied.uuid.reset(debug=True)
+    assert len(list(embodied.Path(tmpdir).glob('*.npz'))) == 0
+    replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
+    for step in range(30):
+      replay.add({'step': step})
+    num_items = np.clip(30 - length + 1, 0, capacity)
+    assert len(replay) == num_items
+    replay.save()
+    filenames = list(embodied.Path(tmpdir).glob('*.npz'))
+    lengths = [int(x.stem.split('-')[3]) for x in filenames]
+    assert len(filenames) == (int(np.ceil(30 / chunks)))
+    assert sum(lengths) == 30
+    assert all(1 <= x <= chunks for x in lengths)
+    replay = Replay(length, capacity, tmpdir, chunks)
+    assert len(replay) == 0
+    replay.load()
+    assert sorted(embodied.Path(tmpdir).glob('*.npz')) == sorted(filenames)
+    assert len(replay) == num_items
+    dataset = iter(replay.dataset())
+    for _ in range(10):
+      assert len(next(dataset)['step']) == length
 
-    class UnexpectedReset(embodied.Wrapper):
-      """Send is_first without preceeding is_last."""
-      def __init__(self, env, when):
-        super().__init__(env)
-        self._when = when
-        self._step = 0
-      def step(self, action):
-        if self._step == self._when:
-          action = action.copy()
-          action['reset'] = np.ones_like(action['reset'])
-        self._step += 1
-        return self.env.step(action)
-
-    env = embodied.envs.load_env('dummy_discrete', length=10)
-    env = UnexpectedReset(env, when=8)
-    agent = embodied.RandomAgent(env.act_space)
-    driver = embodied.Driver(env)
-    store = embodied.replay.RAMStore()
-    replay = Replay(store, chunk=5)
-    driver.on_step(replay.add)
-    driver(agent.policy, episodes=2)
-    assert len(replay) == 22
-    assert len(store) == 2
-    for key in store.keys():
-      assert len(store[key]['action']) == 11
-      assert (store[key]['step'] == np.arange(11)).all()
+  # TODO: Fix this test.
+  # @pytest.mark.parametrize('Replay', [embodied.replay.UniformChunks])
+  # @pytest.mark.parametrize('workers', [1, 2, 5])
+  # @pytest.mark.parametrize('length,capacity,chunks', [(5, 25, 3), (5, 100, 9)])
+  # def test_restore_workers(
+  #     self, tmpdir, Replay, workers, length, capacity, chunks):
+  #   replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
+  #   for step in range(50):
+  #     for worker in range(workers):
+  #       replay.add({'step': step}, worker)
+  #   num_items = len(replay.items)
+  #   replay.save()
+  #   replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
+  #   replay.load()
+  #   assert len(replay.items) == num_items
+  #   dataset = iter(replay.dataset())
+  #   for _ in range(10):
+  #     assert len(next(dataset)['step']) == length

@@ -33,6 +33,7 @@ def main(argv=None):
 
   config = config.update(logdir=str(embodied.Path(config.logdir)))
   args = embodied.Config(logdir=config.logdir, **config.run)
+
   min_fill = config.replay_fixed.slots * config.env.amount
   args = args.update(
       expl_until=args.expl_until // config.env.repeat,
@@ -60,11 +61,6 @@ def main(argv=None):
       embodied.logger.JSONLOutput(outdir, 'scores.jsonl', 'episode/score'),
       embodied.logger.TensorBoardOutput(outdir),
   ], multiplier)
-  try:
-    import google3
-    logger.outputs.append(embodied.logger.XDataOutput())
-  except ImportError:
-    pass
 
   cleanup = []
   try:
@@ -102,7 +98,7 @@ def main(argv=None):
     elif args.script == 'learning':
       env.close()
       port = parsed.learner_addr.split(':')[-1]
-      #replay = make_replay(config, logdir / 'episodes', server_port=port)
+      # replay = make_replay(config, logdir / 'episodes', server_port=port)
       replay = make_replay(config, server_port=port)
       if config.eval_dir:
         eval_replay = make_replay(config, config.eval_dir, is_eval=True)
@@ -124,39 +120,11 @@ def main(argv=None):
 def make_replay(
     config, directory=None, is_eval=False, remote_addr=None,
     server_port=None, **kwargs):
-
-  size = config.replay_size
-  chunk = config.replay_chunk
-  if is_eval:
-    size //= 10
-  if remote_addr:
-    store = embodied.replay.StoreClient(remote_addr)
-  else:
-    if directory:
-      store = embodied.replay.CkptRAMStore(
-          directory, size, parallel=True)
-    else:
-      store = embodied.replay.RAMStore(size)
-  store = embodied.replay.Stats(store)
-  if server_port:
-    store = embodied.replay.StoreServer(store, server_port)
-
-  if config.replay == 'fixed':
-    replay = embodied.replay.FixedLength(
-        store, chunk, **config.replay_fixed, **kwargs)
-  elif config.replay == 'consec':
-    replay = embodied.replay.Consecutive(
-        store, chunk, **config.replay_consec, **kwargs)
-  elif config.replay == 'prio' and not is_eval:
-    replay = embodied.replay.Prioritized(
-        store, chunk, **config.replay_prio, **kwargs)
-  elif config.replay == 'prio' and is_eval:
-    # Don't use prioritized for eval.
-    replay = embodied.replay.FixedLength(
-        store, chunk, **config.replay_fixed, **kwargs)
-  else:
-    raise NotImplementedError(config.replay)
-  return replay
+  assert not remote_addr
+  assert not server_port
+  size = config.replay_size // 10 if is_eval else config.replay_size
+  return embodied.replay.Uniform(
+      config.batch_length, size, directory, **kwargs)
 
 
 if __name__ == '__main__':

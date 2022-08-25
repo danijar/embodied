@@ -1,5 +1,4 @@
 import collections
-import threading
 import time
 import uuid
 
@@ -12,15 +11,13 @@ from . import prios
 class Prioritized(embodied.Replay):
 
   def __init__(
-      self, store, chunk=64, slots=512, prio_starts=0.0, prio_ends=1.0, sync=0,
-      fraction=0.1, softmax=False, temp=1.0, constant=0.0, exponent=0.5):
+      self, store, chunk=64, slots=512, fraction=0.1, softmax=False, temp=1.0,
+      constant=0.0, exponent=0.5):
     # TODO: We're currently not removing old episodes from the priority table
     # when the store is reaching its capacity.
     self.store = store
     self.chunk = chunk
     self.slots = slots
-    self.prio_starts = prio_starts
-    self.prio_ends = prio_ends
     self.random = np.random.RandomState(seed=0)
     self.ongoing = collections.defaultdict(
         lambda: collections.defaultdict(list))
@@ -31,18 +28,12 @@ class Prioritized(embodied.Replay):
       else:
         prios = np.abs(prios) ** exponent
       return np.convolve(prios, np.ones(chunk), 'valid')
-    self.prios = prios.Priorities(aggregate, fraction, prio_starts, prio_ends)
+    self.prios = prios.Priorities(aggregate, fraction)
     self.handed_out_keys = set()
     if softmax:
       self.cooldown = np.full(self.chunk, -np.inf, np.float64)
     else:
       self.cooldown = np.full(self.chunk, 0.0, np.float64)
-    if sync:
-      self.last_scan = time.time()
-      # TODO: How can we propagate exceptions from this worker thread?
-      self.thread = threading.Thread(
-          target=self._sync, args=(sync,), daemon=True)
-      self.thread.start()
 
   def __len__(self):
     return self.store.steps
@@ -73,7 +64,7 @@ class Prioritized(embodied.Replay):
     self.prios.add(key, np.full(length, np.inf, np.float64))
 
   def prioritize(self, keys, priorities):
-    keys = np.asarray(keys, np.int64)[:, 0]  # Key is replicated along time dim.
+    keys = np.asarray(keys, np.int64)[:, 0]  # Key is replicated over time dim.
     priorities = np.asarray(priorities, np.float64)
     assert priorities.shape == (len(keys), self.chunk), priorities.shape
     for key, priority in zip(keys, priorities):
@@ -86,14 +77,14 @@ class Prioritized(embodied.Replay):
 
   def dataset(self):
     while True:
-      traj = self._sample()
+      traj = self.sample()
       if traj is None:
         print('Waiting for episodes.')
         time.sleep(1)
         continue
       yield traj
 
-  def _sample(self):
+  def sample(self):
     keys = self.store.keys()
     if not keys:
       return None
@@ -105,14 +96,9 @@ class Prioritized(embodied.Replay):
     total = len(next(iter(traj.values())))
     lower = 0
     upper = total - self.chunk + 1
-    if self.prio_starts:
-      lower -= int(self.chunk * self.prio_starts)
-    if self.prio_ends:
-      upper += int(self.chunk * self.prio_ends)
     index = self.random.randint(lower, upper)
     index = np.clip(index, 0, total - self.chunk)
     chunk = {k: traj[k][index: index + self.chunk] for k in traj.keys()}
-    chunk['is_first'] = np.zeros(len(chunk['action']), bool)
     chunk['is_first'][0] = True
     chunk['key'] = np.repeat(key[None], self.chunk, axis=0)
     chunk['prob'] = np.repeat(prob[None], self.chunk, axis=0)
@@ -128,9 +114,3 @@ class Prioritized(embodied.Replay):
     key = uuid.UUID(bytes=raw[:16]).hex
     index = int.from_bytes(raw[16:], 'big')
     return key, index
-
-  def _sync(self, interval):
-    while True:
-      time.sleep(max(0, self.last_scan + interval - time.time()))
-      self.last_scan = time.time()
-      self.store.sync()

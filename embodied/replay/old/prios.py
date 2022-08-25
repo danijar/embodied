@@ -6,11 +6,9 @@ import numpy as np
 
 class Priorities:
 
-  def __init__(self, aggregate, fraction=0.25, prio_starts=1.0, prio_ends=1.0):
+  def __init__(self, aggregate, fraction=0.25):
     self.aggregate = aggregate
     self.fraction = fraction
-    self.prio_starts = prio_starts
-    self.prio_ends = prio_ends
     self.random = np.random.RandomState(seed=0)
     self.entries = {}
     self.probs = None
@@ -110,10 +108,6 @@ class Priorities:
     if infs.any():
       agg = infs.astype(np.float64)
     uniform = np.ones_like(agg) / len(agg)
-    if self.prio_starts or self.prio_ends:
-      uniform[0] *= (len(entry.steps) - len(uniform)) * self.prio_starts
-      uniform[-1] *= (len(entry.steps) - len(uniform)) * self.prio_ends
-      uniform /= uniform.sum()
     normalized = agg.sum()
     if normalized == 0:
       probs = uniform

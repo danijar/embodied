@@ -1,4 +1,3 @@
-import concurrent.futures
 import io
 import pickle
 import threading
@@ -13,36 +12,36 @@ class RAMStore:
   def __init__(self, capacity=None):
     self.capacity = capacity
     self.steps = 0
-    self.trajs = {}
+    self.seqs = {}
 
   def stats(self):
     return {
         'steps': self.steps,
-        'trajs': len(self.trajs),
+        'seqs': len(self.seqs),
     }
 
   def close(self):
     pass
 
   def keys(self):
-    return tuple(self.trajs.keys())
+    return tuple(self.seqs.keys())
 
   def __contains__(self, key):
-    return key in self.trajs.keys()
+    return key in self.seqs.keys()
 
   def __len__(self):
-    return len(self.trajs)
+    return len(self.seqs)
 
   def __getitem__(self, key):
-    return self.trajs[key]
+    return self.seqs[key]
 
   def __setitem__(self, key, traj):
-    self.trajs[key] = traj
+    self.seqs[key] = traj
     self.steps += len(next(iter(traj.values())))
     self._enforce_limit()
 
   def __delitem__(self, key):
-    traj = self.trajs.pop(key)
+    traj = self.seqs.pop(key)
     self.steps -= len(next(iter(traj.values())))
 
   def sync(self):
@@ -53,9 +52,9 @@ class RAMStore:
   def _enforce_limit(self):
     if not self.capacity:
       return
-    while len(self.trajs) > 1 and self.steps > self.capacity:
+    while len(self.seqs) > 1 and self.steps > self.capacity:
       # Relying on Python preserving dict insertion order.
-      del self[next(iter(self.trajs.keys()))]
+      del self[next(iter(self.seqs.keys()))]
 
 
 class DiskStore:
@@ -67,15 +66,14 @@ class DiskStore:
     self.parallel = parallel
     self.filenames = {}
     self.steps = 0
-    if parallel:
-      self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-      self.future = None
+    self.saver = embodied.Worker(
+        self._save, 'thread' if parallel else 'blocking')
     self.sync()
 
   def stats(self):
     return {
         'steps': self.steps,
-        'trajs': len(self.filenames),
+        'seqs': len(self.filenames),
     }
 
   def close(self):
@@ -105,12 +103,7 @@ class DiskStore:
     self._enforce_limit()
     # TODO: It can take a while for the trajectory to be written and it causes
     # a not found error if the user tries to access the episode before that.
-    if self.parallel:
-      if self.future:
-        self.future.result()
-      self.future = self.executor.submit(self._save, filename, traj)
-    else:
-      self._save(filename, traj)
+    self.saver(filename, traj)
 
   def __delitem__(self, key):
     filename = self.filenames.pop(key)

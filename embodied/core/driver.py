@@ -69,6 +69,7 @@ class Driver:
       for i, done in enumerate(self._obs['is_last']):
         if not done:
           continue
+        # TODO: Benchmark this convert call?
         ep = {k: convert(v) for k, v in self._eps[i].items()}
         [fn(ep.copy(), i, **self._kwargs) for fn in self._on_episodes]
         episode += 1
