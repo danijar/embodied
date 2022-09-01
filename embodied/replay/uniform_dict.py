@@ -17,14 +17,13 @@ class UniformDict:
     self.length = length
     self.capacity = capacity
     self.directory = directory
+    self.chunks = chunks
     self.items = indexdict.IndexDict()  # {itemid: [step]}
-    self.fifo = deque()
     self.streams = defaultdict(bind(deque, maxlen=length))
     self.saver = directory and saver.Saver(directory, chunks)
+    self.fifo = deque()
     self.rng = np.random.default_rng(seed)
-    # TODO
-    # for step, stream in self.saver.load(self.capacity):
-    #   self.add(step, stream)
+    self.load(None)
 
   def __len__(self):
     return len(self.items)
@@ -35,8 +34,8 @@ class UniformDict:
 
   def add(self, step, worker=0):
     step = {k: v for k, v in step.items() if not k.startswith('log_')}
-    self.directory and self.saver.add(step, worker)
     step['id'] = np.asarray(embodied.uuid(step.get('id')))
+    self.directory and self.saver.add(step, worker)
     stream = self.streams[worker]
     stream.append(step)
     self._check_capacity()
@@ -57,13 +56,16 @@ class UniformDict:
         counter += 1
       yield self._sample()
 
-  def save(self, wait=True):
+  def save(self, wait=False):
     self.directory and self.saver.save(wait)
 
-  def load(self):
-    if self.directory:
-      for step, stream in self.saver.load(self.capacity):
-        self.add(step, stream)
+  def load(self, data=None):
+    self.streams.clear()
+    if not self.directory:
+      return
+    for step, worker in self.saver.load(self.capacity, self.length):
+      self.add(step, worker)
+    self.streams.clear()
     while self.capacity and len(self) > self.capacity:
       del self.items[self.fifo.popleft()]
 
@@ -82,24 +84,3 @@ class UniformDict:
       raise ValueError(
           f'Need at least capacity of {needed} steps to support '
           f'sequence length {self.length} with {len(self.streams)} workers.')
-
-  # def draw(self, width=79):
-  #   lines = []
-  #   allids = tuple(self.steps.keys()) + tuple(self.items.keys())
-  #   grid = max(len(str(x)) for x in allids) + 1
-  #   stepcols, cols = {}, []
-  #   for stepid in self.steps.keys():
-  #     stepcols[stepid] = len(cols)
-  #     cols.append('|' + str(stepid).rjust(grid - 1, '_'))
-  #   lines.append(' ' * (grid + 6) + '_' * (len(cols) * grid - 1))
-  #   lines.append('Steps:' + ' ' * (grid - 1) + ''.join(cols) + '|')
-  #   for itemid, steps in self.items.items():
-  #     cols = ['|' + ' ' * (grid - 1)] * len(stepcols) + ['|']
-  #     for step in steps:
-  #       if step['id'] not in stepcols:
-  #         cols.append(' ?')
-  #       else:
-  #         cols[stepcols[step['id']]] = '|' + '#' * (grid - 1)
-  #     lines.append('Item ' + str(itemid).rjust(grid - 1) + ' ' + ''.join(cols))
-  #   lines = [x[:width - 4] + ' ...' if len(x) > width else x for x in lines]
-  #   return '\n' + '\n'.join(lines) + '\n'

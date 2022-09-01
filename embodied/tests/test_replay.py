@@ -16,7 +16,7 @@ REPLAYS_ALL = [
 
 REPLAYS_UNIFORM = [
     embodied.replay.UniformDict,
-    # embodied.replay.UniformChunks,
+    embodied.replay.UniformChunks,
 ]
 
 
@@ -137,9 +137,7 @@ class TestReplay:
       except StopIteration:
         del streams[worker]
 
-  # TODO
-  # @pytest.mark.parametrize('Replay', REPLAYS_ALL)
-  @pytest.mark.parametrize('Replay', [embodied.replay.UniformChunks])
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
   @pytest.mark.parametrize(
       'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
   def test_restore_exact(self, tmpdir, Replay, length, capacity, chunks):
@@ -150,36 +148,38 @@ class TestReplay:
       replay.add({'step': step})
     num_items = np.clip(30 - length + 1, 0, capacity)
     assert len(replay) == num_items
-    replay.save()
+    replay.save(wait=True)
     filenames = list(embodied.Path(tmpdir).glob('*.npz'))
     lengths = [int(x.stem.split('-')[3]) for x in filenames]
     assert len(filenames) == (int(np.ceil(30 / chunks)))
     assert sum(lengths) == 30
     assert all(1 <= x <= chunks for x in lengths)
     replay = Replay(length, capacity, tmpdir, chunks)
-    assert len(replay) == 0
-    replay.load()
     assert sorted(embodied.Path(tmpdir).glob('*.npz')) == sorted(filenames)
     assert len(replay) == num_items
     dataset = iter(replay.dataset())
     for _ in range(10):
       assert len(next(dataset)['step']) == length
 
-  # TODO: Fix this test.
-  # @pytest.mark.parametrize('Replay', [embodied.replay.UniformChunks])
-  # @pytest.mark.parametrize('workers', [1, 2, 5])
-  # @pytest.mark.parametrize('length,capacity,chunks', [(5, 25, 3), (5, 100, 9)])
-  # def test_restore_workers(
-  #     self, tmpdir, Replay, workers, length, capacity, chunks):
-  #   replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
-  #   for step in range(50):
-  #     for worker in range(workers):
-  #       replay.add({'step': step}, worker)
-  #   num_items = len(replay.items)
-  #   replay.save()
-  #   replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
-  #   replay.load()
-  #   assert len(replay.items) == num_items
-  #   dataset = iter(replay.dataset())
-  #   for _ in range(10):
-  #     assert len(next(dataset)['step']) == length
+  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('workers', [1, 2, 5])
+  @pytest.mark.parametrize(
+      'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
+  def test_restore_workers(
+      self, tmpdir, Replay, workers, length, capacity, chunks):
+    capacity *= workers
+    replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
+    for step in range(50):
+      for worker in range(workers):
+        replay.add({'step': step}, worker)
+    num_items = np.clip((50 - length + 1) * workers, 0, capacity)
+    assert len(replay) == num_items
+    replay.save(wait=True)
+    filenames = list(embodied.Path(tmpdir).glob('*.npz'))
+    lengths = [int(x.stem.split('-')[3]) for x in filenames]
+    assert sum(lengths) == 50 * workers
+    replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
+    assert len(replay) == num_items
+    dataset = iter(replay.dataset())
+    for _ in range(10):
+      assert len(next(dataset)['step']) == length
