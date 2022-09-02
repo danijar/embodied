@@ -5,24 +5,28 @@ from functools import partial as bind
 import embodied
 import numpy as np
 
-from . import saver
 from . import indexdict
+from . import sampletree
+from . import saver
 
 
-class UniformDict:
+class PrioritizedDict:
 
   def __init__(
-      self, length, capacity=None, directory=None, chunks=1024, seed=0):
+      self, length, capacity=None, directory=None, initial=np.inf, chunks=1024,
+      seed=0):
     assert not capacity or length <= capacity, (length, capacity)
     self.length = length
     self.capacity = capacity
     self.directory = directory
+    self.initial = initial
     self.chunks = chunks
     self.items = indexdict.IndexDict()  # {itemid: [step]}
     self.streams = defaultdict(bind(deque, maxlen=length))
     self.saver = directory and saver.Saver(directory, chunks)
     self.fifo = deque()
-    self.rng = np.random.default_rng(seed)
+    self.prios = {}
+    self.sampler = sampletree.SampleTree()
     self.load(None)
 
   def __len__(self):
@@ -35,6 +39,7 @@ class UniformDict:
   def add(self, step, worker=0):
     step = {k: v for k, v in step.items() if not k.startswith('log_')}
     step['id'] = np.asarray(embodied.uuid(step.get('id')))
+    self.prios[step['id']] = self.initial
     self.directory and self.saver.add(step, worker)
     stream = self.streams[worker]
     stream.append(step)
@@ -43,8 +48,8 @@ class UniformDict:
       itemid = embodied.uuid()
       self.items[itemid] = tuple(stream)
       self.fifo.append(itemid)
-    while self.capacity and len(self) > self.capacity:
-      del self.items[self.fifo.popleft()]
+      self.sampler.insert(itemid, self._aggregate_prios(itemid))
+    self._ensure_capacity()
 
   def dataset(self):
     while True:
@@ -56,6 +61,19 @@ class UniformDict:
         counter += 1
       yield self._sample()
 
+  def prioritize(self, stepids, priorities):
+    # TODO: Add self.stepitems as weakref.WeakDict?
+    # itemids = set()
+    # for stepid in stepids:
+    #   for itemid in self.stepitems[stepid]:
+    #     itemids.add(itemid)
+    # try:
+    #   for itemid in itemids:
+    #     self.sampler.update(itemid, self._aggregate_prios(itemid))
+    # except KeyError:
+    #  pass  # Item has already been preempted.
+    pass
+
   def save(self, wait=False):
     self.directory and self.saver.save(wait)
 
@@ -66,15 +84,25 @@ class UniformDict:
     for step, worker in self.saver.load(self.capacity, self.length):
       self.add(step, worker)
     self.streams.clear()
-    while self.capacity and len(self) > self.capacity:
-      del self.items[self.fifo.popleft()]
+    self._ensure_capacity()
 
   def _sample(self):
-    seq = self.items[self.rng.integers(0, len(self.items)).item()]
+    itemid = self.sampler.sample()
+    self.sampler.update(itemid, 0)
+    seq = self.items[itemid]
     seq = {k: embodied.convert([step[k] for step in seq]) for k in seq[0]}
     if 'is_first' in seq:
       seq['is_first'][0] = True
     return seq
+
+  def _aggregate_prios(self, itemid):
+    pass
+
+  def _ensure_capacity(self):
+    while self.capacity and len(self) > self.capacity:
+      itemid = self.fifo.popleft()
+      del self.items[itemid]
+      self.sampler.remove(itemid)
 
   def _check_capacity(self):
     needed = self.length * len(self.streams)
