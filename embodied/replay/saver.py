@@ -14,7 +14,7 @@ class Saver:
     self.directory.mkdirs()
     self.chunks = chunks
     self.buffers = defaultdict(bind(chunklib.Chunk, chunks))
-    self.saver = concurrent.futures.ThreadPoolExecutor(16)
+    self.workers = concurrent.futures.ThreadPoolExecutor(16)
     self.promises = deque()
     self.loading = False
 
@@ -25,7 +25,7 @@ class Saver:
     buffer.append(step)
     if buffer.length >= self.chunks:
       self.buffers[worker] = buffer.successor = chunklib.Chunk(self.chunks)
-      self.promises.append(self.saver.submit(buffer.save, self.directory))
+      self.promises.append(self.workers.submit(buffer.save, self.directory))
       for promise in [x for x in self.promises if x.done()]:
         promise.result()
         self.promises.remove(promise)
@@ -33,12 +33,12 @@ class Saver:
   def save(self, wait=False):
     for buffer in self.buffers.values():
       if buffer.length:
-        self.promises.append(self.saver.submit(buffer.save, self.directory))
+        self.promises.append(self.workers.submit(buffer.save, self.directory))
     if wait:
       [x.result() for x in self.promises]
       self.promises.clear()
 
-  def load(self, capacity=None, length=1):
+  def load(self, capacity, length):
     filenames = chunklib.Chunk.scan(self.directory, capacity, length - 1)
     if not filenames:
       return

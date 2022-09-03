@@ -1,6 +1,7 @@
 import collections
 import pathlib
 import sys
+from functools import partial as bind
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
@@ -9,14 +10,27 @@ import numpy as np
 import pytest
 
 
+UniformPrioritized = bind(
+    embodied.replay.Prioritized,
+    exponent=0.0, initial=1.0, zero_on_sample=False)
+
 REPLAYS_ALL = [
     embodied.replay.UniformDict,
     embodied.replay.UniformChunks,
+    embodied.replay.Uniform,
+    bind(embodied.replay.Prioritized, zero_on_sample=False),
+    bind(UniformPrioritized, branching=2),
+    bind(UniformPrioritized, branching=16),
+    bind(UniformPrioritized, branching=100),
 ]
 
 REPLAYS_UNIFORM = [
     embodied.replay.UniformDict,
     embodied.replay.UniformChunks,
+    embodied.replay.Uniform,
+    bind(UniformPrioritized, branching=2),
+    bind(UniformPrioritized, branching=16),
+    bind(UniformPrioritized, branching=100),
 ]
 
 
@@ -77,6 +91,7 @@ class TestReplay:
     replay = Replay(capacity=20, length=5, seed=0)
     for step in range(7):
       replay.add({'step': step})
+    assert len(replay) == 3
     histogram = collections.defaultdict(int)
     dataset = iter(replay.dataset())
     for _ in range(100):
