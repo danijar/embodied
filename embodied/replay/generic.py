@@ -54,7 +54,7 @@ class Generic:
       del self.remover[key]
       del self.sampler[key]
 
-  def sample(self):
+  def _sample(self):
     wait(self.limiter.want_sample, 'Replay asmple is waiting')
     seq = self.table[self.sampler()]
     seq = {k: [step[k] for step in seq] for k in seq[0]}
@@ -63,7 +63,7 @@ class Generic:
 
   def dataset(self):
     while True:
-      yield self.sample()
+      yield self._sample()
 
   def prioritize(self, ids, prios):
     if hasattr(self.sampler, 'prioritize'):

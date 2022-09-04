@@ -1,6 +1,5 @@
 from collections import defaultdict, deque
 
-import embodied
 import numpy as np
 
 from . import sampletree
@@ -50,7 +49,7 @@ class Uniform:
 class Prioritized:
 
   def __init__(
-      self, exponent=1.0, initial=1.0, zero_on_sample=True,
+      self, exponent=1.0, initial=1.0, zero_on_sample=False,
       branching=16, seed=0):
     self.exponent = exponent
     self.initial = initial
@@ -61,7 +60,8 @@ class Prioritized:
     self.items = {}
 
   def prioritize(self, stepids, priorities):
-    stepids = [embodied.uuid(x) for x in stepids]
+    if not isinstance(stepids[0], bytes):
+      stepids = [x.tobytes() for x in stepids]
     for stepid, priority in zip(stepids, priorities):
       self.prios[stepid] = priority
     items = []
@@ -78,7 +78,7 @@ class Prioritized:
     return key
 
   def __setitem__(self, key, steps):
-    stepids = [embodied.uuid(x['id']) for x in steps]
+    stepids = [x['id'].tobytes() for x in steps]
     self.items[key] = stepids
     [self.stepitems[stepid].append(key) for stepid in stepids]
     self.tree.insert(key, self._aggregate(key))
@@ -94,6 +94,9 @@ class Prioritized:
         del self.prios[stepid]
 
   def _aggregate(self, key):
+    # TODO: Both list comprehensions in this function are a performance
+    # bottleneck because they are called very often.
     prios = [self.prios[stepid] for stepid in self.items[key]]
-    prios = [x ** self.exponent for x in prios]
+    if self.exponent != 1.0:
+      prios = [x ** self.exponent for x in prios]
     return sum(prios)

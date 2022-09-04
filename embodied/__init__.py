@@ -1,10 +1,13 @@
 __version__ = '0.3.0'
 
-try:
-  import rich.traceback
-  rich.traceback.install()
-except ImportError:
-  pass
+import os
+
+if os.environ.get('RICH_TRACEBACK', 'ON') == 'ON':
+  try:
+    import rich.traceback
+    rich.traceback.install()
+  except ImportError:
+    pass
 
 from .core import *
 

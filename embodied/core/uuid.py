@@ -36,13 +36,15 @@ class uuid:
       else:
         self.value = int(value).to_bytes(16, 'big')
     elif isinstance(value, np.ndarray):
-      assert np.issubdtype(value.dtype, np.uint8), value.dtype
-      assert value.shape == (16,), value.shape
+      # TODO: These assets can slow things down.
+      # assert np.issubdtype(value.dtype, np.uint8), value.dtype
+      # assert value.shape == (16,), value.shape
       self.value = value.tobytes()
     else:
       raise ValueError(value)
     assert type(self.value) == bytes, type(self.value)
     assert len(self.value) == 16, len(self.value)
+    self._hash = hash(self.value)
 
   def __int__(self):
     return int.from_bytes(self.value, 'big')
@@ -72,4 +74,4 @@ class uuid:
     return self.value == other.value
 
   def __hash__(self):
-    return hash(self.value)
+    return self._hash

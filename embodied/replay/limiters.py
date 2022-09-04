@@ -1,15 +1,3 @@
-class Unlimited:
-
-  def want_insert(self):
-    return True
-
-  def want_remove(self):
-    return True
-
-  def want_sample(self):
-    return True
-
-
 class MinSize:
 
   def __init__(self, minimum):
