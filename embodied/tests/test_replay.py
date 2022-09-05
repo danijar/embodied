@@ -14,7 +14,7 @@ UniformPrioritized = bind(
     embodied.replay.Prioritized,
     exponent=0.0, initial=1.0, zero_on_sample=False)
 
-REPLAYS_SAMPLING = [
+REPLAYS_UNLIMITED = [
     embodied.replay.UniformDict,
     embodied.replay.UniformChunks,
     embodied.replay.Uniform,
@@ -22,6 +22,10 @@ REPLAYS_SAMPLING = [
     bind(UniformPrioritized, branching=2),
     bind(UniformPrioritized, branching=16),
     bind(UniformPrioritized, branching=100),
+]
+
+REPLAYS_LIMITED = [
+    bind(embodied.replay.UniformWithOnline, batch=9999, online_fraction=0.1),
 ]
 
 REPLAYS_QUEUES = [
@@ -40,7 +44,8 @@ REPLAYS_UNIFORM = [
 
 class TestReplay:
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING + REPLAYS_QUEUES)
+  @pytest.mark.parametrize(
+      'Replay', REPLAYS_UNLIMITED + REPLAYS_LIMITED + REPLAYS_QUEUES)
   def test_multiple_keys(self, Replay):
     replay = Replay(length=5, capacity=10)
     for step in range(30):
@@ -51,7 +56,7 @@ class TestReplay:
     assert seq['image'].shape == (5, 64, 64, 3)
     assert seq['action'].shape == (5, 12)
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED + REPLAYS_LIMITED)
   @pytest.mark.parametrize(
       'length,workers,capacity',
       [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
@@ -63,7 +68,7 @@ class TestReplay:
       target = min(workers * max(0, (step + 1) - length + 1), capacity)
       assert len(replay) == target
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED + REPLAYS_LIMITED)
   @pytest.mark.parametrize(
       'length,workers,capacity',
       [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
@@ -78,7 +83,7 @@ class TestReplay:
       assert (seq['step'] - seq['step'][0] == np.arange(length)).all()
       assert (seq['worker'] == seq['worker'][0]).all()
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED)
   @pytest.mark.parametrize(
       'length,capacity', [(1, 1), (2, 2), (5, 10), (1, 2), (5, 15), (2, 20)])
   def test_sample_single(self, Replay, length, capacity):
@@ -107,7 +112,7 @@ class TestReplay:
     assert histogram[1] > 20
     assert histogram[2] > 20
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED)
   def test_workers_simple(self, Replay):
     replay = Replay(length=2, capacity=20)
     replay.add({'step': 0}, worker=0)
@@ -119,7 +124,7 @@ class TestReplay:
       seq = next(dataset)
       assert tuple(seq['step']) in ((0, 2), (1, 3))
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED + REPLAYS_LIMITED)
   def test_workers_random(self, Replay, length=4, capacity=30):
     rng = np.random.default_rng(seed=0)
     replay = Replay(length, capacity)
@@ -140,7 +145,7 @@ class TestReplay:
       histogram[int(seq['stream'][0])] += 1
     assert all(count > 0 for count in histogram.values())
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED + REPLAYS_LIMITED)
   @pytest.mark.parametrize(
       'length,workers,capacity',
       [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
@@ -156,7 +161,7 @@ class TestReplay:
       except StopIteration:
         del streams[worker]
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED)
   @pytest.mark.parametrize(
       'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
   def test_restore_exact(self, tmpdir, Replay, length, capacity, chunks):
@@ -173,14 +178,14 @@ class TestReplay:
     assert len(filenames) == (int(np.ceil(30 / chunks)))
     assert sum(lengths) == 30
     assert all(1 <= x <= chunks for x in lengths)
-    replay = Replay(length, capacity, tmpdir, chunks)
+    replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
     assert sorted(embodied.Path(tmpdir).glob('*.npz')) == sorted(filenames)
     assert len(replay) == num_items
     dataset = iter(replay.dataset())
-    for _ in range(10):
+    for _ in range(len(replay)):
       assert len(next(dataset)['step']) == length
 
-  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED)
   @pytest.mark.parametrize('workers', [1, 2, 5])
   @pytest.mark.parametrize(
       'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
@@ -200,7 +205,7 @@ class TestReplay:
     replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
     assert len(replay) == num_items
     dataset = iter(replay.dataset())
-    for _ in range(10):
+    for _ in range(len(replay)):
       assert len(next(dataset)['step']) == length
 
   @pytest.mark.parametrize('Replay', REPLAYS_QUEUES)

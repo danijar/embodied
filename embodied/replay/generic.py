@@ -12,7 +12,7 @@ class Generic:
 
   def __init__(
       self, length, overlap, capacity, remover, sampler, limiter, directory,
-      chunks, max_times_sampled=None):
+      chunks=1024, max_times_sampled=None):
     assert overlap < length
     assert capacity is None or 1 <= capacity
     self.length = length
@@ -63,6 +63,8 @@ class Generic:
       self.times_sampled[key] += 1
       if self.times_sampled[key] >= self.max_times_sampled:
         self._remove(key)
+    if 'is_first' in seq:
+      seq['is_first'][0] = True
     return seq
 
   def _remove(self, key):
