@@ -12,8 +12,9 @@ class Generic:
 
   def __init__(
       self, length, overlap, capacity, remover, sampler, limiter, directory,
-      chunks):
+      chunks, max_times_sampled=None):
     assert overlap < length
+    assert capacity is None or 1 <= capacity
     self.length = length
     self.overlap = overlap
     self.capacity = capacity
@@ -24,6 +25,8 @@ class Generic:
     self.offsets = defaultdict(int)
     self.table = {}
     self.saver = directory and saver.Saver(directory, chunks)
+    self.max_times_sampled = max_times_sampled
+    self.times_sampled = defaultdict(int)
     self.load()
 
   def __len__(self):
@@ -48,18 +51,25 @@ class Generic:
     self.remover[key] = seq
     self.sampler[key] = seq
     while self.capacity and len(self) > self.capacity:
-      wait(self.limiter.want_remove, 'Replay remove is waiting')
-      key = self.remover()
-      del self.table[key]
-      del self.remover[key]
-      del self.sampler[key]
+      self._remove(key)
 
   def _sample(self):
-    wait(self.limiter.want_sample, 'Replay asmple is waiting')
-    seq = self.table[self.sampler()]
+    wait(self.limiter.want_sample, 'Replay sample is waiting')
+    key = self.sampler()
+    seq = self.table[key]
     seq = {k: [step[k] for step in seq] for k in seq[0]}
     seq = {k: embodied.convert(v) for k, v in seq.items()}
+    if self.max_times_sampled:
+      self.times_sampled[key] += 1
+      if self.times_sampled[key] >= self.max_times_sampled:
+        self._remove(key)
     return seq
+
+  def _remove(self, key):
+    wait(self.limiter.want_remove, 'Replay remove is waiting')
+    del self.table[key]
+    del self.remover[key]
+    del self.sampler[key]
 
   def dataset(self):
     while True:

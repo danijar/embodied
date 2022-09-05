@@ -14,7 +14,7 @@ UniformPrioritized = bind(
     embodied.replay.Prioritized,
     exponent=0.0, initial=1.0, zero_on_sample=False)
 
-REPLAYS_ALL = [
+REPLAYS_SAMPLING = [
     embodied.replay.UniformDict,
     embodied.replay.UniformChunks,
     embodied.replay.Uniform,
@@ -22,6 +22,10 @@ REPLAYS_ALL = [
     bind(UniformPrioritized, branching=2),
     bind(UniformPrioritized, branching=16),
     bind(UniformPrioritized, branching=100),
+]
+
+REPLAYS_QUEUES = [
+    embodied.replay.Queue,
 ]
 
 REPLAYS_UNIFORM = [
@@ -36,7 +40,7 @@ REPLAYS_UNIFORM = [
 
 class TestReplay:
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING + REPLAYS_QUEUES)
   def test_multiple_keys(self, Replay):
     replay = Replay(length=5, capacity=10)
     for step in range(30):
@@ -47,7 +51,7 @@ class TestReplay:
     assert seq['image'].shape == (5, 64, 64, 3)
     assert seq['action'].shape == (5, 12)
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
   @pytest.mark.parametrize(
       'length,workers,capacity',
       [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
@@ -59,7 +63,7 @@ class TestReplay:
       target = min(workers * max(0, (step + 1) - length + 1), capacity)
       assert len(replay) == target
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
   @pytest.mark.parametrize(
       'length,workers,capacity',
       [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
@@ -74,7 +78,7 @@ class TestReplay:
       assert (seq['step'] - seq['step'][0] == np.arange(length)).all()
       assert (seq['worker'] == seq['worker'][0]).all()
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
   @pytest.mark.parametrize(
       'length,capacity', [(1, 1), (2, 2), (5, 10), (1, 2), (5, 15), (2, 20)])
   def test_sample_single(self, Replay, length, capacity):
@@ -103,7 +107,7 @@ class TestReplay:
     assert histogram[1] > 20
     assert histogram[2] > 20
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
   def test_workers_simple(self, Replay):
     replay = Replay(length=2, capacity=20)
     replay.add({'step': 0}, worker=0)
@@ -115,7 +119,7 @@ class TestReplay:
       seq = next(dataset)
       assert tuple(seq['step']) in ((0, 2), (1, 3))
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
   def test_workers_random(self, Replay, length=4, capacity=30):
     rng = np.random.default_rng(seed=0)
     replay = Replay(length, capacity)
@@ -136,7 +140,7 @@ class TestReplay:
       histogram[int(seq['stream'][0])] += 1
     assert all(count > 0 for count in histogram.values())
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
   @pytest.mark.parametrize(
       'length,workers,capacity',
       [(1, 1, 1), (2, 1, 2), (5, 1, 10), (1, 2, 2), (5, 3, 15), (2, 7, 20)])
@@ -152,7 +156,7 @@ class TestReplay:
       except StopIteration:
         del streams[worker]
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
   @pytest.mark.parametrize(
       'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
   def test_restore_exact(self, tmpdir, Replay, length, capacity, chunks):
@@ -176,7 +180,7 @@ class TestReplay:
     for _ in range(10):
       assert len(next(dataset)['step']) == length
 
-  @pytest.mark.parametrize('Replay', REPLAYS_ALL)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAMPLING)
   @pytest.mark.parametrize('workers', [1, 2, 5])
   @pytest.mark.parametrize(
       'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
@@ -198,3 +202,55 @@ class TestReplay:
     dataset = iter(replay.dataset())
     for _ in range(10):
       assert len(next(dataset)['step']) == length
+
+  @pytest.mark.parametrize('Replay', REPLAYS_QUEUES)
+  @pytest.mark.parametrize(
+      'length,capacity,overlap',
+      [(1, 1, 0), (5, 10, 3), (10, 5, 2)])
+  def test_queue_single(self, Replay, length, capacity, overlap):
+    replay = Replay(length, capacity, overlap=overlap)
+    for step in range(length):
+      replay.add({'step': step})
+    dataset = iter(replay.dataset())
+    seq = next(dataset)
+    assert (seq['step'] == np.arange(length)).all()
+
+  @pytest.mark.parametrize('Replay', REPLAYS_QUEUES)
+  @pytest.mark.parametrize(
+      'length,capacity,overlap',
+      [(1, 5, 0), (2, 5, 1), (5, 10, 3), (10, 5, 0), (10, 5, 2)])
+  def test_queue_order(self, Replay, length, capacity, overlap):
+    assert overlap < length
+    assert 5 <= capacity
+    replay = Replay(length, capacity, overlap=overlap)
+    inserts = length + 4 * (length - overlap)
+    for step in range(inserts):
+      replay.add({'step': step})
+    dataset = iter(replay.dataset())
+    for index in range(len(replay)):
+      seq = next(dataset)
+      start = index * (length - overlap)
+      assert seq['step'][0] == start
+      assert (seq['step'] - start == np.arange(length)).all()
+
+  @pytest.mark.parametrize('Replay', REPLAYS_QUEUES)
+  @pytest.mark.parametrize(
+      'length,capacity,overlap,workers',
+      [(1, 10, 0, 2), (2, 10, 1, 2), (5, 30, 3, 4)])
+  def test_queue_workers(self, Replay, length, capacity, overlap, workers):
+    assert overlap < length
+    assert 5 * workers <= capacity
+    replay = Replay(length, capacity, overlap=overlap)
+    inserts = length + 4 * (length - overlap)
+    for step in range(inserts):
+      for worker in range(workers):
+        replay.add({'step': step, 'worker': worker}, worker)
+    dataset = iter(replay.dataset())
+    assert len(replay) == 5 * workers
+    for index in range(5):
+      for worker in range(workers):
+        seq = next(dataset)
+        start = index * (length - overlap)
+        assert seq['step'][0] == start
+        assert (seq['worker'] == worker).all()
+        assert (seq['step'] - start == np.arange(length)).all()

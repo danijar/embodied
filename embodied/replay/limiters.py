@@ -40,3 +40,26 @@ class SamplesPerInsert:
       return False
     self.available_samples -= 1
     return True
+
+
+class Queue:
+
+  def __init__(self, capacity):
+    assert 1 <= capacity
+    self.capacity = capacity
+    self.size = 0
+
+  def want_insert(self):
+    if self.size >= self.capacity:
+      return False
+    self.size += 1
+    return True
+
+  def want_remove(self):
+    if self.size <= 0:
+      return False
+    self.size -= 1
+    return True
+
+  def want_sample(self):
+    return 0 < self.size <= self.capacity

@@ -19,7 +19,7 @@ UniformPrioritized = bind(
 REPLAYS_ALL = [
     ('UniformDict', embodied.replay.UniformDict),
     ('UniformChunks', embodied.replay.UniformChunks),
-    ('Uniform', embodied.replay.Uniform),
+    # ('Uniform', embodied.replay.Uniform),
     ('Prioritized1', bind(embodied.replay.Prioritized, zero_on_sample=False)),
     ('Prioritized2', bind(UniformPrioritized, branching=16)),
     ('Prioritized3', bind(UniformPrioritized, branching=100)),
