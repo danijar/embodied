@@ -1,21 +1,17 @@
-__version__ = '0.3.0'
+try:
+  import google3, pathlib, sys  # noqa
+  sys.path.append(str(pathlib.Path(__file__).parent.parent))
+except ImportError:
+  pass
 
-import os
-
-if os.environ.get('RICH_TRACEBACK', 'ON') == 'ON':
-  try:
-    import rich.traceback
-    rich.traceback.install()
-  except ImportError:
-    pass
+try:
+  import rich.traceback
+  rich.traceback.install()
+except ImportError:
+  pass
 
 from .core import *
 
-from . import replay
 from . import envs
+from . import replay
 from . import run
-from . import agents
-
-__all__ = [
-    k for k, v in list(locals().items())
-    if type(v).__name__ in ('type', 'function') and not k.startswith('_')]

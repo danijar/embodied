@@ -1,6 +1,6 @@
-from .uniform_chunks import UniformChunks
-from .uniform_dict import UniformDict
 from .generic import Generic
-from .replays import Uniform, Queue, UniformWithOnline, Prioritized
-from . import limiters
+from .reverb import Reverb
+from .replays import Uniform, Queue, Prioritized
+from .naive_chunks import NaiveChunks
 from . import selectors
+from . import limiters

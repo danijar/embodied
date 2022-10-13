@@ -81,6 +81,7 @@ class Clock:
       self._last = now
       return True
     if now >= self._last + self._every:
-      self._last += self._every
+      # self._last += self._every
+      self._last = now
       return True
     return False

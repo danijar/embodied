@@ -11,45 +11,54 @@ def train(agent, env, replay, logger, args):
   logdir = embodied.Path(args.logdir)
   logdir.mkdirs()
   print('Logdir', logdir)
-  should_train = embodied.when.Every(args.train_every)
-  should_log = embodied.when.Every(args.log_every)
   should_expl = embodied.when.Until(args.expl_until)
-  should_video = embodied.when.Every(args.eval_every)
+  should_train = embodied.when.Ratio(args.train_ratio / args.batch_steps)
+  should_log = embodied.when.Clock(args.log_every)
+  should_save = embodied.when.Clock(args.save_every)
   step = logger.step
+  metrics = embodied.Metrics()
+  print('Observation space:')
+  for key, value in env.obs_space.items():
+    print(f'  {key:<16} {value}')
+  print('Action space:')
+  for key, value in env.act_space.items():
+    print(f'  {key:<16} {value}')
 
   timer = embodied.Timer()
   timer.wrap('agent', agent, ['policy', 'train', 'report', 'save'])
   timer.wrap('env', env, ['step'])
-  if hasattr(replay, '_sample'):
-    timer.wrap('replay', replay, ['_sample'])
+  timer.wrap('replay', replay, ['add', 'save'])
+  timer.wrap('logger', logger, ['write'])
 
   nonzeros = set()
   def per_episode(ep):
-    metrics = {}
     length = len(ep['reward']) - 1
     score = float(ep['reward'].astype(np.float64).sum())
+    sum_abs_reward = float(np.abs(ep['reward']).astype(np.float64).sum())
+    logger.add({
+        'length': length,
+        'score': score,
+        'sum_abs_reward': sum_abs_reward,
+        # TODO
+        # 'reward_rate': (ep['reward'] - ep['reward'].min() >= 0.1).mean(),
+        'reward_rate': (np.abs(ep['reward']) >= 0.5).mean(),
+    }, prefix='episode')
     print(f'Episode has {length} steps and return {score:.1f}.')
-    metrics['length'] = length
-    metrics['score'] = score
-    metrics['reward_rate'] = (ep['reward'] - ep['reward'].min() >= 0.1).mean()
-    logs = {}
+    stats = {}
+    for key in args.log_keys_video:
+      if key in ep:
+        stats[f'policy_{key}'] = ep[key]
     for key, value in ep.items():
       if not args.log_zeros and key not in nonzeros and (value == 0).all():
         continue
       nonzeros.add(key)
       if re.match(args.log_keys_sum, key):
-        logs[f'sum_{key}'] = ep[key].sum()
+        stats[f'sum_{key}'] = ep[key].sum()
       if re.match(args.log_keys_mean, key):
-        logs[f'mean_{key}'] = ep[key].mean()
+        stats[f'mean_{key}'] = ep[key].mean()
       if re.match(args.log_keys_max, key):
-        logs[f'max_{key}'] = ep[key].max(0).mean()
-    if should_video(step):
-      for key in args.log_keys_video:
-        metrics[f'policy_{key}'] = ep[key]
-    logger.add(metrics, prefix='episode')
-    logger.add(logs, prefix='logs')
-    logger.add(replay.stats, prefix='replay')
-    logger.write()
+        stats[f'max_{key}'] = ep[key].max(0).mean()
+    metrics.add(stats, prefix='stats')
 
   driver = embodied.Driver(env)
   driver.on_episode(lambda ep, worker: per_episode(ep))
@@ -60,44 +69,48 @@ def train(agent, env, replay, logger, args):
   if train_fill:
     print(f'Fill train dataset ({train_fill} steps).')
     random_agent = embodied.RandomAgent(env.act_space)
-    driver(random_agent.policy, steps=train_fill, episodes=1)
+    driver(random_agent.policy, steps=train_fill)
 
   dataset = iter(agent.dataset(replay.dataset))
   state = [None]  # To be writable from train step function below.
   assert args.pretrain > 0  # At least one step to initialize variables.
   for _ in range(args.pretrain):
-    _, state[0], _ = agent.train(next(dataset), state[0])
+    with timer.scope('dataset'):
+      batch = next(dataset)
+    _, state[0], _ = agent.train(batch, state[0])
 
-  metrics = collections.defaultdict(list)
   batch = [None]
   def train_step(tran, worker):
-    if should_train(step):
-      for _ in range(args.train_steps):
+    for _ in range(should_train(step)):
+      with timer.scope('dataset'):
         batch[0] = next(dataset)
-        outs, state[0], mets = agent.train(batch[0], state[0])
-        [metrics[key].append(value) for key, value in mets.items()]
-        if 'priority' in outs:
-          replay.prioritize(outs['key'], outs['priority'])
+      outs, state[0], mets = agent.train(batch[0], state[0])
+      metrics.add(mets, prefix='train')
+      if 'priority' in outs:
+        replay.prioritize(outs['key'], outs['priority'])
     if should_log(step):
-      with warnings.catch_warnings():  # Ignore empty slice warnings.
-        warnings.simplefilter('ignore', category=RuntimeWarning)
-        for name, values in metrics.items():
-          logger.scalar('train/' + name, np.nanmean(values, dtype=np.float64))
-          metrics[name].clear()
-      logger.add(agent.report(batch[0]), prefix='report')
+      agg = metrics.result()
+      report = agent.report(batch[0])
+      report = {k: v for k, v in report.items() if 'train/' + k not in agg}
+      logger.add(agg)
+      logger.add(report, prefix='report')
+      logger.add(replay.stats, prefix='replay')
       logger.add(timer.stats(), prefix='timer')
       logger.write(fps=True)
   driver.on_step(train_step)
 
   checkpoint = embodied.Checkpoint(logdir / 'checkpoint.pkl')
+  timer.wrap('checkpoint', checkpoint, ['save', 'load'])
   checkpoint.step = step
   checkpoint.agent = agent
   checkpoint.replay = replay
   checkpoint.load_or_save()
+  should_save(step)  # Register that we jused saved.
 
   print('Start training loop.')
   policy = lambda *args: agent.policy(
       *args, mode='explore' if should_expl(step) else 'train')
   while step < args.steps:
-    driver(policy, steps=args.eval_every)
-    checkpoint.save()
+    driver(policy, steps=1000)
+    if should_save(step):
+      checkpoint.save()

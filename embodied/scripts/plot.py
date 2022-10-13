@@ -83,6 +83,8 @@ def main():
 
   if args.stats:
     print('Computing stats...', flush=True)
+    len(tasks) == 1 and 'mean' in args.stats and args.stats.remove('mean')
+    len(tasks) == 1 and 'median' in args.stats and args.stats.remove('median')
     extra_runs, extra_tasks = compute_stats(runs, args.stats, args.bins)
     runs += extra_runs
     tasks += extra_tasks
@@ -177,6 +179,21 @@ def compute_stats(runs, stats, bins):
       maxs = select(baselines, 'human_gamer')
       extra_runs += stats_fixed_norm(
           runs, bins, mins, maxs, 'gamer_median', np.nanmedian)
+    elif stats == 'atari_record':
+      path = pathlib.Path('~/scores/atari_baselines.json').expanduser()
+      baselines = json.loads(path.read_text())
+      mins = select(baselines, 'random')
+      maxs = select(baselines, 'human_record')
+      extra_runs += stats_fixed_norm(
+          runs, bins, mins, maxs, 'record_mean', np.nanmean)
+    elif stats == 'atari_record_clip':
+      path = pathlib.Path('~/scores/atari_baselines.json').expanduser()
+      baselines = json.loads(path.read_text())
+      mins = select(baselines, 'random')
+      maxs = select(baselines, 'human_record')
+      extra_runs += stats_fixed_norm(
+          runs, bins, mins, maxs, 'record_mean_clip',
+          lambda x, a: np.nanmean(np.minimum(x, 1), a))
     elif stats == 'dmlab_mean':
       path = pathlib.Path('~/scores/dmlab_baselines.json').expanduser()
       baselines = json.loads(path.read_text())
@@ -184,7 +201,7 @@ def compute_stats(runs, stats, bins):
       maxs = select(baselines, 'human')
       extra_runs += stats_fixed_norm(
           runs, bins, mins, maxs, 'human_mean',
-          lambda vals, axis: np.nanmean(np.minimum(vals, 100), axis))
+          lambda vals, axis: np.nanmean(np.minimum(vals, 1), axis))
     else:
       raise NotImplementedError(stats)
   extra_tasks = natsort(set(run['task'] for run in extra_runs))
@@ -218,10 +235,10 @@ def stats_self_norm(runs, bins, name='mean', aggregator=np.nanmean):
           continue
         _, ys = binning(
             run['xs'], run['ys'], borders[task], np.nanmean, fill='last')
-        scores.append(100 * (ys - mins[task]) / (maxs[task] - mins[task]))
+        scores.append((ys - mins[task]) / (maxs[task] - mins[task]))
       if scores:
         scores = np.array(scores)
-        xs = np.linspace(1, 100, len(scores[0]))
+        xs = np.linspace(0, 1, len(scores[0]))
         extra_runs.append({
             'task': f'stats_normalized_{name}', 'method': method, 'seed': seed,
             'xs': xs, 'ys': reduce(scores, aggregator, 0)})
@@ -252,9 +269,11 @@ def stats_fixed_norm(
         task = run['task']
         _, ys = binning(
             run['xs'], run['ys'], borders[task], np.nanmean, fill='last')
-        scores.append(100 * (ys - mins[task]) / (maxs[task] - mins[task]))
+        if task == 'atari_jamesbond' and 'atari_james_bond' in mins:
+          task = 'atari_james_bond'
+        scores.append((ys - mins[task]) / (maxs[task] - mins[task]))
       if scores:
-        xs = np.linspace(1, 100, len(scores[0]))
+        xs = np.linspace(0, 1, len(scores[0]))
         extra_runs.append({
             'task': f'stats_{name}', 'method': method, 'seed': seed,
             'xs': xs, 'ys': reduce(scores, aggregator, 0)})
@@ -286,7 +305,7 @@ def stats_num_tasks(runs, bins):
             run['xs'], run['ys'], borders[task], np.nanmean, fill='nan')
         nonempty.append(np.isfinite(ys))
       if nonempty:
-        xs = np.linspace(1, 100, len(nonempty[0]))
+        xs = np.linspace(0, 1, len(nonempty[0]))
         extra_runs.append({
             'task': 'stats_number_of_tasks', 'method': method, 'seed': seed,
             'xs': xs, 'ys': np.sum(nonempty, 0)})
@@ -413,13 +432,13 @@ def legend(fig, mapping=None, adjust=False, **kwargs):
 
 
 def smart_format(x, pos=None):
-  if x < 1e3:
+  if abs(x) < 1e3:
     if float(int(x)) == float(x):
       return str(int(x))
-    return str(x)
-  if x < 1e6:
+    return str(round(x, 10)).rstrip('0')
+  if abs(x) < 1e6:
     return f'{x/1e3:.0f}K' if x == x // 1e3 * 1e3 else f'{x/1e3:.1f}K'
-  if x < 1e9:
+  if abs(x) < 1e9:
     return f'{x/1e6:.0f}M' if x == x // 1e6 * 1e6 else f'{x/1e6:.1f}M'
   return f'{x/1e9:.0f}B' if x == x // 1e9 * 1e9 else f'{x/1e9:.1f}B'
 

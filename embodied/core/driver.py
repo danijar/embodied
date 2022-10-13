@@ -23,10 +23,10 @@ class Driver:
     self.reset()
 
   def reset(self):
-    self._obs = {
+    self._acts = {
         k: convert(np.zeros((len(self._env),) + v.shape, v.dtype))
-        for k, v in self._env.obs_space.items()}
-    self._obs['is_last'] = np.ones(len(self._env), bool)
+        for k, v in self._env.act_space.items()}
+    self._acts['reset'] = np.ones(len(self._env), bool)
     self._eps = [collections.defaultdict(list) for _ in range(len(self._env))]
     self._state = None
 
@@ -42,37 +42,33 @@ class Driver:
       step, episode = self._step(policy, step, episode)
 
   def _step(self, policy, step, episode):
-    acts, self._state = policy(self._obs, self._state, **self._kwargs)
-    acts['reset'] = np.zeros(len(self._env), bool)
-    if self._obs['is_last'].any():
-      acts = {
-          k: v * self._expand(1 - self._obs['is_last'], len(v.shape))
-          for k, v in acts.items()}
-      acts['reset'] = self._obs['is_last']
+    assert all(len(x) == len(self._env) for x in self._acts.values())
+    obs = self._env.step(self._acts)
+    obs = {k: convert(v) for k, v in obs.items()}
+    assert all(len(x) == len(self._env) for x in obs.values()), obs
+    acts, self._state = policy(obs, self._state, **self._kwargs)
     acts = {k: convert(v) for k, v in acts.items()}
-    assert all(len(x) == len(self._env) for x in acts.values()), acts
-    self._obs = self._env.step(acts)
-    assert all(len(x) == len(self._env) for x in self._obs.values()), self._obs
-    self._obs = {k: convert(v) for k, v in self._obs.items()}
-    trns = {**self._obs, **acts}
-    if self._obs['is_first'].any():
-      for i, first in enumerate(self._obs['is_first']):
-        if not first:
-          continue
-        self._eps[i].clear()
+    if obs['is_last'].any():
+      mask = 1 - obs['is_last']
+      acts = {k: v * self._expand(mask, len(v.shape)) for k, v in acts.items()}
+    acts['reset'] = obs['is_last'].copy()
+    self._acts = acts
+    trns = {**obs, **acts}
+    if obs['is_first'].any():
+      for i, first in enumerate(obs['is_first']):
+        if first:
+          self._eps[i].clear()
     for i in range(len(self._env)):
       trn = {k: v[i] for k, v in trns.items()}
       [self._eps[i][k].append(v) for k, v in trn.items()]
       [fn(trn, i, **self._kwargs) for fn in self._on_steps]
       step += 1
-    if self._obs['is_last'].any():
-      for i, done in enumerate(self._obs['is_last']):
-        if not done:
-          continue
-        # TODO: Benchmark this convert call?
-        ep = {k: convert(v) for k, v in self._eps[i].items()}
-        [fn(ep.copy(), i, **self._kwargs) for fn in self._on_episodes]
-        episode += 1
+    if obs['is_last'].any():
+      for i, done in enumerate(obs['is_last']):
+        if done:
+          ep = {k: convert(v) for k, v in self._eps[i].items()}
+          [fn(ep.copy(), i, **self._kwargs) for fn in self._on_episodes]
+          episode += 1
     return step, episode
 
   def _expand(self, value, dims):

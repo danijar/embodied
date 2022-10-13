@@ -78,6 +78,9 @@ class Prefetch:
     try:
       while self._running:
         elems = [x.get() for x in sources]
+        for elem in elems:
+          if isinstance(elem, Exception):
+            raise elem
         batch = {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
         output.put(batch)
     except Exception as e:

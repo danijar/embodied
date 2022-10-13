@@ -32,9 +32,10 @@ class DMC(embodied.Env):
       else:
         from dm_control import suite
         env = suite.load(domain, task)
+    self._dmenv = env
     from . import dmenv
-    self._physics = env.physics
-    self._env = dmenv.DMEnv(env)
+    # self._physics = env.physics
+    self._env = dmenv.DMEnv(self._dmenv)
     self._env = embodied.wrappers.ExpandScalars(self._env)
     self._env = embodied.wrappers.ActionRepeat(self._env, repeat)
     self._render = render
@@ -62,4 +63,4 @@ class DMC(embodied.Env):
     return obs
 
   def render(self):
-    return self._physics.render(*self._size, camera_id=self._camera)
+    return self._dmenv.physics.render(*self._size, camera_id=self._camera)

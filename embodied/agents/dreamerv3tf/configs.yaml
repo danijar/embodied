@@ -76,10 +76,10 @@ defaults:
   slow_target: True
   slow_target_update: 100
   slow_target_fraction: 1.0
-  actent: {impl: mult, scale: 3e-3, target: 0.4, min: 1e-5, max: 1.0, vel: 0.1}
+  actent: {impl: fixed, scale: 2e-3, target: 0.4, min: 1e-5, max: 1.0, vel: 0.1}  # mult
   actent_norm: True
-  advnorm: {impl: mean_std, decay: 0.99, max: 1e8}
-  retnorm: {impl: off, decay: 0.999, max: 1e8}
+  advnorm: {impl: off, decay: 0.99, max: 1e8}  # mean_std
+  retnorm: {impl: mean_std, decay: 0.999, max: 1e8}  # off
   scorenorm: {impl: off, decay: 0.99, max: 1e8}
   critic_type: vfunction
   # pengs_qlambda: False
@@ -93,7 +93,7 @@ defaults:
   # Exploration
   expl_rewards: {extr: 0.0, disag: 0.0, vae: 0.0, ctrl: 0.0, pbe: 0.0}
   expl_discount: 0.99
-  expl_retnorm: {impl: std, decay: 0.999, max: 1e8}
+  expl_retnorm: {impl: mean_std, decay: 0.999, max: 1e8}
   expl_scorenorm: {impl: off, decay: 0.999, max: 1e8}
   expl_opt: {opt: adam, lr: 1e-4, eps: 1e-5, clip: 100.0, wd: 0.0, warmup: 0}
   disag_head: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 1.0, inputs: [deter, stoch, action]}

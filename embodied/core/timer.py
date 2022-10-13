@@ -7,15 +7,16 @@ import numpy as np
 
 class Timer:
 
-  def __init__(self, columns=('frac', 'min', 'avg', 'max', 'count')):
-    available = ('frac', 'sum', 'avg', 'min', 'max', 'count')
+  def __init__(self, columns=('frac', 'min', 'avg', 'max', 'count', 'total')):
+    available = ('frac', 'avg', 'min', 'max', 'count', 'total')
     assert all(x in available for x in columns), columns
     self._columns = columns
     self._durations = collections.defaultdict(list)
     self._start = time.time()
 
   def reset(self):
-    self._durations.clear()
+    for timings in self._durations.values():
+      timings.clear()
     self._start = time.time()
 
   @contextlib.contextmanager
@@ -35,12 +36,13 @@ class Timer:
     metrics['duration'] = time.time() - self._start
     for name, durs in self._durations.items():
       available = {}
-      available['frac'] = np.sum(durs) / metrics['duration']
-      available['sum'] = np.sum(durs)
-      available['avg'] = np.mean(durs)
-      available['min'] = np.min(durs)
-      available['max'] = np.max(durs)
       available['count'] = len(durs)
+      available['total'] = np.sum(durs)
+      available['frac'] = np.sum(durs) / metrics['duration']
+      if len(durs):
+        available['avg'] = np.mean(durs)
+        available['min'] = np.min(durs)
+        available['max'] = np.max(durs)
       for key, value in available.items():
         if key in self._columns:
           metrics[f'{name}_{key}'] = value

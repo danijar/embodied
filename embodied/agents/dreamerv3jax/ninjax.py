@@ -161,7 +161,7 @@ def jit(fun, static=None, **kwargs):
   @bind(jax.jit, static_argnums=[0], **kwargs)
   def init(statics, rng, *args, **kwargs):
     # Return only state so JIT can remove dead code for fast initialization.
-    s = fun({}, rng, *args, ignore=True, **kwargs)[1]
+    s = fun({}, rng, *args, ignore=True, **dict(statics), **kwargs)[1]
     return s
 
   @bind(jax.jit, static_argnums=[0], **kwargs)
@@ -197,7 +197,7 @@ def pmap(fun, axis_name=None, static=None, **kwargs):
   @bind(jax.pmap, axis_name=axis_name, static_broadcasted_argnums=[0], **kwargs)
   def init(statics, rng, *args, **kwargs):
     # Return only state so JIT can remove dead code for fast initialization.
-    return fun({}, rng, *args, ignore=True, **kwargs)[1]
+    return fun({}, rng, *args, ignore=True, **dict(statics), **kwargs)[1]
 
   @bind(jax.pmap, axis_name=axis_name, static_broadcasted_argnums=[0], **kwargs)
   def apply(statics, state, rng, *args, **kwargs):
@@ -344,6 +344,7 @@ class ModuleMeta(type):
       path += str(cls.COUNTERS[path])
     else:
       cls.COUNTERS[path] = 1
+    obj._name = name
     obj._path = path
     obj._submodules = {}
     init = _scope_method(cls.__init__)
@@ -369,8 +370,13 @@ class Module(object, metaclass=ModuleMeta):
     return f'{self.__class__.__name__}({self.path})'
 
   @property
+  def name(self):
+    """The unique name of this module instance as a string."""
+    return self._name
+
+  @property
   def path(self):
-    """The unique name scope of this module instance as a string."""
+    """The unique scope of this module instance as a string."""
     return self._path
 
   def get(self, name, *args, **kwargs):

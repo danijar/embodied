@@ -5,6 +5,7 @@ class Space:
 
   def __init__(self, dtype, shape=(), low=None, high=None):
     # For integer types, high is the excluside upper bound.
+    shape = (shape,) if isinstance(shape, int) else shape
     self._dtype = np.dtype(dtype)
     assert self._dtype is not object, self._dtype
     assert isinstance(shape, tuple), shape

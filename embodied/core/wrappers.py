@@ -52,7 +52,7 @@ class ActionRepeat(base.Wrapper):
       reward += obs['reward']
       if obs['is_last'] or obs['is_terminal']:
         break
-    obs['reward'] = reward
+    obs['reward'] = np.float32(reward)
     self._done = obs['is_last']
     return obs
 
@@ -230,7 +230,7 @@ class DiscretizeAction(base.Wrapper):
     space = spacelib.Space(np.float32, shape, 0, 1)
     space.sample = functools.partial(
         self._sample_action, self._dims, self._values)
-    space.discrete = True
+    space._discrete = True
     return {**self.env.act_space, self._key: space}
 
   def step(self, action):
@@ -359,4 +359,16 @@ class StopAfterEpisodes(base.Wrapper):
         xm.XManagerApi().get_current_work_unit().stop()
         while True:
           time.sleep(5)
+    return obs
+
+
+class RewardScale(base.Wrapper):
+
+  def __init__(self, env, scale=1.0):
+    super().__init__(env)
+    self._scale = scale
+
+  def step(self, action):
+    obs = self.env.step(action)
+    obs['reward'] *= self._scale
     return obs

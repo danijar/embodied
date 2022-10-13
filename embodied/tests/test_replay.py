@@ -15,8 +15,15 @@ UniformPrioritized = bind(
     exponent=0.0, initial=1.0, zero_on_sample=False)
 
 REPLAYS_UNLIMITED = [
-    embodied.replay.UniformDict,
-    embodied.replay.UniformChunks,
+    embodied.replay.Uniform,
+    embodied.replay.Reverb,
+    bind(embodied.replay.Prioritized, zero_on_sample=False),
+    bind(UniformPrioritized, branching=2),
+    bind(UniformPrioritized, branching=16),
+    bind(UniformPrioritized, branching=100),
+]
+
+REPLAYS_SAVE_CHUNKS = [
     embodied.replay.Uniform,
     bind(embodied.replay.Prioritized, zero_on_sample=False),
     bind(UniformPrioritized, branching=2),
@@ -25,16 +32,14 @@ REPLAYS_UNLIMITED = [
 ]
 
 REPLAYS_LIMITED = [
-    bind(embodied.replay.UniformWithOnline, batch=9999, online_fraction=0.1),
+    # bind(embodied.replay.UniformWithOnline, batch=9999, online_fraction=0.1),
 ]
 
 REPLAYS_QUEUES = [
-    embodied.replay.Queue,
+    # embodied.replay.Queue,
 ]
 
 REPLAYS_UNIFORM = [
-    embodied.replay.UniformDict,
-    embodied.replay.UniformChunks,
     embodied.replay.Uniform,
     bind(UniformPrioritized, branching=2),
     bind(UniformPrioritized, branching=16),
@@ -42,6 +47,9 @@ REPLAYS_UNIFORM = [
 ]
 
 
+@pytest.mark.filterwarnings('ignore:.*Pillow.*')
+@pytest.mark.filterwarnings('ignore:.*the imp module.*')
+@pytest.mark.filterwarnings('ignore:.*distutils.*')
 class TestReplay:
 
   @pytest.mark.parametrize(
@@ -162,9 +170,43 @@ class TestReplay:
         del streams[worker]
 
   @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED)
+  @pytest.mark.parametrize('length,capacity', [(1, 1), (3, 10), (5, 100)])
+  def test_restore_exact(self, tmpdir, Replay, length, capacity):
+    embodied.uuid.reset(debug=True)
+    replay = Replay(length, capacity, directory=tmpdir)
+    for step in range(30):
+      replay.add({'step': step})
+    num_items = np.clip(30 - length + 1, 0, capacity)
+    assert len(replay) == num_items
+    replay.save(wait=True)
+    replay = Replay(length, capacity, directory=tmpdir)
+    assert len(replay) == num_items
+    dataset = iter(replay.dataset())
+    for _ in range(len(replay)):
+      assert len(next(dataset)['step']) == length
+
+  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED)
+  @pytest.mark.parametrize('workers', [1, 2, 5])
+  @pytest.mark.parametrize('length,capacity', [(1, 1), (3, 10), (5, 100)])
+  def test_restore_workers(self, tmpdir, Replay, workers, length, capacity):
+    capacity *= workers
+    replay = Replay(length, capacity, directory=tmpdir)
+    for step in range(50):
+      for worker in range(workers):
+        replay.add({'step': step}, worker)
+    num_items = np.clip((50 - length + 1) * workers, 0, capacity)
+    assert len(replay) == num_items
+    replay.save(wait=True)
+    replay = Replay(length, capacity, directory=tmpdir)
+    assert len(replay) == num_items
+    dataset = iter(replay.dataset())
+    for _ in range(len(replay)):
+      assert len(next(dataset)['step']) == length
+
+  @pytest.mark.parametrize('Replay', REPLAYS_SAVE_CHUNKS)
   @pytest.mark.parametrize(
       'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
-  def test_restore_exact(self, tmpdir, Replay, length, capacity, chunks):
+  def test_restore_chunks_exact(self, tmpdir, Replay, length, capacity, chunks):
     embodied.uuid.reset(debug=True)
     assert len(list(embodied.Path(tmpdir).glob('*.npz'))) == 0
     replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)
@@ -185,11 +227,11 @@ class TestReplay:
     for _ in range(len(replay)):
       assert len(next(dataset)['step']) == length
 
-  @pytest.mark.parametrize('Replay', REPLAYS_UNLIMITED)
+  @pytest.mark.parametrize('Replay', REPLAYS_SAVE_CHUNKS)
   @pytest.mark.parametrize('workers', [1, 2, 5])
   @pytest.mark.parametrize(
       'length,capacity,chunks', [(1, 1, 1), (3, 10, 5), (5, 100, 12)])
-  def test_restore_workers(
+  def test_restore_chunks_workers(
       self, tmpdir, Replay, workers, length, capacity, chunks):
     capacity *= workers
     replay = Replay(length, capacity, directory=tmpdir, chunks=chunks)

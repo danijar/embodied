@@ -5,7 +5,7 @@ import numpy as np
 class Dummy(embodied.Env):
 
   def __init__(self, task, size=(64, 64), length=100):
-    assert task in ('continuous', 'discrete')
+    assert task in ('cont', 'disc')
     self._task = task
     self._size = size
     self._length = length
@@ -26,8 +26,8 @@ class Dummy(embodied.Env):
 
   @property
   def act_space(self):
-    if self._task == 'continuous':
-      space = embodied.Space(np.float32, 6)
+    if self._task == 'cont':
+      space = embodied.Space(np.float32, (6,))
     else:
       space = embodied.Space(np.int32, (), 0, 5)
     return {'action': space, 'reset': embodied.Space(bool)}
@@ -38,7 +38,7 @@ class Dummy(embodied.Env):
       self._done = False
       return self._obs(0.0, is_first=True)
     action = action['action']
-    if self._task == 'continuous':
+    if self._task == 'cont':
       pass
       # assert (-1 <= action).all() and (action <= 1).all(), action
     else:

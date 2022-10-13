@@ -7,8 +7,12 @@ import numpy as np
 
 class Gym(embodied.Env):
 
-  def __init__(self, env, obs_key='image', act_key='action'):
-    self._env = gym.make(env) if isinstance(env, str) else env
+  def __init__(self, env, obs_key='image', act_key='action', **kwargs):
+    if isinstance(env, str):
+      self._env = gym.make(env, **kwargs)
+    else:
+      assert not kwargs, kwargs
+      self._env = env
     self._obs_dict = hasattr(self._env.observation_space, 'spaces')
     self._act_dict = hasattr(self._env.action_space, 'spaces')
     self._obs_key = obs_key
@@ -74,7 +78,9 @@ class Gym(embodied.Env):
     return obs
 
   def render(self):
-    return self._env.render('rgb_array')
+    image = self._env.render('rgb_array')
+    assert image is not None
+    return image
 
   def close(self):
     try:

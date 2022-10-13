@@ -1,3 +1,6 @@
+# TODO: Make limiters thread-safe.
+
+
 class MinSize:
 
   def __init__(self, minimum):
@@ -10,8 +13,7 @@ class MinSize:
     return True
 
   def want_remove(self):
-    if self.size <= self.minimum:
-      return False
+    assert self.size > 0
     self.size -= 1
     return True
 
@@ -56,8 +58,7 @@ class Queue:
     return True
 
   def want_remove(self):
-    if self.size <= 0:
-      return False
+    assert self.size > 0
     self.size -= 1
     return True
 

@@ -20,6 +20,7 @@ class Fifo:
     if self.queue[0] == key:
       self.queue.popleft()
     else:
+      # TODO: This is extremely slow.
       self.queue.remove(key)
 
 

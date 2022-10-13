@@ -19,10 +19,12 @@ class Minecraft(embodied.Env):
       sticky_attack=30,
       sticky_jump=10,
       pitch_limit=(-60, 60),
+      show_actions=True,
       logs=False):
     self._task = task
     self._repeat = repeat
     self._size = size
+    self._show_actions = show_actions
 
     # Make env.
     if logs:
@@ -43,7 +45,7 @@ class Minecraft(embodied.Env):
       if 'MinecraftAxe-v1' not in ids:
         minerl_internal.Axe().register()
       self._inner = openai_gym.make(f'Minecraft{task.title()}-v1')
-    self._env = gym.Gym(self._inner, checks=False)
+    self._env = gym.Gym(self._inner)
     self._env = embodied.wrappers.TimeLimit(self._env, length)
 
     # Observations.
@@ -98,7 +100,8 @@ class Minecraft(embodied.Env):
 
   def step(self, action):
     action = action.copy()
-    action.update(self._action_values[action.pop('action')])
+    index = action.pop('action')
+    action.update(self._action_values[index])
     action = self._action(action)
     if action['reset']:
       obs = self._reset()
@@ -112,7 +115,7 @@ class Minecraft(embodied.Env):
           obs = self._reset()
           break
     new_items = self._track_new_items(obs)
-    obs = self._obs(obs, new_items)
+    obs = self._obs(obs, new_items, index)
     self._step += 1
     return obs
 
@@ -126,7 +129,7 @@ class Minecraft(embodied.Env):
     self._pitch = 0
     return obs
 
-  def _obs(self, obs, new_items):
+  def _obs(self, obs, new_items, action_index):
     inventory = np.array([obs[k] for k in self._inv_keys], np.float32)
     inventory = np.log(1 + np.array(inventory))
     index = self._equip_enum.index(obs['equipped_items/mainhand/type'])
@@ -152,6 +155,8 @@ class Minecraft(embodied.Env):
       if not isinstance(value, np.ndarray):
         value = np.array(value)
       assert value in space, (key, value, value.dtype, value.shape, space)
+    if self._show_actions:
+      obs['image'][-1, action_index, :] = 255
     return obs
 
   def _action(self, action):

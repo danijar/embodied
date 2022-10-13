@@ -59,7 +59,8 @@ class DMLab(embodied.Env):
       raise NotImplementedError(mode)
     config = {k: str(v) for k, v in config.items()}
     self._env = deepmind_lab.Lab(
-        level=level, observations=['RGB_INTERLEAVED'],
+        level='contributed/dmlab30/' + level,
+				observations=['RGB_INTERLEAVED'],
         level_cache=cache, config=config)
     self._prev_image = None
     self._done = True

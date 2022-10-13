@@ -1,10 +1,13 @@
 # 1. Test setup:
 # docker run -it --rm --gpus all nvidia/cuda:11.4.2-cudnn8-runtime-ubuntu20.04 nvidia-smi
 #
+# If the above does not work, try adding the --privileged flag
+# and changing the command to `sh -c 'ldconfig -v && nvidia-smi'`.
+#
 # 2. Start training:
 # docker build -f  agents/dreamerv3jax/Dockerfile -t img . && \
 # docker run -it --rm --gpus all -v ~/logdir:/logdir img \
-#   sh xvfb_run.sh python3 agents/dreamerv3jax/train.py \
+#   sh scripts/xvfb_run.sh python3 agents/dreamerv3jax/train.py \
 #   --logdir "/logdir/$(date +%Y%m%d-%H%M%S)" \
 #   --configs dmc_vision --task dmc_walker_walk
 #
@@ -12,9 +15,6 @@
 # tensorboard --logdir ~/logdir
 
 # System
-# FROM gcr.io/deeplearning-platform-release/base-cu113
-# FROM nvidia/cuda:11.4.2-cudnn8-runtime-ubuntu18.04
-# FROM nvidia/cuda:11.4.2-cudnn8-runtime-ubuntu20.04
 FROM nvidia/cuda:11.4.2-cudnn8-devel-ubuntu20.04
 ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/San_Francisco
@@ -30,13 +30,13 @@ RUN pip3 install --upgrade pip
 ENV MUJOCO_GL egl
 ENV DMLAB_DATASET_PATH /dmlab_data
 COPY scripts scripts
+RUN sh scripts/install-dmlab.sh
 RUN sh scripts/install-atari.sh
-# RUN sh scripts/install-minecraft.sh
-# RUN sh scripts/install-dmlab.sh
+RUN sh scripts/install-minecraft.sh
 ENV NUMBA_CACHE_DIR=/tmp
 RUN pip3 install crafter
 RUN pip3 install dm_control
-# RUN pip3 install robodesk
+RUN pip3 install robodesk
 RUN pip3 install procgen
 RUN pip3 install bsuite
 
@@ -50,9 +50,7 @@ RUN pip3 install zmq
 ENV XLA_PYTHON_CLIENT_MEM_FRACTION 0.8
 
 # Embodied
-RUN pip3 install numpy cloudpickle ruamel.yaml rich
+RUN pip3 install numpy cloudpickle ruamel.yaml rich dm-reverb
 COPY . /embodied
 RUN chown -R 1000:root /embodied && chmod -R 775 /embodied
-RUN mkdir /logdir
-RUN chown -R 1000:root /logdir && chmod -R 775 /logdir
 WORKDIR embodied

@@ -24,6 +24,12 @@ class Chunk:
         f'succ={succ}, '
         f'len={self.length})')
 
+  def __len__(self):
+    return self.length
+
+  def __bool__(self):
+    return True
+
   def append(self, step):
     if not self.data:
       example = {k: embodied.convert(v) for k, v in step.items()}
@@ -44,7 +50,7 @@ class Chunk:
       np.savez_compressed(stream, **data)
       stream.seek(0)
       filename.write(stream.read(), mode='wb')
-    # print(f'Saved chunk: {filename.name}')
+    print(f'Saved chunk: {filename.name}')
 
   @classmethod
   def load(cls, filename):
@@ -61,12 +67,12 @@ class Chunk:
     return chunk
 
   @classmethod
-  def scan(cls, directory, capacity=None, subtract=0):
+  def scan(cls, directory, capacity=None, shorten=0):
     directory = embodied.Path(directory)
     filenames, total = [], 0
     for filename in reversed(sorted(directory.glob('*.npz'))):
       if capacity and total >= capacity:
         break
       filenames.append(filename)
-      total += max(0, int(filename.stem.split('-')[3]) - subtract)
+      total += max(0, int(filename.stem.split('-')[3]) - shorten)
     return sorted(filenames)

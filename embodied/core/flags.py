@@ -96,4 +96,7 @@ class Flags:
         message = f"Expected int but got float '{value}' for key '{key}'."
         raise TypeError(message)
       return int(value)
+    if isinstance(default, dict):
+      raise TypeError(
+          f"Key '{key}' refers to a whole dict. Please speicfy a subkey.")
     return type(default)(value)

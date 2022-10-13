@@ -110,6 +110,10 @@ class Path:
   def copy(self, dest):
     raise NotImplementedError
 
+  def move(self, dest):
+    self.copy(dest)
+    self.remove()
+
 
 class LocalPath(Path):
 
@@ -148,6 +152,9 @@ class LocalPath(Path):
 
   def copy(self, dest):
     shutil.copytree(self, type(self)(dest), dirs_exist_ok=True)
+
+  def move(self, dest):
+    shutil.move(self, dest)
 
 
 class GFilePath(Path):
@@ -198,6 +205,12 @@ class GFilePath(Path):
 
   def copy(self, dest):
     self._gfile.copy(str(self), str(dest), overwrite=True)
+
+  def move(self, dest):
+    dest = Path(dest)
+    if dest.exists():
+      dest.rmtree()
+    self._gfile.rename(self, str(dest))
 
 
 Path.filesystems = [

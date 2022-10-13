@@ -15,8 +15,8 @@ class Axe(obtain_specs.Obtain):
         dense=True,
         reward_schedule=[
             dict(type="log", amount=1, reward=1),
-            dict(type="crafting_table", amount=1, reward=1),
-            dict(type="wooden_axe", amount=1, reward=10),
+            dict(type="crafting_table", amount=1, reward=10),
+            dict(type="wooden_axe", amount=1, reward=100),
         ],
         max_episode_steps=int(1e6),
         resolution=SIZE,

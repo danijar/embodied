@@ -12,10 +12,13 @@ def acting(agent, env, replay, logger, actordir, args):
   print('Logdir:', logdir)
   actordir = embodied.Path(actordir)
   actordir.mkdirs()
-  should_sync = embodied.when.Clock(args.sync_every)
   should_expl = embodied.when.Until(args.expl_until)
-  should_video = embodied.when.Every(args.eval_every)
+  should_sync = embodied.when.Clock(args.sync_every)
+  should_log = embodied.when.Clock(args.log_every)
   step = logger.step
+  metrics = embodied.Metrics()
+  print('Observation space:', env.obs_space)
+  print('Action space:', env.act_space)
 
   timer = embodied.Timer()
   timer.wrap('agent', agent, ['policy'])
@@ -23,31 +26,28 @@ def acting(agent, env, replay, logger, actordir, args):
 
   nonzeros = set()
   def per_episode(ep):
-    metrics = {}
     length = len(ep['reward']) - 1
     score = float(ep['reward'].astype(np.float64).sum())
+    logger.add({
+        'length': length, 'score': score,
+        'reward_rate': (ep['reward'] - ep['reward'].min() >= 0.1).mean(),
+    }, prefix='episode')
     print(f'Episode has {length} steps and return {score:.1f}.')
-    metrics['length'] = length
-    metrics['score'] = score
-    metrics['reward_rate'] = (ep['reward'] - ep['reward'].min() >= 0.1).mean()
-    logs = {}
+    stats = {}
+    for key in args.log_keys_video:
+      if key in ep:
+        stats[f'policy_{key}'] = ep[key]
     for key, value in ep.items():
       if not args.log_zeros and key not in nonzeros and (value == 0).all():
         continue
       nonzeros.add(key)
       if re.match(args.log_keys_sum, key):
-        logs[f'sum_{key}'] = ep[key].sum()
+        stats[f'sum_{key}'] = ep[key].sum()
       if re.match(args.log_keys_mean, key):
-        logs[f'mean_{key}'] = ep[key].mean()
+        stats[f'mean_{key}'] = ep[key].mean()
       if re.match(args.log_keys_max, key):
-        logs[f'max_{key}'] = ep[key].max(0).mean()
-    if should_video(step):
-      for key in args.log_keys_video:
-        metrics[f'policy_{key}'] = ep[key]
-    logger.add(metrics, prefix='episode')
-    logger.add(logs, prefix='logs')
-    logger.add(replay.stats, prefix='replay')
-    logger.write()
+        stats[f'max_{key}'] = ep[key].max(0).mean()
+    metrics.add(stats, prefix='stats')
 
   driver = embodied.Driver(env)
   driver.on_episode(lambda ep, worker: per_episode(ep))
@@ -75,10 +75,14 @@ def acting(agent, env, replay, logger, actordir, args):
       *args, mode='explore' if should_expl(step) else 'train')
 
   while step < args.steps:
+
+    if should_log(step):
+      logger.add(metrics.result())
+      logger.write()
+
     if should_sync(step):
       print('Syncing.')
       actor_cp.save()
-
       while not agent_cp.exists():
         print('Waiting for agent checkpoint to be created.')
         time.sleep(10)

@@ -23,7 +23,7 @@ def load_single_env(
     task, size=(64, 64), repeat=1, mode='train', camera=-1, gray=False,
     length=0, logdir='/dev/null', discretize=0, sticky=True, lives=False,
     episodic=True, again=False, termination=False, weaker=1.0, checks=False,
-    resets=True, seed=None):
+    resets=True, noops=0, reward_scale=1.0, seed=None):
   suite, task = task.split('_', 1)
   if suite == 'dummy':
     from . import dummy
@@ -32,9 +32,15 @@ def load_single_env(
     from . import gym
     env = gym.Gym(task)
   elif suite == 'procgen':
-    import procgen  # noqa
+    import procgen
     from . import gym
     env = gym.Gym(f'procgen:procgen-{task}-v0')
+  elif suite == 'procgen96':
+    import procgen
+    from . import gym
+    env = gym.Gym(f'procgen:procgen-{task}-v0', render_mode='rgb_array')
+    env = embodied.wrappers.RenderImage(env)
+    env = embodied.wrappers.ResizeImage(env, (96, 96))
 
   elif suite == 'bsuite':
 
@@ -71,7 +77,10 @@ def load_single_env(
     env = dmc.DMC(task, repeat, render=True, size=size, camera=camera)
   elif suite == 'atari':
     from . import atari
-    env = atari.Atari(task, repeat, size, gray, lives=lives, sticky=sticky)
+    env = atari.Atari(
+        task, repeat, size, gray,
+        length=length if (length and mode == 'train') else 108000,
+        lives=lives, sticky=sticky, noops=noops)
   elif suite == 'crafter':
     from . import crafter
     assert repeat == 1
@@ -116,6 +125,8 @@ def load_single_env(
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.ClipAction(env, name)
+  if reward_scale != 1:
+    env = embodied.wrappers.RewardScale(env, reward_scale)
   return env
 
 

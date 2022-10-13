@@ -26,10 +26,10 @@ class Logger:
     for name, value in dict(mapping).items():
       name = f'{prefix}/{name}' if prefix else name
       value = np.asarray(value)
-      if len(value.shape) not in (0, 2, 3, 4):
+      if len(value.shape) not in (0, 1, 2, 3, 4):
         raise ValueError(
             f"Shape {value.shape} for name '{name}' cannot be "
-            "interpreted as scalar, image, or video.")
+            "interpreted as scalar, histogram, image, or video.")
       self._metrics.append((step, name, value))
 
   def scalar(self, name, value):
@@ -165,14 +165,24 @@ class TensorBoardOutput(AsyncOutput):
           self._logdir, max_queue=1000)
     self._writer.set_as_default()
     for step, name, value in summaries:
-      if len(value.shape) == 0:
-        tf.summary.scalar(name, value, step)
-      elif len(value.shape) == 2:
-        tf.summary.image(name, value, step)
-      elif len(value.shape) == 3:
-        tf.summary.image(name, value, step)
-      elif len(value.shape) == 4:
-        self._video_summary(name, value, step)
+      try:
+        if len(value.shape) == 0:
+          tf.summary.scalar(name, value, step)
+        elif len(value.shape) == 1:
+          if len(value) > 1024:
+            value = value.copy()
+            np.random.shuffle(value)
+            value = value[:1024]
+          tf.summary.histogram(name, value, step)
+        elif len(value.shape) == 2:
+          tf.summary.image(name, value, step)
+        elif len(value.shape) == 3:
+          tf.summary.image(name, value, step)
+        elif len(value.shape) == 4:
+          self._video_summary(name, value, step)
+      except Exception:
+        print('Error writing summary:', name)
+        raise
     self._writer.flush()
 
   def _video_summary(self, name, video, step):
@@ -256,6 +266,8 @@ class XDataOutput:
   def __call__(self, summaries):
     bystep = collections.defaultdict(dict)
     for step, name, value in summaries:
+      if len(value.shape) == 4:
+        continue  # Videos are not supported.
       bystep[step][name] = value
     for step, metrics in bystep.items():
       self._writer.write({'step': step, **metrics})

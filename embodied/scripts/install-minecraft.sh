@@ -9,4 +9,4 @@ apt-get install -y x11-xserver-utils
 apt-get install -y xvfb
 apt-get clean
 
-pip3 install minerl
+pip3 install minerl==0.4.4

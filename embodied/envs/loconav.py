@@ -55,7 +55,7 @@ class LocoNav(embodied.Env):
     env = composer.Environment(
         time_limit=60, task=task, random_state=None,
         strip_singleton_obs_buffer_dim=True)
-    self._env = dmc.DMC(env, repeat, size, camera)
+    self._env = dmc.DMC(env, repeat, size=size, camera=camera)
     self._visited = None
     self._weaker = weaker
 
@@ -78,7 +78,8 @@ class LocoNav(embodied.Env):
       obs = self._env.step(action)
     if obs['is_first']:
       self._visited = set()
-    global_pos = self._walker.get_pose(self._env._env._physics)[0].reshape(-1)
+    # global_pos = self._walker.get_pose(self._env._env._physics)[0].reshape(-1)
+    global_pos = self._walker.get_pose(self._env._dmenv._physics)[0].reshape(-1)
     self._visited.add(tuple(np.round(global_pos[:2]).astype(int).tolist()))
     obs['log_coverage'] = len(self._visited)
     # if self._upright:
