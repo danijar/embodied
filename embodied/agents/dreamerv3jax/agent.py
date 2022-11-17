@@ -70,13 +70,22 @@ class Agent(nj.Module):
     if mode == 'eval':
       noise = self.config.eval_noise
       outs, task_state = self.task_behavior.policy(latent, task_state)
-      outs = {**outs, 'action': outs['action'].mode()}
+      if self.config.actor_eval_sample:
+        action = outs['action'].sample(seed=nj.rng())
+      else:
+        action = outs['action'].mode()
+      entropy = jnp.zeros(action.shape[:1])
+      outs = {**outs, 'action': action, 'log_entropy': entropy}
     elif mode == 'explore':
       outs, expl_state = self.expl_behavior.policy(latent, expl_state)
-      outs = {**outs, 'action': outs['action'].sample(seed=nj.rng())}
+      action = outs['action'].sample(seed=nj.rng())
+      entropy = outs['action'].entropy()
+      outs = {**outs, 'action': action, 'log_entropy': entropy}
     elif mode == 'train':
       outs, task_state = self.task_behavior.policy(latent, task_state)
-      outs = {**outs, 'action': outs['action'].sample(seed=nj.rng())}
+      action = outs['action'].sample(seed=nj.rng())
+      entropy = outs['action'].entropy()
+      outs = {**outs, 'action': action, 'log_entropy': entropy}
     outs = {**outs, 'action': jaxutils.action_noise(
         outs['action'], noise, self.act_space)}
     state = ((latent, outs['action']), task_state, expl_state)
@@ -144,6 +153,8 @@ class Agent(nj.Module):
     obs['reward'] = {
         'off': lambda x: x, 'sign': jnp.sign,
         'tanh': jnp.tanh, 'symlog': jaxutils.symlog,
+        '10x': lambda x: 10 * x,
+        '100x': lambda x: 100 * x,
     }[self.config.transform_rewards](obs['reward'])
     obs['cont'] = 1.0 - obs['is_terminal'].astype(jnp.float32)
     return obs
@@ -160,6 +171,8 @@ class WorldModel(nj.Module):
     shapes = {k: v for k, v in shapes.items() if not k.startswith('log_')}
     if self.config.rssm_type == 'rssm':
       self.rssm = nets.RSSM(**config.rssm)
+    elif self.config.rssm_type == 'stacked':
+      self.rssm = nets.StackedRSSM(**config.stacked_rssm)
     elif self.config.rssm_type == 'group':
       self.rssm = nets.GroupRSSM(**config.group_rssm)
     elif self.config.rssm_type == 'vqgru':
@@ -173,6 +186,13 @@ class WorldModel(nj.Module):
     self.heads['decoder'] = nets.MultiDecoder(shapes, **config.decoder)
     self.heads['reward'] = nets.MLP((), **config.reward_head)
     self.heads['cont'] = nets.MLP((), **config.cont_head)
+    if self.config.use_invhead:
+      kwargs = dict(shape=act_space['action'].shape, **self.config.invhead)
+      if act_space['action'].discrete:
+        kwargs['dist'] = config.actor_dist_disc
+      else:
+        kwargs['dist'] = config.actor_dist_cont
+      self.heads['inv'] = nets.MLP(**kwargs)
     if self.config.use_qhead:
       self.qhead = nets.MLP((), **config.qhead, name='qhead')
       self.qslow = nets.MLP((), **config.qhead, name='qslow')
@@ -202,6 +222,9 @@ class WorldModel(nj.Module):
 
   def loss(self, data, state, training=False):
     metrics = {}
+    if self.config.use_invhead:
+      assert 'inv' not in data
+      data = {**data, 'inv': data['action']}
     embed = self.encoder(data)
     prev_latent, prev_action = state
     prev_actions = jnp.concatenate([
@@ -209,9 +232,13 @@ class WorldModel(nj.Module):
     post, prior = self.rssm.observe(
         embed, prev_actions, data['is_first'], prev_latent)
     dists = {}
-    post_const = sg(post)
+    feats = {**post, 'embed': embed}
+    feats.update({
+        f'prev_{k}': jnp.concatenate([0 * v[:, :1], v[:, :-1]], 1)
+        for k, v in post.items()})
+    feats_const = sg(feats)
     for name, head in self.heads.items():
-      inp = post if name in self.config.grad_heads else post_const
+      inp = feats if name in self.config.grad_heads else feats_const
       if name == 'decoder' and self.config.drop_loss:
         indices = jnp.arange(embed.shape[1])
         amount = int(embed.shape[1] * (1 - self.config.drop_loss))
@@ -310,8 +337,15 @@ class WorldModel(nj.Module):
         step, jnp.arange(horizon), start, self.config.imag_unroll)
     traj = {
         k: jnp.concatenate([start[k][None], v], 0) for k, v in traj.items()}
-    traj['cont'] = jnp.concatenate([
-        first_cont[None], self.heads['cont'](traj).mean()[1:]], 0)
+
+    if self.config.cont_mode:
+      cont = self.heads['cont'](traj).mode()
+    else:
+      cont = self.heads['cont'](traj).mean()
+    traj['cont'] = jnp.concatenate([first_cont[None], cont[1:]], 0)
+    if self.config.imag_cont_thres:
+      traj['cont'] = traj['cont'] * (
+          traj['cont'] > self.config.imag_cont_thres).astype(jnp.float32)
     discount = 1 - 1 / self.config.horizon
     traj['weight'] = jnp.cumprod(discount * traj['cont'], 0) / discount
     return traj
@@ -353,7 +387,7 @@ class ImagActorCritic(nj.Module):
     else:
       kwargs['dist'] = config.actor_dist_cont
       self.grad = config.actor_grad_cont
-    self.actor = nets.MLP(name='actor', **kwargs)
+    self.actor = nets.MLP(name='actor', dims='deter', **kwargs)
     if self.config.slow_actor:
       self.slow_actor = nets.MLP(name='slow_actor', **kwargs)
       self.updater = jaxutils.SlowUpdater(
@@ -405,9 +439,7 @@ class ImagActorCritic(nj.Module):
       metrics[f'{key}_return_max'] = jnp.abs(ret).max()
       metrics[f'{key}_return_dist'] = jaxutils.subsample(ret)
       metrics[f'{key}_return_rate'] = (jnp.abs(ret) >= 0.5).mean()
-
       metrics[f'{key}_retstd_rewstd'] = ret.std() / rew.std()
-
       if self.config.retnorm == 'off':
         pass
       elif self.config.retnorm == 'reward':
@@ -420,6 +452,13 @@ class ImagActorCritic(nj.Module):
         mean, std = self.retmoms[key](ret)
         ret = (ret - mean) / std
         base = (base - mean) / std
+        if self.config.imag_ret_clip:
+          ret *= sg(1.0 / jnp.maximum(1.0, jnp.abs(ret)))
+          base *= sg(1.0 / jnp.maximum(1.0, jnp.abs(base)))
+      elif self.config.retnorm == 'return_symlog':
+        mean, std = self.retmoms[key](ret)
+        ret = jaxutils.symlog((ret - mean) / std)
+        base = jaxutils.symlog((base - mean) / std)
       else:
         raise NotImplementedError(self.config.retnorm)
       if self.config.retnorm != 'off':
@@ -485,6 +524,9 @@ class ImagActorCritic(nj.Module):
         scale /= self.advmom.stats()[1]
         scale = jnp.clip(scale, 1e-4, 1e-1)
       entloss = -scale * ent
+      if self.config.actentclip:
+        randomness = self._policy_randomness(policy)
+        entloss *= jnp.float32(randomness <= self.config.actentclip)
       metrics['entloss_scale'] = scale
       metrics['entloss_dist'] = jaxutils.subsample(ent)
       metrics['entloss_mean'] = entloss.mean()
@@ -536,6 +578,7 @@ class ImagActorCritic(nj.Module):
       loss += muesli_loss
 
     loss *= sg(traj['weight'])[:-1]
+    loss *= self.config.loss_scales.actor
     metrics['imag_weight_dist'] = jaxutils.subsample(traj['weight'])
     return loss.mean(), metrics
 
@@ -592,12 +635,12 @@ class VFunction(nj.Module):
   def __init__(self, rewfn, config):
     self.rewfn = rewfn
     self.config = config
-    self.net = nets.MLP((), name='net', **self.config.critic)
+    self.net = nets.MLP((), name='net', dims='deter', **self.config.critic)
     if self.config.slow_critic:
       kwargs = self.config.critic
       if self.config.slow_critic_zero_init:
         kwargs = kwargs.update(outscale=0.0)
-      self.target_net = nets.MLP((), name='target_net', **kwargs)
+      self.target_net = nets.MLP((), name='target_net', dims='deter', **kwargs)
       self.updater = jaxutils.SlowUpdater(
           self.net, self.target_net,
           self.config.slow_critic_fraction,
@@ -650,11 +693,16 @@ class VFunction(nj.Module):
       mask = inside | towards
       assert mask.shape == loss.shape
       loss *= sg(mask.astype(loss.dtype))
+    if self.config.critic_slowreg:
+      old = self.target_net(traj).mean()
+      reg = -dist.log_prob(sg(old))
+      loss += self.config.critic_slowreg * reg
     loss = (loss * sg(traj['weight'])).mean()
+    loss *= self.config.loss_scales.critic
     if self.config.dueling_critic:
       adv_dist = self.adv_net(traj)
       adv_target = sg(target - dist.mean())
-      loss += -(adv_dist.log_prob(adv_target) * sg(trae['weight'])).mean()
+      loss += -(adv_dist.log_prob(adv_target) * sg(traj['weight'])).mean()
       metrics['dueling_dist'] = jaxutils.subsample(adv_dist.mean())
       metrics['dueling_mean'] = adv_dist.mean().mean()
       metrics['dueling_std'] = adv_dist.mean().mean()

@@ -19,7 +19,8 @@ def train(agent, env, replay, logger, args):
   metrics = embodied.Metrics()
   print('Observation space:')
   for key, value in env.obs_space.items():
-    print(f'  {key:<16} {value}')
+    if not key.startswith('log_'):
+      print(f'  {key:<16} {value}')
   print('Action space:')
   for key, value in env.act_space.items():
     print(f'  {key:<16} {value}')
@@ -70,6 +71,8 @@ def train(agent, env, replay, logger, args):
     print(f'Fill train dataset ({train_fill} steps).')
     random_agent = embodied.RandomAgent(env.act_space)
     driver(random_agent.policy, steps=train_fill)
+  logger.add(metrics.result())
+  logger.write()
 
   dataset = iter(agent.dataset(replay.dataset))
   state = [None]  # To be writable from train step function below.
@@ -114,3 +117,4 @@ def train(agent, env, replay, logger, args):
     driver(policy, steps=1000)
     if should_save(step):
       checkpoint.save()
+  logger.write()

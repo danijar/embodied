@@ -16,7 +16,7 @@ def train_eval(
   should_train = embodied.when.Ratio(args.train_ratio / args.batch_steps)
   should_log = embodied.when.Clock(args.log_every)
   should_save = embodied.when.Clock(args.save_every)
-  should_eval = embodied.when.Every(args.eval_every)
+  should_eval = embodied.when.Every(args.eval_every, args.eval_initial)
   step = logger.step
   metrics = embodied.Metrics()
   print('Observation space:', train_env.obs_space)
@@ -70,6 +70,7 @@ def train_eval(
   if fill:
     print(f'Fill train dataset ({fill} steps).')
     driver_train(random_agent.policy, steps=fill)
+  logger.write()
 
   dataset_train = iter(agent.dataset(train_replay.dataset))
   dataset_eval = iter(agent.dataset(eval_replay.dataset))
@@ -115,8 +116,11 @@ def train_eval(
   policy_eval = lambda *args: agent.policy(*args, mode='eval')
   while step < args.steps:
     if should_eval(step):
+      print('Starting evaluation at step', int(step))
       driver_eval.reset()
       driver_eval(policy_eval, episodes=max(len(eval_env), args.eval_eps))
     driver_train(policy_train, steps=1000)
     if should_save(step):
       checkpoint.save()
+  logger.write()
+  logger.write()

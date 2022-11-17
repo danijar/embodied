@@ -76,8 +76,7 @@ class AsyncOutput:
 
   def __call__(self, summaries):
     if self._parallel:
-      if self._future:
-        self._future.result()
+      self._future and self._future.result()
       self._future = self._executor.submit(self._callback, summaries)
     else:
       self._callback(summaries)
@@ -150,17 +149,28 @@ class JSONLOutput(AsyncOutput):
 
 class TensorBoardOutput(AsyncOutput):
 
-  def __init__(self, logdir, fps=20, parallel=True):
+  def __init__(self, logdir, fps=20, maxsize=1e9, parallel=True):
     super().__init__(self._write, parallel)
     self._logdir = str(logdir)
     if self._logdir.startswith('/gcs/'):
       self._logdir = self._logdir.replace('/gcs/', 'gs://')
     self._fps = fps
     self._writer = None
+    self._maxsize = self._logdir.startswith('gs://') and maxsize
+    if self._maxsize:
+      self._checker = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+      self._promise = None
 
   def _write(self, summaries):
     import tensorflow as tf
-    if not self._writer:
+    reset = False
+    if self._maxsize:
+      result = self._promise and self._promise.result()
+      print('Current TensorBoard event file size:', result)  # TODO
+      reset = (self._promise and result >= self._maxsize)
+      self._promise = self._checker.submit(self._check)
+    if not self._writer or reset:
+      print('Creating new TensorBoard event file writer.')
       self._writer = tf.summary.create_file_writer(
           self._logdir, max_queue=1000)
     self._writer.set_as_default()
@@ -184,6 +194,11 @@ class TensorBoardOutput(AsyncOutput):
         print('Error writing summary:', name)
         raise
     self._writer.flush()
+
+  def _check(self):
+    import tensorflow as tf
+    events = tf.io.gfile.glob(self._logdir.rstrip('/') + '/events.out.*')
+    return tf.io.gfile.stat(sorted(events)[-1]).length if events else 0
 
   def _video_summary(self, name, video, step):
     import tensorflow as tf

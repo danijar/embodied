@@ -69,6 +69,7 @@ def train_fixed_eval(agent, env, train_replay, eval_replay, logger, args):
     print(f'Fill train dataset ({fill} steps).')
     random_agent = embodied.RandomAgent(env.act_space)
     driver(random_agent.policy, steps=fill)
+  logger.write()
 
   dataset_train = iter(agent.dataset(train_replay.dataset))
   dataset_eval = iter(agent.dataset(eval_replay.dataset))
@@ -123,3 +124,5 @@ def train_fixed_eval(agent, env, train_replay, eval_replay, logger, args):
     driver(policy, steps=1000)
     if should_save(step):
       checkpoint.save()
+  logger.write()
+  logger.write()

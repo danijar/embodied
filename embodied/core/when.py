@@ -3,9 +3,10 @@ import time
 
 class Every:
 
-  def __init__(self, every):
+  def __init__(self, every, initial=True):
     self._every = every
-    self._last = None
+    self._initial = initial
+    self._prev = None
 
   def __call__(self, step):
     step = int(step)
@@ -13,11 +14,11 @@ class Every:
       return True
     if self._every == 0:
       return False
-    if self._last is None:
-      self._last = step
-      return True
-    if step >= self._last + self._every:
-      self._last += self._every
+    if self._prev is None:
+      self._prev = (step // self._every) * self._every
+      return self._initial
+    if step >= self._prev + self._every:
+      self._prev += self._every
       return True
     return False
 
@@ -27,17 +28,17 @@ class Ratio:
   def __init__(self, ratio):
     assert ratio >= 0, ratio
     self._ratio = ratio
-    self._last = None
+    self._prev = None
 
   def __call__(self, step):
     step = int(step)
     if self._ratio == 0:
       return 0
-    if self._last is None:
-      self._last = step
+    if self._prev is None:
+      self._prev = step
       return 1
-    repeats = int((step - self._last) * self._ratio)
-    self._last += repeats / self._ratio
+    repeats = int((step - self._prev) * self._ratio)
+    self._prev += repeats / self._ratio
     return repeats
 
 
@@ -69,7 +70,7 @@ class Clock:
 
   def __init__(self, every):
     self._every = every
-    self._last = None
+    self._prev = None
 
   def __call__(self, step):
     if self._every < 0:
@@ -77,11 +78,11 @@ class Clock:
     if self._every == 0:
       return False
     now = time.time()
-    if self._last is None:
-      self._last = now
+    if self._prev is None:
+      self._prev = now
       return True
-    if now >= self._last + self._every:
-      # self._last += self._every
-      self._last = now
+    if now >= self._prev + self._every:
+      # self._prev += self._every
+      self._prev = now
       return True
     return False

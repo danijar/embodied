@@ -47,7 +47,7 @@ class Checkpoint:
     self._log and print(f'Saving checkpoint: {self._filename}')
     if self._parallel:
       self._promise and self._promise.result()
-      self._worker.submit(self._save)
+      self._promise = self._worker.submit(self._save)
     else:
       self._save()
 
@@ -60,11 +60,13 @@ class Checkpoint:
       f.write(self._pickle.dumps(data))
     tmp.move(self._filename)
     print('Wrote checkpoint:', self._filename)
+    print('Wrote checkpoint with step', data['step'])  # TODO
 
   def load(self):
     self._log and print(f'Loading checkpoint: {self._filename}')
     with self._filename.open('rb') as f:
       data = self._pickle.load(f)
+    print('Loading checkpoint with step', data['step'])  # TODO
     for key, value in data.items():
       if key.startswith('_'):
         continue

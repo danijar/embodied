@@ -189,6 +189,33 @@ class FlattenTwoDimObs(base.Wrapper):
     return obs
 
 
+class FlattenTwoDimActions(base.Wrapper):
+
+  def __init__(self, env):
+    super().__init__(env)
+    self._origs = {}
+    self._act_space = {}
+    for key, space in self.env.act_space.items():
+      if len(space.shape) == 2:
+        space = spacelib.Space(
+            space.dtype,
+            (int(np.prod(space.shape)),),
+            space.low.flatten(),
+            space.high.flatten())
+        self._origs[key] = space.shape
+      self._act_space[key] = space
+
+  @functools.cached_property
+  def act_space(self):
+    return self._act_space
+
+  def step(self, action):
+    action = action.copy()
+    for key, shape in self._origs.items():
+      action[key] = action[key].reshape(shape)
+    return self.env.step(action)
+
+
 class CheckSpaces(base.Wrapper):
 
   def __init__(self, env):
@@ -362,13 +389,14 @@ class StopAfterEpisodes(base.Wrapper):
     return obs
 
 
-class RewardScale(base.Wrapper):
+class RewardTransform(base.Wrapper):
 
-  def __init__(self, env, scale=1.0):
+  def __init__(self, env, scale=1.0, offset=0.0):
     super().__init__(env)
     self._scale = scale
+    self._offset = offset
 
   def step(self, action):
     obs = self.env.step(action)
-    obs['reward'] *= self._scale
+    obs['reward'] = np.float32(obs['reward'] * self._scale + self._offset)
     return obs

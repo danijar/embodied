@@ -23,8 +23,18 @@ def load_single_env(
     task, size=(64, 64), repeat=1, mode='train', camera=-1, gray=False,
     length=0, logdir='/dev/null', discretize=0, sticky=True, lives=False,
     episodic=True, again=False, termination=False, weaker=1.0, checks=False,
-    resets=True, noops=0, reward_scale=1.0, seed=None):
+    resets=True, noops=0, reward_scale=1.0, reward_offset=0.0, break_speed=1.0,
+    gamma=10.0, actions='all', sticky_jump=10, seed=None):
   suite, task = task.split('_', 1)
+  if suite.startswith('offset'):
+    string = suite[len('offset'):].replace('p', '.').replace('m', '-')
+    reward_offset = float(string)
+    suite, task = task.split('_', 1)
+  if suite.startswith('scale'):
+    string = suite[len('scale'):].replace('p', '.').replace('m', '-')
+    reward_scale = float(string)
+    suite, task = task.split('_', 1)
+
   if suite == 'dummy':
     from . import dummy
     env = dummy.Dummy(task, size, length or 100)
@@ -75,12 +85,16 @@ def load_single_env(
   elif suite == 'dmc':
     from . import dmc
     env = dmc.DMC(task, repeat, render=True, size=size, camera=camera)
+  elif suite == 'metaworld':
+    from . import metaworld
+    env = metaworld.MetaWorld(
+        task, mode, repeat, render=True, size=size, camera=camera)
   elif suite == 'atari':
     from . import atari
     env = atari.Atari(
         task, repeat, size, gray,
         length=length if (length and mode == 'train') else 108000,
-        lives=lives, sticky=sticky, noops=noops)
+        actions=actions, lives=lives, sticky=sticky, noops=noops)
   elif suite == 'crafter':
     from . import crafter
     assert repeat == 1
@@ -95,7 +109,8 @@ def load_single_env(
     env = robodesk.RoboDesk(task, mode, repeat, length or 2000)
   elif suite == 'minecraft':
     from . import minecraft
-    env = minecraft.Minecraft(task, repeat, size, length or 24000)
+    env = minecraft.Minecraft(
+        task, repeat, size, break_speed, gamma, sticky_jump=sticky_jump)
   elif suite == 'loconav':
     from . import loconav
     env = loconav.LocoNav(
@@ -125,8 +140,8 @@ def load_single_env(
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.ClipAction(env, name)
-  if reward_scale != 1:
-    env = embodied.wrappers.RewardScale(env, reward_scale)
+  if reward_scale != 1 or reward_offset != 0:
+    env = embodied.wrappers.RewardTransform(env, reward_scale, reward_offset)
   return env
 
 

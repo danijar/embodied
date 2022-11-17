@@ -23,6 +23,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK 1
 ENV PIP_NO_CACHE_DIR 1
 RUN apt-get update && apt-get install -y \
   ffmpeg git python3-pip vim libglew-dev \
+  x11-xserver-utils xvfb \
   && apt-get clean
 RUN pip3 install --upgrade pip
 
@@ -30,8 +31,8 @@ RUN pip3 install --upgrade pip
 ENV MUJOCO_GL egl
 ENV DMLAB_DATASET_PATH /dmlab_data
 COPY scripts scripts
-RUN sh scripts/install-dmlab.sh
-RUN sh scripts/install-atari.sh
+# RUN sh scripts/install-dmlab.sh
+# RUN sh scripts/install-atari.sh
 RUN sh scripts/install-minecraft.sh
 ENV NUMBA_CACHE_DIR=/tmp
 RUN pip3 install crafter
@@ -49,8 +50,20 @@ RUN pip3 install tensorflow-cpu
 RUN pip3 install zmq
 ENV XLA_PYTHON_CLIENT_MEM_FRACTION 0.8
 
+# Enable userspace DNS cache
+ENV GCS_RESOLVE_REFRESH_SECS=60
+ENV GCS_REQUEST_CONNECTION_TIMEOUT_SECS=300
+ENV GCS_METADATA_REQUEST_TIMEOUT_SECS=300
+ENV GCS_READ_REQUEST_TIMEOUT_SECS=300
+ENV GCS_WRITE_REQUEST_TIMEOUT_SECS=600
+
 # Embodied
 RUN pip3 install numpy cloudpickle ruamel.yaml rich dm-reverb
 COPY . /embodied
 RUN chown -R 1000:root /embodied && chmod -R 775 /embodied
+
+# TODO: To allow editing Minecraft options.txt
+RUN chown 1000:root /usr/local/lib/python3.8/dist-packages/minerl/Malmo/Minecraft/run/options.txt
+RUN chmod 775 /usr/local/lib/python3.8/dist-packages/minerl/Malmo/Minecraft/run/options.txt
+
 WORKDIR embodied

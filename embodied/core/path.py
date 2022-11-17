@@ -208,9 +208,9 @@ class GFilePath(Path):
 
   def move(self, dest):
     dest = Path(dest)
-    if dest.exists():
+    if dest.isdir():
       dest.rmtree()
-    self._gfile.rename(self, str(dest))
+    self._gfile.rename(self, str(dest), overwrite=True)
 
 
 Path.filesystems = [
