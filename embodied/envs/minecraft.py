@@ -341,16 +341,14 @@ class MinecraftDiamond(embodied.Wrapper):
         CollectReward('wooden_pickaxe', once=1),
         CollectReward('cobblestone', once=1),
         CollectReward('stone_pickaxe', once=1),
-        CollectReward('coal', once=1),
         CollectReward('iron_ore', once=1),
         CollectReward('furnace', once=1),
         CollectReward('iron_ingot', once=1),
         CollectReward('iron_pickaxe', once=1),
         CollectReward('diamond', once=1),
-        CollectReward('diamond_shovel', once=1),
         HealthReward(),
     ]
-    length = kwargs.pop('length', 100000)
+    length = kwargs.pop('length', 36000)
     env = minecraft_base.MinecraftBase(actions, *args, **kwargs)
     env = embodied.wrappers.TimeLimit(env, length)
     super().__init__(env)

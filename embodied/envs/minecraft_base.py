@@ -15,7 +15,7 @@ class MinecraftBase(embodied.Env):
       self, actions,
       repeat=1,
       size=(64, 64),
-      break_speed=30.0,
+      break_speed=100.0,
       gamma=10.0,
       sticky_attack=30,
       sticky_jump=10,

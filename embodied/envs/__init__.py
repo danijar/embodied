@@ -24,7 +24,7 @@ def load_single_env(
     length=0, logdir='/dev/null', discretize=0, sticky=True, lives=False,
     episodic=True, again=False, termination=False, weaker=1.0, checks=False,
     resets=True, noops=0, reward_scale=1.0, reward_offset=0.0, break_speed=1.0,
-    gamma=10.0, actions='all', sticky_jump=10, seed=None):
+    gamma=10.0, actions='all', sticky_jump=10, resize='opencv', seed=None):
   suite, task = task.split('_', 1)
   if suite.startswith('offset'):
     string = suite[len('offset'):].replace('p', '.').replace('m', '-')
@@ -94,11 +94,13 @@ def load_single_env(
     env = atari.Atari(
         task, repeat, size, gray,
         length=length if (length and mode == 'train') else 108000,
-        actions=actions, lives=lives, sticky=sticky, noops=noops)
+        actions=actions, lives=lives, sticky=sticky, noops=noops,
+        resize=resize)
   elif suite == 'crafter':
     from . import crafter
     assert repeat == 1
     # outdir = embodied.Path(logdir) / 'crafter' if mode == 'train' else None
+    # outdir.mkdirs()
     outdir = None
     env = crafter.Crafter(task, size, outdir)
   elif suite == 'dmlab':

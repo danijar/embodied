@@ -7,6 +7,8 @@ from functools import partial as bind
 import jax
 import jax.numpy as jnp
 
+__version__ = '0.9.0'
+
 
 ###############################################################################
 # State
@@ -17,7 +19,7 @@ import jax.numpy as jnp
 # in this global variable. The pure() wrapper populates this global variable
 # with the provided state, calls the inner function, and then the takes the
 # resulting state out of the global variable to return it back to the user.
-CONTEXT = [None]
+CONTEXT = None
 
 
 class Context(dict):
@@ -54,29 +56,29 @@ def pure(fun, nested=False):
   def purified(
       state, rng, *args, create=None, modify=None, ignore=None, **kwargs):
     global CONTEXT
-    if CONTEXT[0]:
-      create = create if create is not None else CONTEXT[0].create
-      modify = modify if modify is not None else CONTEXT[0].modify
-      ignore = ignore if ignore is not None else CONTEXT[0].ignore
-      assert CONTEXT[0].create or not create, 'Parent context disabled create.'
-      assert CONTEXT[0].modify or not modify, 'Parent context disabled modify.'
-      assert not CONTEXT[0].ignore or ignore, 'Parent context enabled ignore.'
+    if CONTEXT:
+      create = create if create is not None else CONTEXT.create
+      modify = modify if modify is not None else CONTEXT.modify
+      ignore = ignore if ignore is not None else CONTEXT.ignore
+      assert CONTEXT.create or not create, 'Parent context disabled create.'
+      assert CONTEXT.modify or not modify, 'Parent context disabled modify.'
+      assert not CONTEXT.ignore or ignore, 'Parent context enabled ignore.'
     else:
       create = create if create is not None else True
       modify = modify if modify is not None else True
       ignore = ignore if ignore is not None else False
     if not isinstance(state, dict):
       raise ValueError('Must provide a dict as state.')
-    if CONTEXT[0] and (not nested):
+    if CONTEXT and (not nested):
       raise RuntimeError('If you want to nest run() calls, use nested=True.')
-    before = CONTEXT[0]
+    before = CONTEXT
     try:
-      CONTEXT[0] = Context(state.copy(), rng, create, modify, ignore, [])
+      CONTEXT = Context(state.copy(), rng, create, modify, ignore, [])
       out = fun(*args, **kwargs)
-      state = dict(CONTEXT[0])
+      state = dict(CONTEXT)
       return out, state
     finally:
-      CONTEXT[0] = before
+      CONTEXT = before
   purified.pure = True
   return purified
 
@@ -86,9 +88,9 @@ def context():
   advanced users only. Prefer to use module methods to access and modify state
   and rng() to get the next RNG key."""
   global CONTEXT
-  if CONTEXT[0] is None:
+  if CONTEXT is None:
     raise RuntimeError('Wrap impure functions in pure() before running them.')
-  return CONTEXT[0]
+  return CONTEXT
 
 
 @jax.named_scope('rng')
@@ -272,43 +274,36 @@ def _prerun(fun, *args, **kwargs):
   context().update(state)
 
 
-
 ###############################################################################
 # Modules
 ###############################################################################
 
 
-SCOPE = ['']
-
-
-def reset():
-  """Clean up previously used scope names to provide a clean starting point for
-  unit tests."""
-  ModuleMeta.COUNTERS.clear()
+SCOPE = ''
 
 
 @contextlib.contextmanager
-def scope(scope, absolute=False):
+def scope(name, absolute=False):
   """Enter a relative or absolute name scope. Name scopes are used to make
-  variable names unique."""
+  names of state entries unique."""
   global SCOPE
-  if SCOPE[0] is None:
+  if SCOPE is None:
     raise RuntimeError('Run stateful functions with run().')
-  previous = SCOPE[0]
+  outside = SCOPE
   if absolute:
-    SCOPE[0] = scope
+    SCOPE = name
+  elif SCOPE == '':
+    SCOPE = name
   else:
-    SCOPE[0] += '/' + scope
-  yield SCOPE[0]
-  SCOPE[0] = previous
+    SCOPE = outside + '/' + name
+  yield SCOPE
+  SCOPE = outside
 
 
 class ModuleMeta(type):
 
   """Meta class that creates a unique path for each module instance and wraps
   the methods and properties of the module to enter the name scope."""
-
-  COUNTERS = {}
 
   def __new__(mcs, name, bases, clsdict):
     """This runs once per user module class definition. It wraps the methods of
@@ -335,17 +330,15 @@ class ModuleMeta(type):
   def __call__(cls, *args, name=None, **kwargs):
     """This runs once per use module instance creation. It derives a unique
     name and path for the module instance."""
+    if not isinstance(name, str):
+      raise KeyError(
+          "Please provide a module name via Module(..., name='example').")
+    if not re.match(r'[A-Za-z0-9_]+', name):
+      raise KeyError(
+          'Only letters, numbers, and underscores are allowed in scope names.')
     obj = cls.__new__(cls)
-    name = name or cls.__name__
-    global SCOPE
-    path = SCOPE[0] + '/' + name
-    if path in cls.COUNTERS:
-      cls.COUNTERS[path] += 1
-      path += str(cls.COUNTERS[path])
-    else:
-      cls.COUNTERS[path] = 1
-    obj._name = name
-    obj._path = path
+    with scope(name) as path:
+      obj._path = path
     obj._submodules = {}
     init = _scope_method(cls.__init__)
     init(obj, *args, **kwargs)
@@ -370,14 +363,14 @@ class Module(object, metaclass=ModuleMeta):
     return f'{self.__class__.__name__}({self.path})'
 
   @property
-  def name(self):
-    """The unique name of this module instance as a string."""
-    return self._name
+  def path(self):
+    """The unique name scope of this module instance as a string."""
+    return self._path
 
   @property
-  def path(self):
-    """The unique scope of this module instance as a string."""
-    return self._path
+  def name(self):
+    """The name of this module instance as a string."""
+    return self._path.split('/')[-1]
 
   def get(self, name, *args, **kwargs):
     """Retrieve or create a state entry that belongs to this module."""

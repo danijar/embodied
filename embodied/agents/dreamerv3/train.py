@@ -36,30 +36,106 @@ def main(argv=None):
     config = config.update(agnt.Agent.configs[name])
   config = embodied.Flags(config).parse(other)
 
-  config = config.update(logdir=str(embodied.Path(config.logdir)))
-  args = embodied.Config(logdir=config.logdir, **config.run)
-  if config.replay == 'chunks':
-    min_fill = 1024 * config.env.amount
-  else:
-    min_fill = config.batch_length * config.env.amount
-  args = args.update(
-      expl_until=args.expl_until // config.env.repeat,
-      train_fill=max(min_fill, args.train_fill),
-      eval_fill=max(min_fill, args.eval_fill),
-      batch_steps=config.batch_size * config.batch_length,
-  )
+  min_fill = config.batch_size * config.batch_length
+  config = config.update({
+      'logdir': str(embodied.Path(config.logdir)),
+      'env.seed': hash((config.seed, parsed.worker)),
+      'run.expl_until': config.run.expl_until // config.env.repeat,
+      'run.train_fill': max(min_fill, config.run.train_fill),
+      'run.eval_fill': max(min_fill, config.run.eval_fill),
+      'run.batch_steps': config.batch_size * config.batch_length,
+  })
   print(config)
 
-  logdir = embodied.Path(config.logdir)
-  step = embodied.Counter()
-
-  outdir = logdir
-  multiplier = config.env.repeat
-  if args.script == 'acting':
+  outdir = embodied.Path(config.logdir)
+  if config.run.script == 'acting':
     outdir /= f'worker{parsed.worker}'
-    multiplier *= parsed.workers
-  elif args.script == 'learning':
+  elif config.run.script == 'learning':
     outdir /= 'learner'
+
+  logdir = embodied.Path(config.logdir)
+  logdir.mkdirs()
+  config.save(logdir / 'config.yaml')
+  step = embodied.Counter()
+  logger = make_logger(parsed, outdir, step, config)
+  args = embodied.Config(logdir=config.logdir, **config.run)
+
+  cleanup = []
+  try:
+
+    if config.run.script == 'train':
+      replay = make_replay(config, logdir / 'episodes')
+      env = make_env(config, 'train')
+      cleanup.append(env)
+      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      embodied.run.train(agent, env, replay, logger, args)
+
+    elif config.run.script == 'train_save':
+      replay = make_replay(config, logdir / 'episodes')
+      env = make_env(config, 'train')
+      cleanup.append(env)
+      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      embodied.run.train_save(agent, env, replay, logger, args)
+
+    elif config.run.script == 'train_eval':
+      replay = make_replay(config, logdir / 'episodes')
+      eval_replay = make_replay(config, logdir / 'eval_episodes', is_eval=True)
+      env = make_env(config, 'train')
+      eval_env = make_env(config, 'eval')
+      cleanup += [env, eval_env]
+      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      embodied.run.train_eval(
+          agent, env, eval_env, replay, eval_replay, logger, args)
+
+    elif config.run.script == 'train_fixed_eval':
+      replay = make_replay(config, logdir / 'episodes')
+      if config.eval_dir:
+        assert not config.train.eval_fill
+        eval_replay = make_replay(config, config.eval_dir, is_eval=True)
+      else:
+        assert config.run.eval_fill
+        eval_replay = make_replay(
+            config, logdir / 'eval_episodes', is_eval=True)
+      env = make_env(config, 'train')
+      cleanup.append(env)
+      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      embodied.run.train_fixed_eval(
+          agent, env, replay, eval_replay, logger, args)
+
+    elif config.run.script == 'learning':
+      port = parsed.learner_addr.split(':')[-1]
+      replay = make_replay(config, server_port=port)
+      if config.eval_dir:
+        eval_replay = make_replay(config, config.eval_dir, is_eval=True)
+      else:
+        eval_replay = replay
+      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      embodied.run.learning(agent, replay, eval_replay, logger, args)
+
+    elif config.run.script == 'acting':
+      replay = make_replay(config, remote_addr=parsed.learner_addr)
+      env = make_env(config, 'train')
+      cleanup.append(env)
+      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      embodied.run.acting(agent, env, replay, logger, outdir, args)
+
+    else:
+      raise NotImplementedError(config.run.script)
+  finally:
+    for obj in cleanup:
+      obj.close()
+
+
+def make_env(config, mode='train'):
+  return embodied.envs.load_env(
+      config.task, mode=mode, logdir=config.logdir, **config.env)
+
+
+def make_logger(parsed, outdir, step, config):
+  multiplier = config.env.repeat
+  if config.run.script == 'acting':
+    multiplier *= parsed.workers
+  elif config.run.script == 'learning':
     multiplier = 1
   logger = embodied.Logger(step, [
       embodied.logger.TerminalOutput(config.filter),
@@ -68,64 +144,11 @@ def main(argv=None):
       embodied.logger.TensorBoardOutput(outdir),
   ], multiplier)
   try:
-    import google3
+    import google3  # noqa
     logger.outputs.append(embodied.logger.XDataOutput())
   except ImportError:
     pass
-
-  cleanup = []
-  try:
-    config = config.update({'env.seed': hash((config.seed, parsed.worker))})
-    env = embodied.envs.load_env(
-        config.task, mode='train', logdir=logdir, **config.env)
-    agent = agnt.Agent(env.obs_space, env.act_space, step, config)
-    cleanup.append(env)
-
-    if args.script == 'train':
-      replay = make_replay(config, logdir / 'episodes')
-      embodied.run.train(agent, env, replay, logger, args)
-
-    elif args.script == 'train_eval':
-      eval_env = embodied.envs.load_env(
-          config.task, mode='eval', logdir=logdir, **config.env)
-      replay = make_replay(config, logdir / 'episodes')
-      eval_replay = make_replay(config, logdir / 'eval_episodes', is_eval=True)
-      embodied.run.train_eval(
-          agent, env, eval_env, replay, eval_replay, logger, args)
-      cleanup.append(eval_env)
-
-    elif args.script == 'train_fixed_eval':
-      if config.eval_dir:
-        assert not config.train.eval_fill
-        eval_replay = make_replay(config, config.eval_dir, is_eval=True)
-      else:
-        assert config.run.eval_fill
-        eval_replay = make_replay(
-            config, logdir / 'eval_episodes', is_eval=True)
-      replay = make_replay(config, logdir / 'episodes')
-      embodied.run.train_fixed_eval(
-          agent, env, replay, eval_replay, logger, args)
-
-    elif args.script == 'learning':
-      env.close()
-      port = parsed.learner_addr.split(':')[-1]
-      #replay = make_replay(config, logdir / 'episodes', server_port=port)
-      replay = make_replay(config, server_port=port)
-      if config.eval_dir:
-        eval_replay = make_replay(config, config.eval_dir, is_eval=True)
-      else:
-        eval_replay = replay
-      embodied.run.learning(agent, replay, eval_replay, logger, args)
-
-    elif args.script == 'acting':
-      replay = make_replay(config, remote_addr=parsed.learner_addr)
-      embodied.run.acting(agent, env, replay, logger, outdir, args)
-
-    else:
-      raise NotImplementedError(args.script)
-  finally:
-    for obj in cleanup:
-      obj.close()
+  return logger
 
 
 def make_replay(
@@ -151,4 +174,3 @@ def make_replay(
 
 if __name__ == '__main__':
   main()
-

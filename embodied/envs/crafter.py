@@ -9,7 +9,7 @@ class Crafter(embodied.Env):
     import crafter
     self._env = crafter.Env(size=size, reward=(task == 'reward'), seed=seed)
     if outdir:
-      embodied.Path(outdir).mkdirs()
+      outdir = embodied.Path(outdir)
       self._env = crafter.Recorder(
           self._env, outdir,
           save_stats=True,
@@ -47,6 +47,7 @@ class Crafter(embodied.Env):
       image = self._env.reset()
       return self._obs(image, 0.0, {}, is_first=True)
     image, reward, self._done, info = self._env.step(action['action'])
+    reward = np.float32(reward)
     return self._obs(
         image, reward, info,
         is_last=self._done,
@@ -64,7 +65,7 @@ class Crafter(embodied.Env):
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_terminal,
-        log_reward=info['reward'] if info else 0.0,
+        log_reward=np.float32(info['reward'] if info else 0.0),
         **log_achievements,
     )
 

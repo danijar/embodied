@@ -1,4 +1,3 @@
-from functools import partial as bind
 import os
 
 import embodied
@@ -27,7 +26,7 @@ class JAXAgent(embodied.Agent):
   def __init__(self, agent_cls, obs_space, act_space, step, config):
     self.config = config.jax
     self.setup()
-    self.agent = agent_cls(obs_space, act_space, step, config)
+    self.agent = agent_cls(obs_space, act_space, step, config, name='agent')
     self.rng = jaxutils.RNG(config.seed)
     self.varibs = {}
     self._init_policy = nj.pure(lambda x: self.agent.policy_initial(len(x)))
@@ -36,11 +35,11 @@ class JAXAgent(embodied.Agent):
     self._train = nj.pure(self.agent.train)
     self._report = nj.pure(self.agent.report)
     if self.config.parallel:
-      self._init_train = nj.pmap(self._init_train, 'devices')
-      self._init_policy = nj.pmap(self._init_policy, 'devices')
-      self._train = nj.pmap(self._train, 'devices')
-      self._policy = nj.pmap(self._policy, 'devices', static=['mode'])
-      self._report = nj.pmap(self._report, 'devices')
+      self._init_train = nj.pmap(self._init_train, 'i')
+      self._init_policy = nj.pmap(self._init_policy, 'i')
+      self._train = nj.pmap(self._train, 'i')
+      self._policy = nj.pmap(self._policy, 'i', static=['mode'])
+      self._report = nj.pmap(self._report, 'i')
     else:
       self._init_train = nj.jit(self._init_train)
       self._init_policy = nj.jit(self._init_policy)
@@ -60,7 +59,6 @@ class JAXAgent(embodied.Agent):
       os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.8'
     xla_flags = []
-    # xla_flags.append('--xla_gpu_strict_conv_algorithm_picker=false')  # TODO
     if self.config.logical_cpus:
       count = self.config.logical_cpus
       xla_flags.append(f'--xla_force_host_platform_device_count={count}')
@@ -71,8 +69,6 @@ class JAXAgent(embodied.Agent):
     jax.config.update('jax_debug_nans', self.config.debug_nans)
     if self.config.platform == 'cpu':
       jax.config.update('jax_disable_most_optimizations', self.config.debug)
-    # jax.config.update('jax_log_compiles', True)
-    # jax.config.update('jax_enable_x64', self.config.enable_x64)
     jaxutils.COMPUTE_DTYPE = getattr(jnp, self.config.precision)
     print(f'JAX DEVICES ({jax.local_device_count()}):', jax.devices())
 
@@ -93,20 +89,6 @@ class JAXAgent(embodied.Agent):
     return outs, state, mets
 
   def policy(self, obs, state=None, mode='train'):
-
-    # # TODO: Slicing the parameter tree is extremely slow.
-    # replicas = min(len(obs['is_first']), jax.local_device_count())
-    # obs = self._convert_inps(obs, replicas)
-    # rng = self._next_rngs(replicas)
-    # varibs = self.varibs
-    # if self.config.parallel and replicas < jax.local_device_count():
-    #   varibs = tree_map(lambda x: x[:replicas], varibs)
-    # if state is None:
-    #   state, _ = self._init_policy(varibs, rng, obs)
-    # (outs, state), _ = self._policy(varibs, rng, obs, state, mode=mode)
-    # outs = self._convert_outs(outs)
-    # return outs, state
-
     padding = jax.local_device_count() - len(obs['is_first'])
     if padding > 0:
       obs = {
@@ -123,8 +105,6 @@ class JAXAgent(embodied.Agent):
     return outs, state
 
   def report(self, data):
-    # report_batch_size = max(jax.local_device_count(), 8)
-    # data = {k: v[:report_batch_size] for k, v in data.items()}
     data = self._convert_inps(data)
     rng = self._next_rngs()
     mets, _ = self._report(self.varibs, rng, data)
@@ -152,7 +132,6 @@ class JAXAgent(embodied.Agent):
             f'Batch must by divisible by {replicas} replicas: {shapes}')
       value = tree_map(
           lambda x: x.reshape((replicas, -1) + x.shape[1:]), value)
-    # value = jax.device_put(value)
     return value
 
   def _convert_outs(self, value):

@@ -38,19 +38,33 @@ def cast_to_compute(values):
   return tree_map(lambda x: x.astype(COMPUTE_DTYPE), values)
 
 
+def parallel():
+  try:
+    jax.lax.axis_index('i')
+    return True
+  except NameError:
+    return False
+
+
+def tensorstats(tensor, prefix=None):
+  metrics = {
+      'mean': tensor.mean(),
+      'std': tensor.std(),
+      'mag': jnp.abs(tensor).max(),
+      'min': tensor.min(),
+      'max': tensor.max(),
+      'dist': subsample(tensor),
+  }
+  if prefix:
+    metrics = {f'{prefix}_{k}': v for k, v in metrics.items()}
+  return metrics
+
+
 def subsample(values, amount=1024):
   values = values.flatten()
   if len(values) > amount:
     values = jax.random.permutation(nj.rng(), values)[:amount]
   return values
-
-
-def parallel():
-  try:
-    jax.lax.axis_index('devices')
-    return True
-  except NameError:
-    return False
 
 
 def scan(fn, inputs, start, unroll=True, modify=False):
@@ -78,26 +92,6 @@ def symlog(x):
 
 def symexp(x):
   return jnp.sign(x) * (jnp.exp(jnp.abs(x)) - 1)
-
-
-def asqrt(x, eps=0.001):
-  return jnp.sign(x) * (jnp.sqrt(jnp.abs(x) + 1) - 1) + eps * x
-
-
-def apower(x, eps=0.001):
-  z = jnp.sqrt(1 + 4 * eps * (eps + 1 + jnp.abs(x))) / 2 / eps - 1 / 2 / eps
-  return jnp.sign(x) * (jnp.square(z) - 1)
-
-
-def action_noise(action, amount, act_space):
-  if amount == 0:
-    return action
-  amount = jnp.cast(amount, action.dtype)
-  if act_space.discrete:
-    probs = amount / action.shape[-1] + (1 - amount) * action
-    return OneHotDist(probs=probs).sample(nj.rng())
-  else:
-    return jnp.clip(tfd.Normal(action, amount).sample(), -1, 1)
 
 
 class OneHotDist(tfd.OneHotCategorical):
@@ -138,64 +132,6 @@ class MSEDist:
   def log_prob(self, value):
     assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
     distance = ((self._mode - value) ** 2)
-    if self._agg == 'mean':
-      loss = distance.mean(self._dims)
-    elif self._agg == 'sum':
-      loss = distance.sum(self._dims)
-    else:
-      raise NotImplementedError(self._agg)
-    return -loss
-
-
-
-class MSEMaxDist:
-
-  def __init__(self, mode, dims, agg='sum'):
-    self._mode = mode
-    self._dims = tuple([-x for x in range(1, dims + 1)])
-    self._agg = agg
-    self.batch_shape = mode.shape[:len(mode.shape) - dims]
-    self.event_shape = mode.shape[len(mode.shape) - dims:]
-
-  def mode(self):
-    return self._mode
-
-  def mean(self):
-    return self._mode
-
-  def log_prob(self, value):
-    assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
-    distance = ((self._mode - value) ** 2)
-    if self._agg == 'mean':
-      loss = distance.mean(self._dims)
-    elif self._agg == 'sum':
-      loss = distance.sum(self._dims)
-    else:
-      raise NotImplementedError(self._agg)
-    loss = 0.5 * loss + 0.5 * distance.max(self._dims)
-    return -loss
-
-
-class AbsDist:
-
-  def __init__(self, mode, dims, agg='sum', tol=1e-8):
-    self._mode = mode
-    self._dims = tuple([-x for x in range(1, dims + 1)])
-    self._agg = agg
-    self._tol = tol
-    self.batch_shape = mode.shape[:len(mode.shape) - dims]
-    self.event_shape = mode.shape[len(mode.shape) - dims:]
-
-  def mode(self):
-    return self._mode
-
-  def mean(self):
-    return self._mode
-
-  def log_prob(self, value):
-    assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
-    distance = jnp.abs(self._mode - value)
-    distance = jnp.where(distance < self._tol, 0, distance)
     if self._agg == 'mean':
       loss = distance.mean(self._dims)
     elif self._agg == 'sum':
@@ -308,166 +244,15 @@ def balance_stats(dist, target, thres):
   )
 
 
-class AutoAdapt(nj.Module):
-
-  def __init__(
-      self, shape, impl, scale, target, min, max,
-      vel=0.1, thres=0.1, inverse=False):
-    self._shape = tuple(shape)
-    self._impl = impl
-    self._fixed_scale = scale
-    self._target = target
-    self._min = min
-    self._max = max
-    self._vel = vel
-    self._inverse = inverse
-    self._thres = thres
-
-  @property
-  def shape(self):
-    return self._shape
-
-  def __call__(self, reg, update=True):
-    update and self.update(reg)
-    scale = self.scale()
-    loss = scale * (-reg if self._inverse else reg)
-    metrics = {
-        'mean': reg.mean(),
-        'std': reg.std(),
-        'scale_mean': scale.mean(),
-        'scale_std': scale.std(),
-    }
-    return loss, metrics
-
-  def scale(self):
-    if self._impl == 'fixed':
-      return jnp.float32(self._fixed_scale)
-    elif self._impl == 'mult':
-      return sg(self.get('scale', jnp.ones, self._shape, jnp.float32))
-    elif self._impl == 'prop':
-      return sg(self.get('scale', jnp.ones, self._shape, jnp.float32))
-    else:
-      raise NotImplementedError(self._impl)
-
-  def update(self, reg):
-    avg = reg.mean(list(range(len(reg.shape) - len(self._shape))))
-    if self._impl == 'fixed':
-      pass
-    elif self._impl == 'mult':
-      scale = self.scale()
-      below = avg < (1 / (1 + self._thres)) * self._target
-      above = avg > (1 + self._thres) * self._target
-      if self._inverse:
-        below, above = above, below
-      inside = ~below & ~above
-      adjusted = (
-          above.astype(jnp.float32) * scale * (1 + self._vel) +
-          below.astype(jnp.float32) * scale / (1 + self._vel) +
-          inside.astype(jnp.float32) * scale)
-      self.put('scale', jnp.clip(adjusted, self._min, self._max))
-    elif self._impl == 'prop':
-      direction = avg - self._target
-      if self._inverse:
-        direction = -direction
-      self.put('scale', jnp.clip(
-          self._scale + self._vel * direction, self._min, self._max))
-    else:
-      raise NotImplementedError(self._impl)
-
-
-# class Normalize(nj.Module):
-
-#   def __init__(
-#       self, impl='mean_std', decay=0.99, max=1e8, vareps=0.0, stdeps=0.0,
-#       scale=1.0):
-#     self._impl = impl
-#     self._decay = decay
-#     self._max = max
-#     self._stdeps = stdeps
-#     self._vareps = vareps
-#     self._scale = scale
-#     self._mean = nj.Variable(jnp.zeros, (), jnp.float32, name='mean')
-#     self._sqrs = nj.Variable(jnp.zeros, (), jnp.float32, name='sqrs')
-#     self._maxs = nj.Variable(jnp.zeros, (), jnp.float32, name='maxs')
-#     self._mins = nj.Variable(jnp.zeros, (), jnp.float32, name='mins')
-#     self._step = nj.Variable(jnp.zeros, (), jnp.int32, name='step')
-
-#   def __call__(self, values, update=True):
-#     update and self.update(values)
-#     return self.transform(values)
-
-#   def update(self, values):
-#     x = values.astype(jnp.float32)
-#     m = self._decay
-#     mean = self._mean.read()
-#     sqrs = self._sqrs.read()
-#     maxs = self._maxs.read()
-#     mins = self._mins.read()
-#     step = self._step.read()
-#     self._step.write(step + 1)
-#     self._mean.write(m * mean + (1 - m) * x.mean())
-#     self._sqrs.write(m * sqrs + (1 - m) * (x * x).mean())
-#     self._maxs.write(m * jnp.maximum(maxs, x.max()) + (1 - m) * x.max())
-#     self._mins.write(m * jnp.minimum(mins, x.min()) + (1 - m) * x.min())
-
-#   def transform(self, values):
-#     mean = self._mean.read()
-#     sqrs = self._sqrs.read()
-#     step = self._step.read()
-#     maxs = self._maxs.read()
-#     mins = self._mins.read()
-#     correction = 1 - self._decay ** step.astype(jnp.float32)
-#     mean = mean / correction
-#     var = (sqrs / correction) - mean ** 2
-#     if self._max > 0.0:
-#       scale = 1 / jnp.sqrt(
-#           jnp.maximum(var, 1 / self._max ** 2 + self._vareps) + self._stdeps)
-#     else:
-#       scale = 1 / jnp.sqrt(var + self._vareps) + self._stdeps
-#     if self._impl == 'off':
-#       return values
-#     elif self._impl == 'mean_std':
-#       values -= sg(mean.astype(values.dtype))
-#       values *= sg(scale.astype(values.dtype))
-#     elif self._impl == 'min_max':
-#       values -= sg(mins.astype(values.dtype))
-#       values /= sg(jnp.maximum(maxs - mins, 1 / self._max).astype(values.dtype))
-#     elif self._impl == 'max':
-#       mag = jnp.maximum(jnp.abs(maxs), jnp.abs(mins))
-#       values /= sg(jnp.maximum(mag, 1 / self._max).astype(values.dtype))
-#     elif self._impl == 'std':
-#       values *= sg(scale.astype(values.dtype))
-#     else:
-#       raise NotImplementedError(self._impl)
-#     return values * self._scale
-
-#   def scale(self):
-#     mean = self._mean.read()
-#     sqrs = self._sqrs.read()
-#     step = self._step.read()
-#     maxs = self._maxs.read()
-#     mins = self._mins.read()
-#     correction = 1 - self._decay ** step.astype(jnp.float32)
-#     mean = mean / correction
-#     var = (sqrs / correction) - mean ** 2
-#     if self._max > 0.0:
-#       scale = 1 / jnp.sqrt(
-#           jnp.maximum(var, 1 / self._max ** 2 + self._vareps) + self._stdeps)
-#     else:
-#       scale = 1 / jnp.sqrt(var + self._vareps) + self._stdeps
-#     return sg(scale)
-
-
 class Moments(nj.Module):
 
   def __init__(
-      self, impl='mean_std', decay=0.99, max=1e8, eps=0.0, alpha=0.5, perclo=1,
-      perchi=99):
+      self, impl='mean_std', decay=0.99, max=1e8, eps=0.0, perclo=5,
+      perchi=95):
     self.impl = impl
     self.decay = decay
     self.max = max
     self.eps = eps
-    self.alpha = alpha
     self.perclo = perclo
     self.perchi = perchi
     if self.impl == 'off':
@@ -479,22 +264,13 @@ class Moments(nj.Module):
     elif self.impl == 'min_max':
       self.low = nj.Variable(jnp.zeros, (), jnp.float32, name='low')
       self.high = nj.Variable(jnp.zeros, (), jnp.float32, name='high')
-    elif self.impl == 'perc':
-      self.low = nj.Variable(jnp.zeros, (), jnp.float32, name='low')
-      self.high = nj.Variable(jnp.zeros, (), jnp.float32, name='high')
     elif self.impl == 'perc_ema':
       self.low = nj.Variable(jnp.zeros, (), jnp.float32, name='low')
       self.high = nj.Variable(jnp.zeros, (), jnp.float32, name='high')
-    elif self.impl == 'min_mean_max':
+    elif self.impl == 'perc_ema_corr':
       self.step = nj.Variable(jnp.zeros, (), jnp.int32, name='step')
-      self.mean = nj.Variable(jnp.zeros, (), jnp.float32, name='mean')
       self.low = nj.Variable(jnp.zeros, (), jnp.float32, name='low')
       self.high = nj.Variable(jnp.zeros, (), jnp.float32, name='high')
-    elif self.impl == 'min_mean_std':
-      self.step = nj.Variable(jnp.zeros, (), jnp.int32, name='step')
-      self.mean = nj.Variable(jnp.zeros, (), jnp.float32, name='mean')
-      self.low = nj.Variable(jnp.zeros, (), jnp.float32, name='low')
-      self.sqrs = nj.Variable(jnp.zeros, (), jnp.float32, name='sqrs')
     elif self.impl == 'mean_mag':
       self.mag = nj.Variable(jnp.zeros, (), jnp.float32, name='mag')
     elif self.impl == 'max_mag':
@@ -508,10 +284,10 @@ class Moments(nj.Module):
 
   def update(self, x):
     if parallel():
-      mean = lambda x: jax.lax.pmean(x.mean(), 'devices')
-      min_ = lambda x: jax.lax.pmin(x.min(), 'devices')
-      max_ = lambda x: jax.lax.pmax(x.max(), 'devices')
-      per = lambda x, q: jnp.percentile(jax.lax.all_gather(x, 'devices'), q)
+      mean = lambda x: jax.lax.pmean(x.mean(), 'i')
+      min_ = lambda x: jax.lax.pmin(x.min(), 'i')
+      max_ = lambda x: jax.lax.pmax(x.max(), 'i')
+      per = lambda x, q: jnp.percentile(jax.lax.all_gather(x, 'i'), q)
     else:
       mean = jnp.mean
       min_ = jnp.min
@@ -529,26 +305,15 @@ class Moments(nj.Module):
       low, high = min_(x), max_(x)
       self.low.write(m * jnp.minimum(self.low.read(), low) + (1 - m) * low)
       self.high.write(m * jnp.maximum(self.high.read(), high) + (1 - m) * high)
-    elif self.impl == 'perc':
-      low, high = per(x, self.perclo), per(x, self.perchi)
-      self.low.write(m * jnp.minimum(self.low.read(), low) + (1 - m) * low)
-      self.high.write(m * jnp.maximum(self.high.read(), high) + (1 - m) * high)
     elif self.impl == 'perc_ema':
       low, high = per(x, self.perclo), per(x, self.perchi)
       self.low.write(m * self.low.read() + (1 - m) * low)
       self.high.write(m * self.high.read() + (1 - m) * high)
-    elif self.impl == 'min_mean_max':
-      low, high = min_(x), max_(x)
-      self.low.write(m * jnp.minimum(self.low.read(), low) + (1 - m) * low)
-      self.high.write(m * jnp.maximum(self.high.read(), high) + (1 - m) * high)
+    elif self.impl == 'perc_ema_corr':
       self.step.write(self.step.read() + 1)
-      self.mean.write(m * self.mean.read() + (1 - m) * mean(x))
-    elif self.impl == 'min_mean_std':
-      low, high = min_(x), max_(x)
-      self.low.write(m * jnp.minimum(self.low.read(), low) + (1 - m) * low)
-      self.sqrs.write(m * self.sqrs.read() + (1 - m) * mean(x * x))
-      self.step.write(self.step.read() + 1)
-      self.mean.write(m * self.mean.read() + (1 - m) * mean(x))
+      low, high = per(x, self.perclo), per(x, self.perchi)
+      self.low.write(m * self.low.read() + (1 - m) * low)
+      self.high.write(m * self.high.read() + (1 - m) * high)
     elif self.impl == 'mean_mag':
       curr = mean(jnp.abs(x))
       self.mag.write(m * self.mag.read() + (1 - m) * curr)
@@ -569,40 +334,26 @@ class Moments(nj.Module):
       return sg(mean), sg(std)
     elif self.impl == 'min_max':
       offset = self.low.read()
-      range = jnp.maximum(1 / self.max, self.high.read() - self.low.read())
-      return sg(offset), sg(range)
-    elif self.impl == 'perc':
-      offset = self.low.read()
-      range = jnp.maximum(1 / self.max, self.high.read() - self.low.read())
-      return sg(offset), sg(range)
+      invscale = jnp.maximum(1 / self.max, self.high.read() - self.low.read())
+      return sg(offset), sg(invscale)
     elif self.impl == 'perc_ema':
       offset = self.low.read()
-      range = jnp.maximum(1 / self.max, self.high.read() - self.low.read())
-      return sg(offset), sg(range)
-    elif self.impl == 'min_mean_max':
-      offset = self.low.read()
+      invscale = jnp.maximum(1 / self.max, self.high.read() - self.low.read())
+      return sg(offset), sg(invscale)
+    elif self.impl == 'perc_ema_corr':
       corr = 1 - self.decay ** self.step.read().astype(jnp.float32)
-      mean = self.mean.read() / corr
-      top = self.alpha * mean + (1 - self.alpha) * self.high.read()
-      range = jnp.maximum(1 / self.max, top - self.low.read())
-      return sg(offset), sg(range)
-    elif self.impl == 'min_mean_std':
-      offset = self.low.read()
-      corr = 1 - self.decay ** self.step.read().astype(jnp.float32)
-      mean = self.mean.read() / corr
-      var = (self.sqrs.read() / corr) - self.mean.read() ** 2
-      std = jnp.sqrt(jnp.maximum(var, 1 / self.max ** 2) + self.eps)
-      top = mean + self.alpha * std
-      range = jnp.maximum(1 / self.max, top - self.low.read())
-      return sg(offset), sg(range)
+      lo = self.low.read() / corr
+      hi = self.high.read() / corr
+      invscale = jnp.maximum(1 / self.max, hi - lo)
+      return sg(lo), sg(invscale)
     elif self.impl == 'mean_mag':
       offset = jnp.array(0)
-      scale = jnp.maximum(1 / self.max, self.mag.read())
-      return sg(offset), sg(scale)
+      invscale = jnp.maximum(1 / self.max, self.mag.read())
+      return sg(offset), sg(invscale)
     elif self.impl == 'max_mag':
       offset = jnp.array(0)
-      scale = jnp.maximum(1 / self.max, self.mag.read())
-      return sg(offset), sg(scale)
+      invscale = jnp.maximum(1 / self.max, self.mag.read())
+      return sg(offset), sg(invscale)
     else:
       raise NotImplementedError(self.impl)
 
@@ -612,11 +363,11 @@ class Optimizer(nj.Module):
   PARAM_COUNTS = {}
 
   def __init__(
-      self, lr, opt='adam', eps=1e-5, clip=100.0, warmup=0, agc=0, wd=0.0,
-      wd_pattern=r'/(w|kernel)$'):
+      self, lr, opt='adam', eps=1e-5, clip=100.0, warmup=0, wd=0.0,
+      wd_pattern=r'/(w|kernel)$', lateclip=0.0):
     assert opt in ('adam', 'belief', 'yogi')
     assert wd_pattern[0] not in ('0', '1')
-    assert self.path not in self.PARAM_COUNTS
+    # assert self.path not in self.PARAM_COUNTS
     self.PARAM_COUNTS[self.path] = None
     wd_pattern = re.compile(wd_pattern)
     chain = []
@@ -624,27 +375,30 @@ class Optimizer(nj.Module):
       chain.append(optax.clip_by_global_norm(clip))
     if opt == 'adam':
       chain.append(optax.scale_by_adam(eps=eps))
-    elif opt == 'belief':
-      chain.append(optax.scale_by_belief(eps=eps))   #, eps_root=eps))
-    elif opt == 'yogi':
-      chain.append(optax.scale_by_yogi(eps=eps))
-    if agc:
-      chain.append(adaptive_gradient_clipping(agc))
+    else:
+      raise NotImplementedError(opt)
+    if lateclip:
+      chain.append(late_grad_clip(lateclip))
     if wd:
       chain.append(optax.additive_weight_decay(wd, lambda params: (
           tree_map(lambda k: bool(wd_pattern.search(k)), tree_keys(params)))))
-    chain.append(optax.scale(-lr))
+    if warmup:
+      schedule = optax.linear_schedule(0.0, -lr, warmup)
+      chain.append(optax.inject_hyperparams(optax.scale)(schedule))
+    else:
+      chain.append(optax.scale(-lr))
     self.opt = optax.chain(*chain)
-    self.step = nj.Variable(jnp.array, 0, jnp.int32)
+    self.step = nj.Variable(jnp.array, 0, jnp.int32, name='step')
     self.scaling = (COMPUTE_DTYPE == jnp.float16)
     if self.scaling:
       self.opt = optax.apply_if_finite(self.opt, max_consecutive_errors=1000)
-      self.grad_scale = nj.Variable(jnp.array, 1e4, jnp.float32)
-      self.good_steps = nj.Variable(jnp.array, 0, jnp.int32)
+      self.grad_scale = nj.Variable(
+          jnp.array, 1e4, jnp.float32, name='grad_scale')
+      self.good_steps = nj.Variable(
+          jnp.array, 0, jnp.int32, name='good_steps')
 
   def __call__(self, modules, lossfn, *args, has_aux=False, **kwargs):
-    # TODO: Exclude non-trainable variables.
-    def lossfn2(*args, **kwargs):
+    def wrapped(*args, **kwargs):
       outs = lossfn(*args, **kwargs)
       loss, aux = outs if has_aux else (outs, None)
       assert loss.dtype == jnp.float32, (self.name, loss.dtype)
@@ -654,13 +408,13 @@ class Optimizer(nj.Module):
       return loss, aux
     metrics = {}
     loss, params, grads, aux = nj.grad(
-        lossfn2, modules, has_aux=True)(*args, **kwargs)
+        wrapped, modules, has_aux=True)(*args, **kwargs)
     if not self.PARAM_COUNTS[self.path]:
       count = sum([np.prod(x.shape) for x in params.values()])
       print(f'Optimizer {self.name} has {count:,} variables.')
       self.PARAM_COUNTS[self.path] = count
     if parallel():
-      grads = tree_map(lambda x: jax.lax.pmean(x, 'devices'), grads)
+      grads = tree_map(lambda x: jax.lax.pmean(x, 'i'), grads)
     if self.scaling:
       grads = tree_map(lambda x: x / self.grad_scale.read(), grads)
       finite = self._update_scale(grads)
@@ -696,17 +450,12 @@ class Optimizer(nj.Module):
     return finite
 
 
-def adaptive_gradient_clipping(frac=0.01, eps=1e-3):
+def late_grad_clip(value=1.0):
   def init_fn(params):
     return ()
   def update_fn(updates, state, params):
-    def clip(u, p):
-      unorm = jnp.linalg.norm(u.reshape((-1, u.shape[-1])), 2)
-      pnorm = jnp.linalg.norm(p.reshape((-1, p.shape[-1])), 2)
-      thres = jnp.maximum(eps, frac * pnorm)
-      return u * thres / jnp.maximum(thres, unorm)
-    updates = jax.tree_util.tree_map(clip, updates, params)
-    return updates, state
+    updates = tree_map(lambda x: jnp.clip(x, -value, value), updates)
+    return updates, ()
   return optax.GradientTransformation(init_fn, update_fn)
 
 
@@ -741,7 +490,7 @@ class SlowUpdater:
     source = {
         k.replace(f'/{self.src.name}/', f'/{self.dst.name}/'): v
         for k, v in self.src.getm().items()}
-    self.dst.putm(jax.tree_util.tree_map(
+    self.dst.putm(tree_map(
         lambda s, d: mix * s + (1 - mix) * d,
         source, self.dst.getm()))
     self.updates.write(updates + 1)

@@ -8,25 +8,29 @@ class Atari(embodied.Env):
 
   def __init__(
       self, name, repeat=4, size=(84, 84), gray=True, noops=0, lives='unused',
-      sticky=True, actions='all', length=108000, seed=None):
+      sticky=True, actions='all', length=108000, resize='opencv', seed=None):
     assert size[0] == size[1]
-    assert lives in ('unused', 'discount', 'reset')
+    assert lives in ('unused', 'discount', 'reset'), lives
+    assert actions in ('all', 'needed'), actions
+    assert resize in ('opencv', 'pillow'), resize
 
     if self.LOCK is None:
       import multiprocessing as mp
       mp = mp.get_context('spawn')
       self.LOCK = mp.Lock()
 
-    import cv2
-    self._cv2 = cv2
+    self._resize = resize
+    if self._resize == 'opencv':
+      import cv2
+      self._cv2 = cv2
+    if self._resize == 'pillow':
+      from PIL import Image
+      self._image = Image
 
     # if 'ATARI_ROMS' in os.environ:  # TODO
     #   import absl.flags
     #   import atari_py  # noqa: For flag definition.
     #   absl.flags.FLAGS.atari_roms_path = os.environ['ATARI_ROMS']
-
-    # from PIL import Image
-    # self._image = Image
 
     import gym.envs.atari
     if name == 'james_bond':
@@ -119,11 +123,13 @@ class Atari(embodied.Env):
     np.maximum(self._buffer[0], self._buffer[1], out=self._buffer[0])
     image = self._buffer[0]
     if image.shape[:2] != self._size:
-      # image = self._image.fromarray(image)
-      # image = image.resize(self._size, self._image.NEAREST)
-      # image = np.array(image)
-      image = self._cv2.resize(
-          image, self._size, interpolation=self._cv2.INTER_AREA)
+      if self._resize == 'opencv':
+        image = self._cv2.resize(
+            image, self._size, interpolation=self._cv2.INTER_AREA)
+      if self._resize == 'pillow':
+        image = self._image.fromarray(image)
+        image = image.resize(self._size, self._image.NEAREST)
+        image = np.array(image)
     if self._gray:
       weights = [0.299, 0.587, 1 - (0.299 + 0.587)]
       image = np.tensordot(image, weights, (-1, 0)).astype(image.dtype)
