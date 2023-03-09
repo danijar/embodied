@@ -7,10 +7,7 @@ warnings.filterwarnings('ignore', '.*using stateful random seeds*')
 warnings.filterwarnings('ignore', '.*is a deprecated alias for.*')
 
 directory = pathlib.Path(__file__)
-try:
-  import google3  # noqa
-except ImportError:
-  directory = directory.resolve()
+directory = directory.resolve()
 directory = directory.parent
 sys.path.append(str(directory.parent))
 sys.path.append(str(directory.parent.parent.parent))

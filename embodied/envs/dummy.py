@@ -38,11 +38,6 @@ class Dummy(embodied.Env):
       self._done = False
       return self._obs(0.0, is_first=True)
     action = action['action']
-    if self._task == 'cont':
-      pass
-      # assert (-1 <= action).all() and (action <= 1).all(), action
-    else:
-      assert action in range(5), action
     self._step += 1
     self._done = (self._step >= self._length)
     return self._obs(1.0, is_last=self._done, is_terminal=self._done)

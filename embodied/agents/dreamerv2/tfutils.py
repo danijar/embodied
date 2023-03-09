@@ -9,11 +9,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import mixed_precision as prec
 from tensorflow_probability import distributions as tfd
-
-try:
-  from tensorflow.python.distribute import values
-except Exception:
-  from google3.third_party.tensorflow.python.distribute import values
+from tensorflow.python.distribute import values
 
 
 tf.tensor = tf.convert_to_tensor

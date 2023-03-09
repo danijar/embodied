@@ -3,11 +3,7 @@ import contextlib
 import embodied
 import tensorflow as tf
 from tensorflow.keras import mixed_precision as prec
-
-try:
-  from tensorflow.python.distribute import values
-except Exception:
-  from google3.third_party.tensorflow.python.distribute import values
+from tensorflow.python.distribute import values
 
 from . import tfutils
 

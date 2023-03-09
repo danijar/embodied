@@ -5,7 +5,7 @@ import embodied
 import numpy as np
 
 
-class DMEnv(embodied.Env):
+class FromDM(embodied.Env):
 
   def __init__(self, env, obs_key='observation', act_key='action'):
     self._env = env

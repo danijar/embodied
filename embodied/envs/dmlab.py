@@ -60,7 +60,7 @@ class DMLab(embodied.Env):
     config = {k: str(v) for k, v in config.items()}
     self._env = deepmind_lab.Lab(
         level='contributed/dmlab30/' + level,
-				observations=['RGB_INTERLEAVED'],
+        observations=['RGB_INTERLEAVED'],
         level_cache=cache, config=config)
     self._prev_image = None
     self._done = True
@@ -126,10 +126,8 @@ class Cache:
     path = self.get_path(key)
     try:
       tf.io.gfile.copy(path, pk3_path, overwrite=True)
-      # print('DMLab cache found level.')
       return True
     except tf.errors.OpError:
-      # print('DMLab cache did not find level.')
       return False
 
   def write(self, key, pk3_path):
@@ -140,6 +138,5 @@ class Cache:
       if not tf.io.gfile.exists(path):
         tf.io.gfile.makedirs(os.path.dirname(path))
         tf.io.gfile.copy(pk3_path, path)
-        # print('DMLab cache stored level.')
     except Exception as e:
       print(f'Could to store level: {e}')

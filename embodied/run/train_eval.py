@@ -1,6 +1,4 @@
-import collections
 import re
-import warnings
 
 import embodied
 import numpy as np
@@ -19,8 +17,8 @@ def train_eval(
   should_eval = embodied.when.Every(args.eval_every, args.eval_initial)
   step = logger.step
   metrics = embodied.Metrics()
-  print('Observation space:', train_env.obs_space)
-  print('Action space:', train_env.act_space)
+  print('Observation space:', embodied.format(train_env.obs_space), sep='\n')
+  print('Action space:', embodied.format(train_env.act_space), sep='\n')
 
   timer = embodied.Timer()
   timer.wrap('agent', agent, ['policy', 'train', 'report', 'save'])
@@ -62,25 +60,16 @@ def train_eval(
   driver_eval.on_episode(lambda ep, worker: per_episode(ep, mode='eval'))
 
   random_agent = embodied.RandomAgent(train_env.act_space)
-  fill = max(0, args.eval_fill - len(eval_replay))
-  if fill:
-    print(f'Fill eval dataset ({fill} steps).')
-    driver_eval(random_agent.policy, steps=fill)
-  fill = max(0, args.train_fill - len(train_replay))
-  if fill:
-    print(f'Fill train dataset ({fill} steps).')
-    driver_train(random_agent.policy, steps=fill)
-  logger.write()
+  print('Prefill train dataset.')
+  while len(train_replay) < max(args.batch_steps, args.train_fill):
+    driver_train(random_agent.policy, steps=100)
+  print('Prefill eval dataset.')
+  while len(eval_replay) < max(args.batch_steps, args.eval_fill):
+    driver_eval(random_agent.policy, steps=100)
 
-  dataset_train = iter(agent.dataset(train_replay.dataset))
-  dataset_eval = iter(agent.dataset(eval_replay.dataset))
+  dataset_train = agent.dataset(train_replay.dataset)
+  dataset_eval = agent.dataset(eval_replay.dataset)
   state = [None]  # To be writable from train step function below.
-  assert args.pretrain > 0  # At least one step to initialize variables.
-  for _ in range(args.pretrain):
-    with timer.scope('dataset_train'):
-      batch = next(dataset_train)
-    _, state[0], _ = agent.train(batch, state[0])
-
   batch = [None]
   def train_step(tran, worker):
     for _ in range(should_train(step)):
@@ -102,13 +91,15 @@ def train_eval(
       logger.write(fps=True)
   driver_train.on_step(train_step)
 
-  checkpoint = embodied.Checkpoint(logdir / 'checkpoint.pkl')
+  checkpoint = embodied.Checkpoint(logdir / 'checkpoint.ckpt')
   checkpoint.step = step
   checkpoint.agent = agent
   checkpoint.train_replay = train_replay
   checkpoint.eval_replay = eval_replay
+  if args.from_checkpoint:
+    checkpoint.load(args.from_checkpoint)
   checkpoint.load_or_save()
-  should_save(step)  # Register that we jused saved.
+  should_save(step)  # Register that we just saved.
 
   print('Start training loop.')
   policy_train = lambda *args: agent.policy(
@@ -119,7 +110,7 @@ def train_eval(
       print('Starting evaluation at step', int(step))
       driver_eval.reset()
       driver_eval(policy_eval, episodes=max(len(eval_env), args.eval_eps))
-    driver_train(policy_train, steps=1000)
+    driver_train(policy_train, steps=100)
     if should_save(step):
       checkpoint.save()
   logger.write()

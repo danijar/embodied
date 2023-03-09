@@ -4,8 +4,6 @@ import threading
 import embodied
 import numpy as np
 
-from . import gym
-
 
 class MinecraftBase(embodied.Env):
 
@@ -20,7 +18,7 @@ class MinecraftBase(embodied.Env):
       sticky_attack=30,
       sticky_jump=10,
       pitch_limit=(-60, 60),
-      logs=True,  # TODO
+      logs=False,
   ):
     if logs:
       logging.basicConfig(level=logging.DEBUG)
@@ -31,10 +29,11 @@ class MinecraftBase(embodied.Env):
 
     # Make env
     with self._LOCK:
-      import gym as openai_gym
       from .import minecraft_minerl
-      self._inner = minecraft_minerl.MineRLEnv(size, break_speed, gamma).make()
-    self._env = gym.Gym(self._inner)
+      self._gymenv = minecraft_minerl.MineRLEnv(
+          size, break_speed, gamma).make()
+    from . import from_gym
+    self._env = from_gym.FromGym(self._gymenv)
     self._inventory = {}
 
     # Observations
@@ -43,7 +42,7 @@ class MinecraftBase(embodied.Env):
         if k != 'inventory/log2']
     self._step = 0
     self._max_inventory = None
-    self._equip_enum = self._inner.observation_space[
+    self._equip_enum = self._gymenv.observation_space[
         'equipped_items']['mainhand']['type'].values.tolist()
     self._obs_space = self.obs_space
 
@@ -99,7 +98,7 @@ class MinecraftBase(embodied.Env):
         following[key] = action[key]
       for act in [action] + ([following] * (self._repeat - 1)):
         obs = self._env.step(act)
-        if 'error' in self._env.info:
+        if self._env.info and 'error' in self._env.info:
           obs = self._reset()
           break
     obs = self._obs(obs)

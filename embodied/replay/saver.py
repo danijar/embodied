@@ -31,7 +31,7 @@ class Saver:
         self.promises.remove(promise)
 
   def save(self, wait=False):
-    for buffer in self.buffers.values():
+    for buffer in self.buffers.copy().values():
       if buffer.length:
         self.promises.append(self.workers.submit(buffer.save, self.directory))
     if wait:
@@ -39,20 +39,20 @@ class Saver:
       self.promises.clear()
 
   def load(self, capacity, length):
-    # print('-' * 79)
-    # print('LOADING REPLAY BUFFER', flush=True)
     filenames = chunklib.Chunk.scan(self.directory, capacity, length - 1)
-    # print('FILENAMES TO LOAD:')
-    # for filename in filenames:
-    #   print('-', filename.name)
-    total = sum([int(x.stem.split('-')[3]) for x in filenames])
-    # print('TOTAL STEPS', total, flush=True)
     if not filenames:
       return
     threads = min(len(filenames), 32)
+    promises = []
+    chunks = []
     with concurrent.futures.ThreadPoolExecutor(threads) as executor:
-      chunks = list(executor.map(chunklib.Chunk.load, filenames))
-    # print('LOADED ALL CHUNKS', flush=True)
+      for filename in filenames:
+        promises.append(executor.submit(chunklib.Chunk.load, filename))
+      for filename, promise in zip(filenames, promises):
+        try:
+          chunks.append(promise.result())
+        except Exception as e:
+          print(f'Error loading chunk {filename}: {e}')
     streamids = {}
     for chunk in reversed(sorted(chunks, key=lambda x: x.time)):
       if chunk.successor not in streamids:
@@ -61,7 +61,6 @@ class Saver:
         streamids[chunk.uuid] = streamids[chunk.successor]
     self.loading = True
     for i, chunk in enumerate(chunks):
-      # print('REPLAYING CHUNK', chunk.uuid, flush=True)
       stream = streamids[chunk.uuid]
       for index in range(chunk.length):
         step = {k: v[index] for k, v in chunk.data.items()}
@@ -70,4 +69,3 @@ class Saver:
       chunks[i] = None
       del chunk
     self.loading = False
-    # print('FINISHED LOADING REPLAY :)', flush=True)

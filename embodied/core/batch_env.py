@@ -9,7 +9,7 @@ class BatchEnv(base.Env):
     assert all(len(env) == 0 for env in envs)
     assert len(envs) > 0
     self._envs = envs
-    self._parallel = parallel
+    self._parallel = parallel not in ('none', None, False)
     self._keys = list(self.obs_space.keys())
 
   @property

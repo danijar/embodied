@@ -17,7 +17,7 @@ class Quadruped(legacy_base.Walker):
   def _build(self, name='walker', initializer=None):
     super()._build(initializer=initializer)
     self._mjcf_root = mjcf.from_path(
-        os.path.join(os.path.dirname(__file__), 'quadruped.xml'))
+        os.path.join(os.path.dirname(__file__), 'loconav_quadruped.xml'))
     if name:
       self._mjcf_root.model = name
     self._prev_action = np.zeros(
@@ -115,7 +115,7 @@ class QuadrupedObservables(legacy_base.WalkerObservables):
   @composer.observable
   def torso_global_pos(self):
     def torso_pos(physics):
-      root_body = self._entity.root_body  # Get the root body (torso)
+      root_body = self._entity.root_body
       root_body_xpos = physics.bind(root_body).xpos
       return np.reshape(root_body_xpos, -1)
     return observable.Generic(torso_pos)
@@ -123,18 +123,10 @@ class QuadrupedObservables(legacy_base.WalkerObservables):
   @property
   def proprioception(self):
     return ([
-        # These three are the 44-d egocentric_state in quadruped observations
         self.joints_pos, self.joints_vel, self.actuator_activations,
-        # These two are the 6-d imu
         self.sensors_accelerometer, self.sensors_gyro,
-        # This corresponds to the 3-d torso_velocity
         self.sensors_velocimeter,
-        # These two are the 24-d force_torque
         self.sensors_force, self.sensors_torque,
-        # quadruped's torso_upright is a dot-product of the torso z-axis and
-        # the global z-axis. world_zaxis is the world's z-vector in the torso
-        # frame. They should have similar effect.
         self.world_zaxis,
-        # These two are the additional global positions
         self.root_global_pos, self.torso_global_pos,
     ] + self._collect_from_attachments('proprioception'))

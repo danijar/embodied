@@ -5,7 +5,7 @@ import gym
 import numpy as np
 
 
-class Gym(embodied.Env):
+class FromGym(embodied.Env):
 
   def __init__(self, env, obs_key='image', act_key='action', **kwargs):
     if isinstance(env, str):

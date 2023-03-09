@@ -1,4 +1,5 @@
 import io
+import threading
 from datetime import datetime
 
 import embodied
@@ -15,6 +16,7 @@ class Chunk:
     self.size = size
     self.data = None
     self.length = 0
+    self.lock = threading.Lock()
 
   def __repr__(self):
     succ = self.successor or str(embodied.uuid(0))
@@ -41,16 +43,20 @@ class Chunk:
     self.length += 1
 
   def save(self, directory):
-    succ = self.successor or str(embodied.uuid(0))
-    succ = succ.uuid if isinstance(succ, type(self)) else succ
-    filename = f'{self.time}-{self.uuid}-{succ}-{self.length}.npz'
-    filename = embodied.Path(directory) / filename
-    data = {k: embodied.convert(v) for k, v in self.data.items()}
-    with io.BytesIO() as stream:
-      np.savez_compressed(stream, **data)
-      stream.seek(0)
-      filename.write(stream.read(), mode='wb')
-    print(f'Saved chunk: {filename.name}')
+    # The lock makes sure that we aren't trying to save the same chunk multiple
+    # times in parallel. This could otherwise happen, for example when a chunk
+    # reachings its maximum length soon after initiating a checkpoint write.
+    with self.lock:
+      succ = self.successor or str(embodied.uuid(0))
+      succ = succ.uuid if isinstance(succ, type(self)) else succ
+      filename = f'{self.time}-{self.uuid}-{succ}-{self.length}.npz'
+      filename = embodied.Path(directory) / filename
+      data = {k: embodied.convert(v) for k, v in self.data.items()}
+      with io.BytesIO() as stream:
+        np.savez_compressed(stream, **data)
+        stream.seek(0)
+        filename.write(stream.read(), mode='wb')
+      print(f'Saved chunk: {filename.name}')
 
   @classmethod
   def load(cls, filename):

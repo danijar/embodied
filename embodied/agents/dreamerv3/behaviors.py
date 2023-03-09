@@ -7,6 +7,8 @@ from . import expl
 from . import ninjax as nj
 from . import jaxutils
 
+from .director import Director  # noqa
+
 
 class Greedy(nj.Module):
 
@@ -14,10 +16,8 @@ class Greedy(nj.Module):
     rewfn = lambda s: wm.heads['reward'](s).mean()[1:]
     if config.critic_type == 'vfunction':
       critics = {'extr': agent.VFunction(rewfn, config, name='critic')}
-    elif config.critic_type == 'qfunction':
-      critics = {'extr': agent.QFunction(rewfn, config, name='critic')}
-    elif config.critic_type == 'qtwin':
-      critics = {'extr': agent.TwinQFunction(rewfn, config, name='critic')}
+    else:
+      raise NotImplementedError(config.critic_type)
     self.ac = agent.ImagActorCritic(
         critics, {'extr': 1.0}, act_space, config, name='ac')
 
@@ -51,7 +51,8 @@ class Random(nj.Module):
     else:
       dist = tfd.Uniform(-jnp.ones(shape), jnp.ones(shape))
       dist = tfd.Independent(dist, 1)
-    return {'action': dist}, state
+    action = dist.sample(seed=nj.rng())
+    return {'action': action}, state
 
   def train(self, imagine, start, data):
     return None, {}
@@ -64,7 +65,6 @@ class Explore(nj.Module):
 
   REWARDS = {
       'disag': expl.Disag,
-      # 'vae': expl.LatentVAE,
   }
 
   def __init__(self, wm, act_space, config):

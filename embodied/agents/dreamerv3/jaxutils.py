@@ -14,26 +14,6 @@ sg = lambda x: tree_map(jax.lax.stop_gradient, x)
 COMPUTE_DTYPE = jnp.float32
 
 
-class RNG:
-
-  def __init__(self, seed=0, reserve=128):
-    self.rng = jax.random.PRNGKey(seed)
-    self.reserve = reserve
-    self.buffer = []
-
-  def next(self, amount=None):
-    if len(self.buffer) < (amount or 1):
-      keys = jax.random.split(self.rng, max((amount or 1) + 1, self.reserve))
-      self.rng = keys[0]
-      self.buffer = list(keys[1:])
-    if amount:
-      keys = self.buffer[:amount]
-      self.buffer = self.buffer[:amount]
-      return keys
-    else:
-      return self.buffer.pop(0)
-
-
 def cast_to_compute(values):
   return tree_map(lambda x: x.astype(COMPUTE_DTYPE), values)
 
@@ -92,6 +72,13 @@ def symlog(x):
 
 def symexp(x):
   return jnp.sign(x) * (jnp.exp(jnp.abs(x)) - 1)
+
+
+def switch(pred, lhs, rhs):
+  assert lhs.shape == rhs.shape, (pred.shape, lhs.shape, rhs.shape)
+  while len(pred.shape) < len(lhs.shape):
+    pred = pred[..., None]
+  return jnp.where(pred, lhs, rhs)
 
 
 class OneHotDist(tfd.OneHotCategorical):
@@ -177,19 +164,16 @@ class SymlogDist:
     return -loss
 
 
-class DiscDist:
+class TwoHotDist:
 
-  def __init__(
-      self, logits, dims=0, low=-20, high=20,
-      transfwd=symlog, transbwd=symexp):
+  def __init__(self, logits, bins, dims=0, transfwd=None, transbwd=None):
+    assert logits.shape[-1] == len(bins), (logits.shape, len(bins))
     self.logits = logits
     self.probs = jax.nn.softmax(logits)
     self.dims = tuple([-x for x in range(1, dims + 1)])
-    self.bins = jnp.linspace(low, high, logits.shape[-1])
-    self.low = low
-    self.high = high
-    self.transfwd = transfwd
-    self.transbwd = transbwd
+    self.bins = jnp.array(bins)
+    self.transfwd = transfwd or (lambda x: x)
+    self.transbwd = transbwd or (lambda x: x)
     self.batch_shape = logits.shape[:len(logits.shape) - dims - 1]
     self.event_shape = logits.shape[len(logits.shape) - dims: -1]
 

@@ -14,10 +14,10 @@ class Metrics:
     self._scalars[key].append(value)
 
   def image(self, key, value):
-    self._lasts[key].append(value)
+    self._lasts[key] = value
 
   def video(self, key, value):
-    self._lasts[key].append(value)
+    self._lasts[key] = value
 
   def add(self, mapping, prefix=None):
     for key, value in mapping.items():

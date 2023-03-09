@@ -53,23 +53,12 @@ class Agent(nj.Module):
     obs = self.preprocess(obs)
     (prev_latent, prev_action), task_state, expl_state = state
     embed = self.wm.encoder(obs)
-    latent, _ = self.wm.rssm.obs_step(
+    latent = self.wm.rssm.obs_step(
         prev_latent, prev_action, embed, obs['is_first'])
     self.expl_behavior.policy(latent, expl_state)
     task_outs, task_state = self.task_behavior.policy(latent, task_state)
     expl_outs, expl_state = self.expl_behavior.policy(latent, expl_state)
-    if mode == 'eval':
-      outs = task_outs
-      outs['action'] = outs['action'].sample(seed=nj.rng())
-      outs['log_entropy'] = jnp.zeros(outs['action'].shape[:1])
-    elif mode == 'explore':
-      outs = expl_outs
-      outs['log_entropy'] = outs['action'].entropy()
-      outs['action'] = outs['action'].sample(seed=nj.rng())
-    elif mode == 'train':
-      outs = task_outs
-      outs['log_entropy'] = outs['action'].entropy()
-      outs['action'] = outs['action'].sample(seed=nj.rng())
+    outs = {'eval': task_outs, 'explore': expl_outs, 'train': task_outs}[mode]
     state = ((latent, outs['action']), task_state, expl_state)
     return outs, state
 
@@ -100,11 +89,6 @@ class Agent(nj.Module):
       mets = self.expl_behavior.report(data)
       report.update({f'expl_{k}': v for k, v in mets.items()})
     return report
-
-  def dataset(self, generator):
-    return embodied.Prefetch(
-        sources=[generator] * self.config.batch_size,
-        workers=self.config.data_loaders, prefetch=4)
 
   def preprocess(self, obs):
     obs = obs.copy()
@@ -158,7 +142,7 @@ class WorldModel(nj.Module):
     prev_latent, prev_action = state
     prev_actions = jnp.concatenate([
         prev_action[:, None], data['action'][:, :-1]], 1)
-    post, prior = self.rssm.observe(
+    post = self.rssm.observe(
         embed, prev_actions, data['is_first'], prev_latent)
     dists = {}
     feats = {**post, 'embed': embed}
@@ -167,8 +151,8 @@ class WorldModel(nj.Module):
       out = out if isinstance(out, dict) else {name: out}
       dists.update(out)
     losses = {}
-    losses['dyn'] = self.rssm.dyn_loss(post, prior, **self.config.dyn_loss)
-    losses['rep'] = self.rssm.rep_loss(post, prior, **self.config.rep_loss)
+    rssm_losses, prior = self.rssm.loss(post, **self.config.rssm_loss)
+    losses.update(rssm_losses)
     for key, dist in dists.items():
       loss = -dist.log_prob(data[key].astype(jnp.float32))
       assert loss.shape == embed.shape[:2], (key, loss.shape)
@@ -183,20 +167,34 @@ class WorldModel(nj.Module):
     metrics = self._metrics(data, dists, post, prior, losses, model_loss)
     return model_loss.mean(), (state, out, metrics)
 
-  def imagine(self, policy, start, horizon):
-    first_cont = (1.0 - start['is_terminal']).astype(jnp.float32)
-    keys = list(self.rssm.initial(1).keys())
-    start = {k: v for k, v in start.items() if k in keys}
-    start['action'] = policy(start)
+  def imagine(self, policy, start, horizon, carry=None):
+    if carry is None:
+      policy = lambda s, c, f=policy: (f(s), {})
+      carry = {}
+    state_keys = list(self.rssm.initial(1).keys())
+    state = {k: v for k, v in start.items() if k in state_keys}
+    action, carry = policy(state, carry)
+    keys = list(state.keys()) + list(action.keys()) + list(carry.keys())
+    assert len(set(keys)) == len(keys), ('Colliding keys', keys)
     def step(prev, _):
-      prev = prev.copy()
-      state = self.rssm.img_step(prev, prev.pop('action'))
-      return {**state, 'action': policy(state)}
-    traj = jaxutils.scan(
-        step, jnp.arange(horizon), start, self.config.imag_unroll)
-    traj = {
-        k: jnp.concatenate([start[k][None], v], 0) for k, v in traj.items()}
-    cont = self.heads['cont'](traj).mode()
+      state, action, carry = prev
+      state = self.rssm.img_step(state, action['action'])
+      action, carry = policy(state, carry)
+      return state, action, carry
+    states, actions, carries = jaxutils.scan(
+        step, jnp.arange(horizon), (state, action, carry),
+        self.config.imag_unroll)
+    states, actions, carries = tree_map(
+        lambda traj, first: jnp.concatenate([first[None], traj], 0),
+        (states, actions, carries), (state, action, carry))
+    traj = {**states, **actions, **carries}
+    if self.config.imag_cont == 'mode':
+      cont = self.heads['cont'](traj).mode()
+    elif self.config.imag_cont == 'mean':
+      cont = self.heads['cont'](traj).mean()
+    else:
+      raise NotImplementedError(self.config.imag_cont)
+    first_cont = (1.0 - start['is_terminal']).astype(jnp.float32)
     traj['cont'] = jnp.concatenate([first_cont[None], cont[1:]], 0)
     discount = 1 - 1 / self.config.horizon
     traj['weight'] = jnp.cumprod(discount * traj['cont'], 0) / discount
@@ -206,7 +204,7 @@ class WorldModel(nj.Module):
     state = self.initial(len(data['is_first']))
     report = {}
     report.update(self.loss(data, state)[-1][-1])
-    context, _ = self.rssm.observe(
+    context = self.rssm.observe(
         self.encoder(data)[:6, :5], data['action'][:6, :5],
         data['is_first'][:6, :5])
     start = {k: v[:, -1] for k, v in context.items()}
@@ -264,13 +262,15 @@ class ImagActorCritic(nj.Module):
   def initial(self, batch_size):
     return {}
 
-  def policy(self, state, carry):
-    return {'action': self.actor(state)}, carry
+  def policy(self, state, carry, sample=True):
+    dist = self.actor(sg(state))
+    action = dist.sample(seed=nj.rng()) if sample else dist.mode()
+    return {'action': action}, carry
 
   def train(self, imagine, start, context):
+    carry = self.initial(len(start['deter']))
     def loss(start):
-      policy = lambda s: self.actor(sg(s)).sample(seed=nj.rng())
-      traj = imagine(policy, start, self.config.imag_horizon)
+      traj = imagine(self.policy, start, self.config.imag_horizon, carry)
       loss, metrics = self.loss(traj)
       return loss, (traj, metrics)
     mets, (traj, metrics) = self.opt(self.actor, loss, start, has_aux=True)
@@ -335,7 +335,7 @@ class VFunction(nj.Module):
     self.opt = jaxutils.Optimizer(name='critic_opt', **self.config.critic_opt)
 
   def train(self, traj, actor):
-    target = sg(self.score(traj)[1])
+    target = sg(self.score(traj, slow=self.config.slow_critic_target)[1])
     mets, metrics = self.opt(self.net, self.loss, traj, target, has_aux=True)
     metrics.update(mets)
     self.updater()
@@ -361,13 +361,16 @@ class VFunction(nj.Module):
     metrics = jaxutils.tensorstats(dist.mean())
     return loss, metrics
 
-  def score(self, traj, actor=None):
+  def score(self, traj, actor=None, slow=False):
     rew = self.rewfn(traj)
     assert len(rew) == len(traj['action']) - 1, (
         'should provide rewards for all but last action')
     discount = 1 - 1 / self.config.horizon
     disc = traj['cont'][1:] * discount
-    value = self.net(traj).mean()
+    if slow:
+      value = self.slow(traj).mean()
+    else:
+      value = self.net(traj).mean()
     vals = [value[-1]]
     interm = rew + disc * value[1:] * (1 - self.config.return_lambda)
     for t in reversed(range(len(disc))):

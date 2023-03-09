@@ -40,6 +40,9 @@ TITLES = {
     'loconav_ant_maze_m_50hz': 'Ant Maze M',
     'loconav_ant_maze_l_50hz': 'Ant Maze L',
     'loconav_ant_maze_xl_50hz': 'Ant Maze XL',
+    'pinpad_four': 'PinPad Four',
+    'pinpad_five': 'PinPad Five',
+    'pinpad_six': 'PinPad Six',
 }
 
 COLORS = {
@@ -53,6 +56,8 @@ COLORS = {
         '#46327e', '#440154'),
 }
 
+COLORS['group4'] = np.repeat(COLORS['contrast'], 4).tolist()  # TODO
+
 
 def main():
   console = rich.console.Console()
@@ -64,6 +69,9 @@ def main():
     runs += load_metrics(
         directory, args.pattern, args.xaxis, args.yaxis, args.yaxis2,
         seed_prefix, method_prefix, args.tasks, args.methods, args.workers)
+  if args.rename:
+    for run in runs:
+      run['method'] = args.rename.get(run['method'], run['method'])
   tasks = []
   for regex in args.tasks:
     found = [x['task'] for x in runs if re.search(regex, x['task'])]
@@ -121,6 +129,7 @@ def main():
     if not task.startswith('stats_'):
       args.xlim and ax.set_xlim(*args.xlim)
       args.ylim and ax.set_ylim(*args.ylim)
+      args.xlog and ax.set_xscale('log')
       args.xticks and ax.set_xticks(args.xticks)
     ax.xaxis.set_major_formatter(smart_format)
     # ax.tick_params(axis='both', labelsize=7)  # TOFO
@@ -506,7 +515,9 @@ def parse_args(argv=None):
   parser.add_argument('--legendcols', type=int, default=0)
   parser.add_argument('--xlim', nargs=2, type=float, default=None)
   parser.add_argument('--ylim', nargs=2, type=float, default=None)
+  parser.add_argument('--xlog', type=boolean, default=False)
   parser.add_argument('--xticks', nargs='+', type=float, default=None)
+  parser.add_argument('--rename', type=str, nargs='+', default=[])
   parser.add_argument('--labels', nargs='+', default=[])
   parser.add_argument('--colors', type=str, nargs='+', default=['contrast'])
   parser.add_argument('--workers', type=int, default=12)
@@ -515,6 +526,8 @@ def parse_args(argv=None):
   args = parser.parse_args(argv)
   args.indirs = tuple([x.expanduser() for x in args.indirs])
   args.outdir = args.outdir.expanduser() / args.indirs[0].stem
+  assert len(args.rename) % 2 == 0
+  args.rename = {k: v for k, v in zip(args.rename[:-1], args.rename[1:])}
   assert len(args.labels) % 2 == 0
   args.labels = {k: v for k, v in zip(args.labels[:-1], args.labels[1:])}
   if len(args.colors) == 1:

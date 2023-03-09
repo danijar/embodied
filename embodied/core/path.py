@@ -1,5 +1,5 @@
 import contextlib
-import glob
+import glob as globlib
 import os
 import re
 import shutil
@@ -10,6 +10,8 @@ class Path:
   filesystems = []
 
   def __new__(cls, path):
+    if cls is not Path:
+      return super().__new__(cls)
     path = str(path)
     for impl, pred in cls.filesystems:
       if pred(path):
@@ -129,7 +131,7 @@ class LocalPath(Path):
     return type(self)(os.path.absolute(str(self)))
 
   def glob(self, pattern):
-    for path in glob.glob(f'{str(self)}/{pattern}'):
+    for path in globlib.glob(f'{str(self)}/{pattern}'):
       yield type(self)(path)
 
   def exists(self):
@@ -151,7 +153,10 @@ class LocalPath(Path):
     shutil.rmtree(self)
 
   def copy(self, dest):
-    shutil.copytree(self, type(self)(dest), dirs_exist_ok=True)
+    if self.isfile():
+      shutil.copy(self, type(self)(dest))
+    else:
+      shutil.copytree(self, type(self)(dest), dirs_exist_ok=True)
 
   def move(self, dest):
     shutil.move(self, dest)
@@ -204,7 +209,15 @@ class GFilePath(Path):
     self._gfile.rmtree(str(self))
 
   def copy(self, dest):
-    self._gfile.copy(str(self), str(dest), overwrite=True)
+    dest = type(self)(dest)
+    if self.isfile():
+      self._gfile.copy(str(self), str(dest), overwrite=True)
+    else:
+      for folder, subdirs, files in self._gfile.walk(str(self)):
+        target = type(self)(folder.replace(str(self), str(dest)))
+        target.exists() or target.mkdirs()
+        for file in files:
+          (type(self)(folder) / file).copy(target / file)
 
   def move(self, dest):
     dest = Path(dest)

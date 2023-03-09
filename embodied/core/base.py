@@ -1,14 +1,17 @@
 class Agent:
 
-  configs = {}  # dict of dicts
+  configs = {}  # Dict of dicts, must contain 'defaults' key.
 
   def __init__(self, obs_space, act_space, step, config):
     pass
 
-  def dataset(self, generator_fn):
-    # TODO: Go from iterable to iterable instead.
-    raise NotImplementedError(
-        'dataset(generator_fn) -> iterable')
+  # def policy_state(self, batch_size):
+  #   raise NotImplementedError(
+  #       "policy_state(batch_size) -> state")
+
+  # def train_state(self, batch_size):
+  #   raise NotImplementedError(
+  #       "train_state(batch_size) -> state")
 
   def policy(self, obs, state=None, mode='train'):
     raise NotImplementedError(
@@ -21,6 +24,10 @@ class Agent:
   def report(self, data):
     raise NotImplementedError(
         'report(data) -> metrics')
+
+  def dataset(self, generator_fn):
+    raise NotImplementedError(
+        'dataset(generator_fn) -> generator_fn')
 
   def save(self):
     raise NotImplementedError('save() -> data')

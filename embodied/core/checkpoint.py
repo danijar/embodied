@@ -1,16 +1,14 @@
 import concurrent.futures
-import pickle
 import time
 
+from . import basics
 from . import path
 
 
 class Checkpoint:
 
-  def __init__(self, filename, log=True, pickle=pickle, parallel=True):
-    self._filename = path.Path(filename)
-    self._log = log
-    self._pickle = pickle
+  def __init__(self, filename=None, parallel=True):
+    self._filename = filename and path.Path(filename)
     self._values = {}
     self._parallel = parallel
     if self._parallel:
@@ -37,47 +35,57 @@ class Checkpoint:
     except AttributeError:
       raise ValueError(name)
 
-  def exists(self):
+  def exists(self, filename=None):
+    assert self._filename or filename
+    filename = path.Path(filename or self._filename)
     exists = self._filename.exists()
-    self._log and exists and print('Existing checkpoint found.')
-    self._log and not exists and print('Existing checkpoint not found.')
+    if exists:
+      print('Found existing checkpoint.')
+    else:
+      print('Did not find any checkpoint.')
     return exists
 
-  def save(self):
-    self._log and print(f'Saving checkpoint: {self._filename}')
+  def save(self, filename=None, keys=None):
+    assert self._filename or filename
+    filename = path.Path(filename or self._filename)
+    print(f'Writing checkpoint: {filename}')
     if self._parallel:
       self._promise and self._promise.result()
-      self._promise = self._worker.submit(self._save)
+      self._promise = self._worker.submit(self._save, filename, keys)
     else:
-      self._save()
+      self._save(filename, keys)
 
-  def _save(self):
-    data = {k: v.save() for k, v in self._values.items()}
-    assert all([not k.startswith('_') for k in data]), list(data.keys())
+  def _save(self, filename, keys):
+    keys = tuple(self._values.keys() if keys is None else keys)
+    assert all([not k.startswith('_') for k in keys]), keys
+    data = {k: self._values[k].save() for k in keys}
     data['_timestamp'] = time.time()
-    tmp = self._filename.parent / (self._filename.stem + '.tmp')
-    with tmp.open('wb') as f:
-      f.write(self._pickle.dumps(data))
-    tmp.move(self._filename)
-    print('Wrote checkpoint:', self._filename)
-    print('Wrote checkpoint with step', data['step'])  # TODO
+    filename.parent.mkdirs()
+    # Write to a temporary file and then atomically rename, so that the
+    # requested filename either contains a full checkpoint or does not exist if
+    # writing was interrupted.
+    tmp = filename.parent / (filename.name + '.tmp')
+    tmp.write(basics.pack(data), mode='wb')
+    tmp.move(filename)
+    print(f'Wrote checkpoint: {filename}')
 
-  def load(self):
-    self._log and print(f'Loading checkpoint: {self._filename}')
-    with self._filename.open('rb') as f:
-      data = self._pickle.load(f)
-    print('Loading checkpoint with step', data['step'])  # TODO
-    for key, value in data.items():
+  def load(self, filename=None, keys=None):
+    assert self._filename or filename
+    self._promise and self._promise.result()  # Wait for last save.
+    filename = path.Path(filename or self._filename)
+    print(f'Loading checkpoint: {filename}')
+    data = basics.unpack(filename.read('rb'))
+    keys = tuple(data.keys() if keys is None else keys)
+    for key in keys:
       if key.startswith('_'):
         continue
       try:
-        self._values[key].load(value)
+        self._values[key].load(data[key])
       except Exception:
         print(f'Error loading {key} from checkpoint.')
         raise
-    if self._log and '_timestamp' in data:
-      age = time.time() - data['_timestamp']
-      print(f'Loaded checkpoint from {age:.0f} seconds ago.')
+    age = time.time() - data['_timestamp']
+    print(f'Loaded checkpoint from {age:.0f} seconds ago.')
 
   def load_or_save(self):
     if self.exists():

@@ -1,7 +1,5 @@
-import collections
 import io
 import re
-import warnings
 from datetime import datetime
 
 import embodied
@@ -19,13 +17,8 @@ def train_save(agent, env, replay, logger, args):
   should_save = embodied.when.Clock(args.save_every)
   step = logger.step
   metrics = embodied.Metrics()
-  print('Observation space:')
-  for key, value in env.obs_space.items():
-    if not key.startswith('log_'):
-      print(f'  {key:<16} {value}')
-  print('Action space:')
-  for key, value in env.act_space.items():
-    print(f'  {key:<16} {value}')
+  print('Observation space:', embodied.format(env.obs_space), sep='\n')
+  print('Action space:', embodied.format(env.act_space), sep='\n')
 
   timer = embodied.Timer()
   timer.wrap('agent', agent, ['policy', 'train', 'report', 'save'])
@@ -42,8 +35,6 @@ def train_save(agent, env, replay, logger, args):
         'length': length,
         'score': score,
         'sum_abs_reward': sum_abs_reward,
-        # TODO
-        # 'reward_rate': (ep['reward'] - ep['reward'].min() >= 0.1).mean(),
         'reward_rate': (np.abs(ep['reward']) >= 0.5).mean(),
     }, prefix='episode')
     print(f'Episode has {length} steps and return {score:.1f}.')
@@ -85,22 +76,13 @@ def train_save(agent, env, replay, logger, args):
   driver.on_step(lambda tran, _: step.increment())
   driver.on_step(replay.add)
 
-  train_fill = max(0, args.train_fill - len(replay))
-  if train_fill:
-    print(f'Fill train dataset ({train_fill} steps).')
-    random_agent = embodied.RandomAgent(env.act_space)
-    driver(random_agent.policy, steps=train_fill)
-  logger.add(metrics.result())
-  logger.write()
+  print('Prefill train dataset.')
+  random_agent = embodied.RandomAgent(env.act_space)
+  while len(replay) < max(args.batch_steps, args.train_fill):
+    driver(random_agent.policy, steps=100)
 
-  dataset = iter(agent.dataset(replay.dataset))
+  dataset = agent.dataset(replay.dataset)
   state = [None]  # To be writable from train step function below.
-  assert args.pretrain > 0  # At least one step to initialize variables.
-  for _ in range(args.pretrain):
-    with timer.scope('dataset'):
-      batch = next(dataset)
-    _, state[0], _ = agent.train(batch, state[0])
-
   batch = [None]
   def train_step(tran, worker):
     for _ in range(should_train(step)):
@@ -121,20 +103,22 @@ def train_save(agent, env, replay, logger, args):
       logger.write(fps=True)
   driver.on_step(train_step)
 
-  checkpoint = embodied.Checkpoint(logdir / 'checkpoint.pkl')
+  checkpoint = embodied.Checkpoint(logdir / 'checkpoint.ckpt')
   timer.wrap('checkpoint', checkpoint, ['save', 'load'])
   checkpoint.step = step
   checkpoint.agent = agent
   checkpoint.replay = replay
+  if args.from_checkpoint:
+    checkpoint.load(args.from_checkpoint)
   checkpoint.load_or_save()
-  should_save(step)  # Register that we jused saved.
+  should_save(step)  # Register that we just saved.
 
   print('Start training loop.')
   policy = lambda *args: agent.policy(
       *args, mode='explore' if should_expl(step) else 'train')
   while step < args.steps:
-    driver(policy, steps=1000)
+    driver(policy, steps=100)
     if should_save(step):
       checkpoint.save()
   logger.write()
-
+  logger.write()

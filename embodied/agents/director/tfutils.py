@@ -11,11 +11,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow.keras import mixed_precision as prec
 from tensorflow_probability import distributions as tfd
-
-try:
-  from tensorflow.python.distribute import values
-except Exception:
-  from google3.third_party.tensorflow.python.distribute import values
+from tensorflow.python.distribute import values
 
 
 for base in (tf.Tensor, tf.Variable, values.PerReplica):

@@ -14,6 +14,7 @@ from . import path
 class Logger:
 
   def __init__(self, step, outputs, multiplier=1):
+    assert outputs, 'Provide a list of logger outputs.'
     self.step = step
     self.outputs = outputs
     self.multiplier = multiplier
@@ -25,20 +26,38 @@ class Logger:
     step = int(self.step) * self.multiplier
     for name, value in dict(mapping).items():
       name = f'{prefix}/{name}' if prefix else name
-      value = np.asarray(value)
-      if len(value.shape) not in (0, 1, 2, 3, 4):
-        raise ValueError(
-            f"Shape {value.shape} for name '{name}' cannot be "
-            "interpreted as scalar, histogram, image, or video.")
+      if isinstance(value, str):
+        pass
+      else:
+        value = np.asarray(value)
+        if len(value.shape) not in (0, 1, 2, 3, 4):
+          raise ValueError(
+              f"Shape {value.shape} for name '{name}' cannot be "
+              "interpreted as scalar, vector, image, or video.")
       self._metrics.append((step, name, value))
 
   def scalar(self, name, value):
+    value = np.asarray(value)
+    assert len(value.shape) == 0, value.shape
+    self.add({name: value})
+
+  def vector(self, name, value):
+    value = np.asarray(value)
+    assert len(value.shape) == 1, value.shape
     self.add({name: value})
 
   def image(self, name, value):
+    value = np.asarray(value)
+    assert len(value.shape) in (2, 3), value.shape
     self.add({name: value})
 
   def video(self, name, value):
+    value = np.asarray(value)
+    assert len(value.shape) == 4, value.shape
+    self.add({name: value})
+
+  def text(self, name, value):
+    assert isinstance(value, str), (type(value), str(value)[:100])
     self.add({name: value})
 
   def write(self, fps=False):
@@ -84,8 +103,9 @@ class AsyncOutput:
 
 class TerminalOutput:
 
-  def __init__(self, pattern=r'.*'):
+  def __init__(self, pattern=r'.*', name=None):
     self._pattern = re.compile(pattern)
+    self._name = name
     try:
       import rich.console
       self._console = rich.console.Console()
@@ -94,17 +114,25 @@ class TerminalOutput:
 
   def __call__(self, summaries):
     step = max(s for s, _, _, in summaries)
-    scalars = {k: float(v) for _, k, v in summaries if len(v.shape) == 0}
+    scalars = {
+        k: float(v) for _, k, v in summaries
+        if isinstance(v, np.ndarray) and len(v.shape) == 0}
     scalars = {k: v for k, v in scalars.items() if self._pattern.search(k)}
     formatted = {k: self._format_value(v) for k, v in scalars.items()}
     if self._console:
-      self._console.rule(f'[green bold]Step {step}')
+      if self._name:
+        self._console.rule(f'[green bold]{self._name} (Step {step})')
+      else:
+        self._console.rule(f'[green bold]Step {step}')
       self._console.print(' [blue]/[/blue] '.join(
           f'{k} {v}' for k, v in formatted.items()))
       print('')
     else:
       message = ' / '.join(f'{k} {v}' for k, v in formatted.items())
-      print(f'[{step}]', message, flush=True)
+      message = f'[{step}] {message}'
+      if self._name:
+        message = f'[{self._name}] {message}'
+      print(message, flush=True)
 
   def _format_value(self, value):
     value = float(value)
@@ -128,17 +156,23 @@ class TerminalOutput:
 class JSONLOutput(AsyncOutput):
 
   def __init__(
-      self, logdir, filename='metrics.jsonl', pattern=r'.*', parallel=True):
+      self, logdir, filename='metrics.jsonl', pattern=r'.*',
+      strings=False, parallel=True):
     super().__init__(self._write, parallel)
     self._filename = filename
     self._pattern = re.compile(pattern)
+    self._strings = strings
     self._logdir = path.Path(logdir)
     self._logdir.mkdirs()
 
   def _write(self, summaries):
     bystep = collections.defaultdict(dict)
     for step, name, value in summaries:
-      if len(value.shape) == 0 and self._pattern.search(name):
+      if not self._pattern.search(name):
+        continue
+      if isinstance(value, str) and self._strings:
+        bystep[step][name] = value
+      if isinstance(value, np.ndarray) and len(value.shape) == 0:
         bystep[step][name] = float(value)
     lines = ''.join([
         json.dumps({'step': step, **scalars}) + '\n'
@@ -166,17 +200,19 @@ class TensorBoardOutput(AsyncOutput):
     reset = False
     if self._maxsize:
       result = self._promise and self._promise.result()
-      print('Current TensorBoard event file size:', result)  # TODO
+      # print('Current TensorBoard event file size:', result)
       reset = (self._promise and result >= self._maxsize)
       self._promise = self._checker.submit(self._check)
     if not self._writer or reset:
       print('Creating new TensorBoard event file writer.')
       self._writer = tf.summary.create_file_writer(
-          self._logdir, max_queue=1000)
+          self._logdir, flush_millis=1000, max_queue=10000)
     self._writer.set_as_default()
     for step, name, value in summaries:
       try:
-        if len(value.shape) == 0:
+        if isinstance(value, str):
+          tf.summary.text(name, value, step)
+        elif len(value.shape) == 0:
           tf.summary.scalar(name, value, step)
         elif len(value.shape) == 1:
           if len(value) > 1024:
@@ -220,19 +256,46 @@ class TensorBoardOutput(AsyncOutput):
 
 class WandBOutput:
 
-  def __init__(self, **kwargs):
+  def __init__(self, name, config=None, pattern=r'.*'):
+    self._pattern = re.compile(pattern)
     import wandb
+    wandb.init(
+        project='embodied',
+        name=name,
+        # sync_tensorboard=True,
+        entity='word-bots',
+        config=config and dict(config),
+    )
     self._wandb = wandb
-    self._wandb.init(**kwargs)
 
   def __call__(self, summaries):
     bystep = collections.defaultdict(dict)
+    wandb = self._wandb
     for step, name, value in summaries:
-      if len(value.shape) == 0 and self._pattern.search(name):
-        name = f'{self._prefix}/{name}' if self._prefix else name
+      if not self._pattern.search(name):
+        continue
+      if isinstance(value, str):
+        bystep[step][name] = value
+      elif len(value.shape) == 0:
         bystep[step][name] = float(value)
+      elif len(value.shape) == 1:
+        bystep[step][name] = wandb.Histogram(value)
+      elif len(value.shape) in (2, 3):
+        value = value[..., None] if len(value.shape) == 2 else value
+        assert value.shape[3] in [1, 3, 4], value.shape
+        if value.dtype != np.uint8:
+          value = (255 * np.clip(value, 0, 1)).astype(np.uint8)
+        value = np.transpose(value, [2, 0, 1])
+        bystep[step][name] = wandb.Image(value)
+      elif len(value.shape) == 4:
+        assert value.shape[3] in [1, 3, 4], value.shape
+        value = np.transpose(value, [0, 3, 1, 2])
+        if value.dtype != np.uint8:
+          value = (255 * np.clip(value, 0, 1)).astype(np.uint8)
+        bystep[step][name] = wandb.Video(value)
+
     for step, metrics in bystep.items():
-      self._wandb.log_metrics(metrics, step=step)
+      self._wandb.log(metrics, step=step)
 
 
 class MLFlowOutput:
@@ -244,7 +307,6 @@ class MLFlowOutput:
     self._setup(run_name, resume_id, config)
 
   def __call__(self, summaries):
-    timestamp = datetime.datetime.now().timestamp()
     bystep = collections.defaultdict(dict)
     for step, name, value in summaries:
       if len(value.shape) == 0 and self._pattern.search(name):
@@ -269,23 +331,6 @@ class MLFlowOutput:
     else:
       tags = {'resume_id': resume_id or ''}
       self._mlflow.start_run(run_name=run_name, tags=tags)
-
-
-class XDataOutput:
-
-  def __init__(self, dataframe='results'):
-    from google3.learning.deepmind.xdata import xdata
-    self._writer = xdata.bt.writer(
-        xdata.get_auto_data_id(), dataframe, stateless=True)
-
-  def __call__(self, summaries):
-    bystep = collections.defaultdict(dict)
-    for step, name, value in summaries:
-      if len(value.shape) == 4:
-        continue  # Videos are not supported.
-      bystep[step][name] = value
-    for step, metrics in bystep.items():
-      self._writer.write({'step': step, **metrics})
 
 
 def _encode_gif(frames, fps):

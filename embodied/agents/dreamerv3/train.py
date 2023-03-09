@@ -1,175 +1,219 @@
+import importlib
 import pathlib
 import sys
+import tracemalloc
 import warnings
+from functools import partial as bind
 
 warnings.filterwarnings('ignore', '.*box bound precision lowered.*')
 warnings.filterwarnings('ignore', '.*using stateful random seeds*')
 warnings.filterwarnings('ignore', '.*is a deprecated alias for.*')
-warnings.filterwarnings(
-    'ignore', '.*truncated to dtype int32.*',
-    module='.*tensorflow_probability.*')
+warnings.filterwarnings('ignore', '.*truncated to dtype int32.*')
 
-directory = pathlib.Path(__file__)
-try:
-  import google3  # noqa
-except ImportError:
-  directory = directory.resolve()
+directory = pathlib.Path(__file__).resolve()
 directory = directory.parent
 sys.path.append(str(directory.parent))
+sys.path.append(str(directory.parent.parent))
 sys.path.append(str(directory.parent.parent.parent))
 __package__ = directory.name
 
 import embodied
+from embodied import wrappers
 
 
 def main(argv=None):
-  from . import agent as agnt
+  from . import agent as agt
 
-  parsed, other = embodied.Flags(
-      method='unused',
-      configs=['defaults'],
-      worker=0, workers=1,
-      learner_addr='localhost:2222',
-  ).parse_known(argv)
-  config = embodied.Config(agnt.Agent.configs['defaults'])
+  parsed, other = embodied.Flags(configs=['defaults']).parse_known(argv)
+  config = embodied.Config(agt.Agent.configs['defaults'])
   for name in parsed.configs:
-    config = config.update(agnt.Agent.configs[name])
+    config = config.update(agt.Agent.configs[name])
   config = embodied.Flags(config).parse(other)
+  args = embodied.Config(
+      **config.run, logdir=config.logdir,
+      batch_steps=config.batch_size * config.batch_length)
+  # print(config)
 
-  min_fill = config.batch_size * config.batch_length
-  config = config.update({
-      'logdir': str(embodied.Path(config.logdir)),
-      'env.seed': hash((config.seed, parsed.worker)),
-      'run.expl_until': config.run.expl_until // config.env.repeat,
-      'run.train_fill': max(min_fill, config.run.train_fill),
-      'run.eval_fill': max(min_fill, config.run.eval_fill),
-      'run.batch_steps': config.batch_size * config.batch_length,
-  })
-  print(config)
-
-  outdir = embodied.Path(config.logdir)
-  if config.run.script == 'acting':
-    outdir /= f'worker{parsed.worker}'
-  elif config.run.script == 'learning':
-    outdir /= 'learner'
-
-  logdir = embodied.Path(config.logdir)
-  logdir.mkdirs()
-  config.save(logdir / 'config.yaml')
-  step = embodied.Counter()
-  logger = make_logger(parsed, outdir, step, config)
-  args = embodied.Config(logdir=config.logdir, **config.run)
+  logdir = embodied.Path(args.logdir)
+  if args.script != 'parallel_env':
+    logdir.mkdirs()
+    config.save(logdir / 'config.yaml')
+    step = embodied.Counter()
+    logger = make_logger(parsed, logdir, step, config)
 
   cleanup = []
   try:
 
-    if config.run.script == 'train':
-      replay = make_replay(config, logdir / 'episodes')
-      env = make_env(config, 'train')
+    if args.script == 'train':
+      replay = make_replay(config, logdir / 'replay')
+      env = wrapped_env(config, batch=True)
       cleanup.append(env)
-      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      agent = agt.Agent(env.obs_space, env.act_space, step, config)
       embodied.run.train(agent, env, replay, logger, args)
 
-    elif config.run.script == 'train_save':
-      replay = make_replay(config, logdir / 'episodes')
-      env = make_env(config, 'train')
+    elif args.script == 'train_save':
+      replay = make_replay(config, logdir / 'replay')
+      env = wrapped_env(config, batch=True)
       cleanup.append(env)
-      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      agent = agt.Agent(env.obs_space, env.act_space, step, config)
       embodied.run.train_save(agent, env, replay, logger, args)
 
-    elif config.run.script == 'train_eval':
-      replay = make_replay(config, logdir / 'episodes')
-      eval_replay = make_replay(config, logdir / 'eval_episodes', is_eval=True)
-      env = make_env(config, 'train')
-      eval_env = make_env(config, 'eval')
+    elif args.script == 'train_eval':
+      replay = make_replay(config, logdir / 'replay')
+      eval_replay = make_replay(config, logdir / 'eval_replay', is_eval=True)
+      env = wrapped_env(config, batch=True)
+      eval_env = wrapped_env(config, batch=True)
       cleanup += [env, eval_env]
-      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
+      agent = agt.Agent(env.obs_space, env.act_space, step, config)
       embodied.run.train_eval(
           agent, env, eval_env, replay, eval_replay, logger, args)
 
-    elif config.run.script == 'train_fixed_eval':
-      replay = make_replay(config, logdir / 'episodes')
+    elif args.script == 'train_holdout':
+      replay = make_replay(config, logdir / 'replay')
       if config.eval_dir:
         assert not config.train.eval_fill
         eval_replay = make_replay(config, config.eval_dir, is_eval=True)
       else:
-        assert config.run.eval_fill
-        eval_replay = make_replay(
-            config, logdir / 'eval_episodes', is_eval=True)
-      env = make_env(config, 'train')
+        assert 0 < args.eval_fill <= config.replay_size // 10, args.eval_fill
+        eval_replay = make_replay(config, logdir / 'eval_replay', is_eval=True)
+      env = wrapped_env(config, batch=True)
       cleanup.append(env)
-      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
-      embodied.run.train_fixed_eval(
+      agent = agt.Agent(env.obs_space, env.act_space, step, config)
+      embodied.run.train_holdout(
           agent, env, replay, eval_replay, logger, args)
 
-    elif config.run.script == 'learning':
-      port = parsed.learner_addr.split(':')[-1]
-      replay = make_replay(config, server_port=port)
-      if config.eval_dir:
-        eval_replay = make_replay(config, config.eval_dir, is_eval=True)
-      else:
-        eval_replay = replay
-      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
-      embodied.run.learning(agent, replay, eval_replay, logger, args)
-
-    elif config.run.script == 'acting':
-      replay = make_replay(config, remote_addr=parsed.learner_addr)
-      env = make_env(config, 'train')
+    elif args.script == 'eval_only':
+      env = wrapped_env(config, batch=True)
       cleanup.append(env)
-      agent = agnt.Agent(env.obs_space, env.act_space, step, config)
-      embodied.run.acting(agent, env, replay, logger, outdir, args)
+      agent = agt.Agent(env.obs_space, env.act_space, step, config)
+      embodied.run.eval_only(agent, env, logger, args)
+
+    elif args.script == 'parallel':
+      assert config.run.actor_batch <= config.envs.amount, (
+          config.run.actor_batch, config.envs.amount)
+      ctor = bind(wrapped_env, config, batch=False)
+      step = embodied.Counter()
+      env = ctor()
+      agent = agt.Agent(env.obs_space, env.act_space, step, config)
+      env.close()
+      replay = make_replay(config, logdir / 'replay', rate_limit=True)
+      embodied.run.parallel(
+          agent, replay, logger, ctor, config.envs.amount, args)
+
+    elif args.script == 'parallel_agent':
+      ctor = bind(wrapped_env, config, batch=False)
+      step = embodied.Counter()
+      env = ctor()
+      agent = agt.Agent(env.obs_space, env.act_space, step, config)
+      env.close()
+      replay = make_replay(config, logdir / 'replay', rate_limit=True)
+      embodied.run.parallel(agent, replay, logger, None, num_envs=0, args=args)
+
+    elif args.script == 'parallel_env':
+      ctor = bind(wrapped_env, config, batch=False)
+      embodied.run.parallel_env(ctor, args)
 
     else:
-      raise NotImplementedError(config.run.script)
+      raise NotImplementedError(args.script)
   finally:
     for obj in cleanup:
       obj.close()
 
 
-def make_env(config, mode='train'):
-  return embodied.envs.load_env(
-      config.task, mode=mode, logdir=config.logdir, **config.env)
-
-
-def make_logger(parsed, outdir, step, config):
-  multiplier = config.env.repeat
-  if config.run.script == 'acting':
-    multiplier *= parsed.workers
-  elif config.run.script == 'learning':
-    multiplier = 1
+def make_logger(parsed, logdir, step, config):
+  multiplier = config.env.get(config.task.split('_')[0], {}).get('repeat', 1)
   logger = embodied.Logger(step, [
       embodied.logger.TerminalOutput(config.filter),
-      embodied.logger.JSONLOutput(outdir, 'metrics.jsonl'),
-      embodied.logger.JSONLOutput(outdir, 'scores.jsonl', 'episode/score'),
-      embodied.logger.TensorBoardOutput(outdir),
+      embodied.logger.JSONLOutput(logdir, 'metrics.jsonl'),
+      embodied.logger.JSONLOutput(logdir, 'scores.jsonl', 'episode/score'),
+      embodied.logger.TensorBoardOutput(logdir),
   ], multiplier)
-  try:
-    import google3  # noqa
-    logger.outputs.append(embodied.logger.XDataOutput())
-  except ImportError:
-    pass
   return logger
 
 
 def make_replay(
-    config, directory=None, is_eval=False, remote_addr=None,
-    server_port=None, **kwargs):
-  assert not remote_addr, 'currently unsupported'
-  assert not server_port, 'currently unsupported'
+    config, directory=None, is_eval=False, rate_limit=False, **kwargs):
+  assert config.replay == 'uniform' or not rate_limit
   length = config.batch_length
   size = config.replay_size // 10 if is_eval else config.replay_size
   if config.replay == 'uniform' or is_eval:
-    replay = embodied.replay.Uniform(
-        length, size, directory, config.replay_online)
+    kw = {'online': config.replay_online}
+    if rate_limit and config.run.train_ratio > 0:
+      kw['samples_per_insert'] = config.run.train_ratio / config.batch_length
+      kw['tolerance'] = 10 * config.batch_size
+      kw['min_size'] = config.batch_size
+    replay = embodied.replay.Uniform(length, size, directory, **kw)
   elif config.replay == 'reverb':
     replay = embodied.replay.Reverb(length, size, directory)
-  elif config.replay == 'prio':
-    replay = embodied.replay.Prioritized(length, size, directory)
   elif config.replay == 'chunks':
     replay = embodied.replay.NaiveChunks(length, size, directory)
   else:
     raise NotImplementedError(config.replay)
   return replay
+
+
+def wrapped_env(config, batch, **overrides):
+  ctor = bind(make_env, config, **overrides)
+  if batch and config.envs.parallel != 'none':
+    ctor = bind(embodied.Parallel, ctor, config.envs.parallel)
+  if config.envs.restart:
+    ctor = bind(wrappers.RestartOnException, ctor)
+  if batch:
+    envs = [ctor() for _ in range(config.envs.amount)]
+    return embodied.BatchEnv(envs, config.envs.parallel)
+  else:
+    return ctor()
+
+
+def make_env(config, **overrides):
+  from embodied.envs import from_gym
+  suite, task = config.task.split('_', 1)
+  ctor = {
+      'dummy': 'embodied.envs.dummy:Dummy',
+      'gym': 'embodied.envs.from_gym:FromGym',
+      'dm': 'embodied.envs.from_dmenv:FromDM',
+      'crafter': 'embodied.envs.crafter:Crafter',
+      'dmc': 'embodied.envs.dmc:DMC',
+      'atari': 'embodied.envs.atari:Atari',
+      'atari100k': 'embodied.envs.atari:Atari',
+      'dmlab': 'embodied.envs.dmlab:DMLab',
+      'minecraft': 'embodied.envs.minecraft:Minecraft',
+      'loconav': 'embodied.envs.loconav:LocoNav',
+      'pinpad': 'embodied.envs.pinpad:PinPad',
+      # TODO
+      'procgen': lambda task, **kw: from_gym.FromGym(
+          f'procgen:procgen-{task}-v0', **kw),
+  }[suite]
+  if isinstance(ctor, str):
+    module, cls = ctor.split(':')
+    module = importlib.import_module(module)
+    ctor = getattr(module, cls)
+  kwargs = config.env.get(suite, {})
+  kwargs.update(overrides)
+  env = ctor(task, **kwargs)
+  return wrap_env(env, config)
+
+
+def wrap_env(env, config):
+  args = config.wrapper
+  for name, space in env.act_space.items():
+    if name == 'reset':
+      continue
+    elif space.discrete:
+      env = wrappers.OneHotAction(env, name)
+    elif args.discretize:
+      env = wrappers.DiscretizeAction(env, name, args.discretize)
+    else:
+      env = wrappers.NormalizeAction(env, name)
+  env = wrappers.ExpandScalars(env)
+  if args.length:
+    env = wrappers.TimeLimit(env, args.length, args.reset)
+  if args.checks:
+    env = wrappers.CheckSpaces(env)
+  for name, space in env.act_space.items():
+    if not space.discrete:
+      env = wrappers.ClipAction(env, name)
+  return env
 
 
 if __name__ == '__main__':

@@ -65,7 +65,7 @@ class Crafter(embodied.Env):
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_terminal,
-        log_reward=np.float32(info['reward'] if info else 0.0),
+        log_reward=np.array(info['reward'] if info else 0.0, np.float32),
         **log_achievements,
     )
 

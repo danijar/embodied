@@ -1,4 +1,4 @@
-import queue
+import threading
 import time
 from collections import defaultdict, deque
 from functools import partial as bind
@@ -24,12 +24,22 @@ class Generic:
     self.streams = defaultdict(bind(deque, maxlen=length))
     self.counters = defaultdict(int)
     self.table = {}
+    self.lock = threading.Lock()
     self.online = online
     if self.online:
       self.online_queue = deque()
       self.online_stride = length
       self.online_counters = defaultdict(int)
     self.saver = directory and saver.Saver(directory, chunks)
+    self.itemsize = 0
+    self.metrics = {
+        'samples': 0,
+        'sample_wait_dur': 0,
+        'sample_wait_count': 0,
+        'inserts': 0,
+        'insert_wait_dur': 0,
+        'insert_wait_count': 0,
+    }
     self.load()
 
   def __len__(self):
@@ -37,13 +47,29 @@ class Generic:
 
   @property
   def stats(self):
-    return {'size': len(self)}
+    ratio = lambda x, y: x / y if y else np.nan
+    m = self.metrics
+    stats = {
+        'size': len(self),
+        'ram_gb': len(self) * self.itemsize / (1024 ** 3),
+        'inserts': m['inserts'],
+        'samples': m['samples'],
+        'insert_wait_avg': ratio(m['insert_wait_dur'], m['inserts']),
+        'insert_wait_frac': ratio(m['insert_wait_count'], m['inserts']),
+        'sample_wait_avg': ratio(m['sample_wait_dur'], m['samples']),
+        'sample_wait_frac': ratio(m['sample_wait_count'], m['samples']),
+    }
+    for key in self.metrics:
+      self.metrics[key] = 0
+    return stats
 
-  def add(self, step, worker=0):
+  def add(self, step, worker=0, load=False):
     step = {k: v for k, v in step.items() if not k.startswith('log_')}
     step['id'] = np.asarray(embodied.uuid(step.get('id')))
     stream = self.streams[worker]
     stream.append(step)
+    if self.itemsize == 0:
+      self.itemsize = sum(x.nbytes for x in step.values())
     self.saver and self.saver.add(step, worker)
     self.counters[worker] += 1
     if self.online:
@@ -57,15 +83,24 @@ class Generic:
     self.counters[worker] = 0
     key = embodied.uuid()
     seq = tuple(stream)
-    wait(self.limiter.want_insert, lambda: 'Replay insert is waiting')
+    if load:
+      assert self.limiter.want_load()[0]
+    else:
+      dur = wait(self.limiter.want_insert, 'Replay insert is waiting')
+      self.metrics['inserts'] += 1
+      self.metrics['insert_wait_dur'] += dur
+      self.metrics['insert_wait_count'] += int(dur > 0)
     self.table[key] = seq
     self.remover[key] = seq
     self.sampler[key] = seq
     while self.capacity and len(self) > self.capacity:
-      self._remove(self.remover())
+      self._remove()
 
   def _sample(self):
-    wait(self.limiter.want_sample, lambda: 'Replay sample is waiting')
+    dur = wait(self.limiter.want_sample, 'Replay sample is waiting')
+    self.metrics['samples'] += 1
+    self.metrics['sample_wait_dur'] += dur
+    self.metrics['sample_wait_count'] += int(dur > 0)
     if self.online:
       try:
         seq = self.online_queue.popleft()
@@ -79,11 +114,13 @@ class Generic:
       seq['is_first'][0] = True
     return seq
 
-  def _remove(self, key):
-    wait(self.limiter.want_remove, lambda: 'Replay remove is waiting')
-    del self.table[key]
-    del self.remover[key]
-    del self.sampler[key]
+  def _remove(self):
+    wait(self.limiter.want_remove, 'Replay remove is waiting')
+    with self.lock:
+      key = self.remover()
+      del self.table[key]
+      del self.remover[key]
+      del self.sampler[key]
 
   def dataset(self):
     while True:
@@ -110,7 +147,7 @@ class Generic:
     workers = set()
     for step, worker in self.saver.load(self.capacity, self.length):
       workers.add(worker)
-      self.add(step, worker)
+      self.add(step, worker, load=True)
     for worker in workers:
       del self.streams[worker]
       del self.counters[worker]
@@ -119,10 +156,17 @@ class Generic:
     # self.limiter.load(data['limiter'])
 
 
-def wait(predicate, message):
-  counter = 0
-  while not predicate():
-    if counter % 100 == 0:
-      print(message())
-    time.sleep(0.1)
-    counter += 1
+def wait(predicate, message, sleep=0.001, notify=1.0):
+  first = True
+  start = time.time()
+  notified = False
+  while True:
+    allowed, detail = predicate()
+    duration = time.time() - start
+    if allowed:
+      return 0 if first else duration
+    if not notified and duration >= notify:
+      print(f'{message} ({detail})')
+      notified = True
+    time.sleep(sleep)
+    first = False
