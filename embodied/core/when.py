@@ -2,8 +2,15 @@ import time
 
 
 class Every:
+  """Returns True at most every X steps."""
 
   def __init__(self, every):
+    """Creates a new Every instance
+
+    Args:
+      every: The minimum number of steps between returning True.
+      initial: The value to be returned when called for the first time.
+    """
     self._every = every
     self._last = None
 
@@ -47,8 +54,14 @@ class Until:
 
 
 class Clock:
+  """Returns True at least X seconds apart"""
 
   def __init__(self, every):
+    """Creates a new Clock instance
+
+    Args:
+      every: The time (in seconds) between returning True.
+    """
     self._every = every
     self._last = None
 
