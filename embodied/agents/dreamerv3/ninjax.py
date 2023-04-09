@@ -401,6 +401,7 @@ class Module(object, metaclass=ModuleMeta):
 
   def get(self, name, *args, **kwargs):
     """Retrieve or create a state entry that belongs to this module."""
+    assert '{' not in name, 'Did you forget to format a string?'
     path = self.path + '/' + name
     if name in self._submodules:
       return self._submodules[name]

@@ -278,6 +278,9 @@ class MultiDecoder(nj.Module):
       if cnn == 'resnet':
         self._cnn = ImageDecoderResnet(
             shape, cnn_depth, cnn_blocks, resize, **cnn_kw, name='cnn')
+      elif cnn == 'style':
+        self._cnn = ImageDecoderStyle(
+            shape, cnn_depth, cnn_blocks, resize, **cnn_kw, name='cnn')
       else:
         raise NotImplementedError(cnn)
     if self.mlp_shapes:
@@ -377,6 +380,7 @@ class ImageDecoderResnet(nj.Module):
     depth = self._depth * 2 ** (stages - 1)
     x = jaxutils.cast_to_compute(x)
     x = self.get('in', Linear, (self._minres, self._minres, depth))(x)
+
     for i in range(stages):
       for j in range(self._blocks):
         skip = x
@@ -392,6 +396,74 @@ class ImageDecoderResnet(nj.Module):
         depth = self._shape[-1]
       if self._resize == 'stride':
         x = self.get(f's{i}res', Conv2D, depth, 4, 2, transp=True, **kw)(x)
+      elif self._resize == 'stride3':
+        s = 3 if i == stages - 1 else 2
+        k = 5 if i == stages - 1 else 4
+        x = self.get(f's{i}res', Conv2D, depth, k, s, transp=True, **kw)(x)
+      elif self._resize == 'resize':
+        x = jnp.repeat(jnp.repeat(x, 2, 1), 2, 2)
+        x = self.get(f's{i}res', Conv2D, depth, 3, 1, **kw)(x)
+      else:
+        raise NotImplementedError(self._resize)
+    if max(x.shape[1:-1]) > max(self._shape[:-1]):
+      padh = (x.shape[1] - self._shape[0]) / 2
+      padw = (x.shape[2] - self._shape[1]) / 2
+      x = x[:, int(np.ceil(padh)): -int(padh), :]
+      x = x[:, :, int(np.ceil(padw)): -int(padw)]
+    # print(x.shape)
+    assert x.shape[-3:] == self._shape, (x.shape, self._shape)
+    if self._sigmoid:
+      x = jax.nn.sigmoid(x)
+    else:
+      x = x + 0.5
+    return x
+
+
+class ImageDecoderStyle(nj.Module):
+
+  def __init__(
+      self, shape, depth, blocks, resize, minres, sigmoid, **kw):
+    self._shape = shape
+    self._depth = depth
+    self._blocks = blocks
+    self._resize = resize
+    self._minres = minres
+    self._sigmoid = sigmoid
+    self._kw = kw
+
+  def __call__(self, x):
+    stages = int(np.log2(self._shape[-2]) - np.log2(self._minres))
+
+    style = x
+    for i in range(4):
+      style = self.get(f'style{i}', Linear, 1024, **self._kw)(style)
+
+    depth = self._depth * 2 ** (stages - 1)
+    x = jaxutils.cast_to_compute(x)
+    x = self.get('in', Linear, (self._minres, self._minres, depth))(x)
+    for i in range(stages):
+      for j in range(self._blocks):
+        skip = x
+        kw = {**self._kw, 'preact': True}
+        s1 = self.get(f's{i}b{j}s1', Linear, 2 * depth)(style)
+        s2 = self.get(f's{i}b{j}s2', Linear, 2 * depth)(style)
+        s1 = jnp.split(s1[..., None, None, :], 2, -1)
+        s2 = jnp.split(s2[..., None, None, :], 2, -1)
+        x = self.get(f's{i}b{j}c1', Conv2D, depth, 3, **kw)(x, s1)
+        x = self.get(f's{i}b{j}c2', Conv2D, depth, 3, **kw)(x, s2)
+        x += skip
+        # print(x.shape)
+      depth //= 2
+      kw = {**self._kw, 'preact': False}
+      if i == stages - 1:
+        kw = {}
+        depth = self._shape[-1]
+      if self._resize == 'stride':
+        s = None
+        if self._blocks == 0:
+          s = self.get(f's{i}s', Linear, 2 * depth)(style)
+          s = jnp.split(s[..., None, None, :], 2, -1)
+        x = self.get(f's{i}res', Conv2D, depth, 4, 2, transp=True, **kw)(x, s)
       elif self._resize == 'stride3':
         s = 3 if i == stages - 1 else 2
         k = 5 if i == stages - 1 else 4
@@ -548,14 +620,14 @@ class Conv2D(nj.Module):
     self._winit = winit
     self._fan = fan
 
-  def __call__(self, hidden):
+  def __call__(self, hidden, style=None):
     if self._preact:
-      hidden = self._norm(hidden)
+      hidden = self._norm(hidden, style)
       hidden = self._act(hidden)
       hidden = self._layer(hidden)
     else:
       hidden = self._layer(hidden)
-      hidden = self._norm(hidden)
+      hidden = self._norm(hidden, style)
       hidden = self._act(hidden)
     return hidden
 
@@ -619,15 +691,19 @@ class Norm(nj.Module):
   def __init__(self, impl):
     self._impl = impl
 
-  def __call__(self, x):
+  def __call__(self, x, style=None):
     dtype = x.dtype
     if self._impl == 'none':
       return x
     elif self._impl == 'layer':
       x = x.astype(f32)
       x = jax.nn.standardize(x, axis=-1, epsilon=1e-3)
-      x *= self.get('scale', jnp.ones, x.shape[-1], f32)
-      x += self.get('bias', jnp.zeros, x.shape[-1], f32)
+      if style is None:
+        x *= self.get('scale', jnp.ones, x.shape[-1], f32)
+        x += self.get('bias', jnp.zeros, x.shape[-1], f32)
+      else:
+        x *= style[0]
+        x += style[1]
       return x.astype(dtype)
     else:
       raise NotImplementedError(self._impl)

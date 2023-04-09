@@ -48,7 +48,8 @@ defaults:
     actor_host: 'localhost'
     actor_port: '5551'
     actor_batch: 32
-    actor_workers: 1
+    actor_threads: 1
+    env_replica: -1
     ipv6: False
     trace_malloc: False
 

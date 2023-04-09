@@ -1,7 +1,7 @@
 import importlib
+import os
 import pathlib
 import sys
-import tracemalloc
 import warnings
 from functools import partial as bind
 
@@ -111,7 +111,10 @@ def main(argv=None):
 
     elif args.script == 'parallel_env':
       ctor = bind(wrapped_env, config, batch=False)
-      embodied.run.parallel_env(ctor, args)
+      replica_id = args.env_replica
+      if replica_id < 0:
+        replica_id = int(os.environ['JOB_COMPLETION_INDEX'])
+      embodied.run.parallel_env(replica_id, ctor, args)
 
     else:
       raise NotImplementedError(args.script)

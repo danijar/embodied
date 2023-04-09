@@ -349,7 +349,6 @@ class Optimizer(nj.Module):
   def __init__(
       self, lr, opt='adam', eps=1e-5, clip=100.0, warmup=0, wd=0.0,
       wd_pattern=r'/(w|kernel)$', lateclip=0.0):
-    assert opt in ('adam', 'belief', 'yogi')
     assert wd_pattern[0] not in ('0', '1')
     # assert self.path not in self.PARAM_COUNTS
     self.PARAM_COUNTS[self.path] = None
@@ -359,6 +358,8 @@ class Optimizer(nj.Module):
       chain.append(optax.clip_by_global_norm(clip))
     if opt == 'adam':
       chain.append(optax.scale_by_adam(eps=eps))
+    elif opt == 'lion':
+      chain.append(optax.scale_by_lion())
     else:
       raise NotImplementedError(opt)
     if lateclip:

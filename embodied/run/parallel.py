@@ -16,10 +16,11 @@ def parallel(agent, replay, logger, make_env, num_envs, args):
   usage = embodied.Usage(args.trace_malloc)
   workers = []
   if num_envs == 1:
-    workers.append(embodied.distr.Thread(parallel_env, make_env, args, timer))
+    workers.append(embodied.distr.Thread(
+        parallel_env, 0, make_env, args, timer))
   else:
-    for _ in range(num_envs):
-      worker = embodied.distr.Process(parallel_env, make_env, args)
+    for i in range(num_envs):
+      worker = embodied.distr.Process(parallel_env, i, make_env, args)
       worker.start()
       workers.append(worker)
     usage.processes('envs', workers)
@@ -42,8 +43,17 @@ def parallel_actor(step, agent, replay, logger, timer, args):
   allstates = defaultdict(lambda: initial)
   nonzeros = set()
   vidstreams = {}
+  dones = {}
 
   def callback(obs, env_addrs):
+    metrics.scalar('parallel/ep_starts', obs['is_first'].sum(), agg='sum')
+    metrics.scalar('parallel/ep_ends', obs['is_last'].sum(), agg='sum')
+    for i, a in enumerate(env_addrs):
+      if obs['is_first'][i]:
+        abandoned = not dones.get(a, True)
+        metrics.scalar('parallel/episode_abandoned', int(abandoned), agg='sum')
+      dones[a] = obs['is_last'][i]
+
     states = [allstates[a] for a in env_addrs]
     states = embodied.treemap(lambda *xs: list(xs), *states)
     act, states = agent.policy(obs, states)
@@ -51,13 +61,18 @@ def parallel_actor(step, agent, replay, logger, timer, args):
     for i, a in enumerate(env_addrs):
       allstates[a] = embodied.treemap(lambda x: x[i], states)
     step.increment(args.actor_batch)
+    metrics.scalar('parallel/ep_states', len(allstates))
 
     trans = {**obs, **act}
     now = time.time()
     for i, a in enumerate(env_addrs):
-      tran = {k: v[i].copy() for k, v in trans.items()}  # 2gb
-      replay.add(tran.copy(), worker=a)
-      [scalars[a][k].append(v) for k, v in tran.items() if v.size == 1]  # 230mb
+      tran = {k: v[i].copy() for k, v in trans.items()}
+      replay.add(tran.copy(), worker=a)  # Blocks when rate limited.
+      if tran['is_first']:
+        scalars.pop(a, None)
+        videos.pop(a, None)
+        vidstreams.pop(a, None)
+      [scalars[a][k].append(v) for k, v in tran.items() if v.size == 1]
       if a in vidstreams or len(vidstreams) < args.log_video_streams:
         vidstreams[a] = now
         [videos[a][k].append(tran[k]) for k in args.log_keys_video]
@@ -100,15 +115,10 @@ def parallel_actor(step, agent, replay, logger, timer, args):
 
     return act
 
-  if args.actor_workers > 1:
-    server = embodied.distr.AsyncBatchServer(
-        args.actor_port, args.actor_workers, args.actor_batch, callback,
-        args.ipv6)
-    timer.wrap('actor_server', server, ['_receive', '_process', '_respond'])
-  else:
-    server = embodied.distr.BatchServer(
-        args.actor_port, args.actor_batch, callback, args.ipv6)
-    timer.wrap('actor_server', server, ['_receive', '_process', '_respond'])
+  server = embodied.distr.Server(
+      callback, args.actor_port, args.ipv6, args.actor_batch,
+      args.actor_threads)
+  timer.wrap('server', server, ['_step', '_work'])
   server.run()
 
 
@@ -162,13 +172,15 @@ def parallel_learner(step, agent, replay, logger, timer, usage, args):
       checkpoint.save()
 
 
-def parallel_env(make_env, args, timer=None):
+def parallel_env(replica_id, make_env, args, timer=None):
   # TODO: Optionally write NPZ episodes.
-  print('Make env')
+  assert replica_id >= 0, replica_id
+  rid = replica_id
+  print(f'[{rid}] Make env.')
   env = make_env()
   timer and timer.wrap('env', env, ['step'])
   addr = f'{args.actor_host}:{args.actor_port}'
-  actor = embodied.distr.Client(addr, args.ipv6)
+  actor = embodied.distr.Client(addr, replica_id, args.ipv6)
   done = True
   start = time.time()
   count = 0
@@ -183,22 +195,22 @@ def parallel_env(make_env, args, timer=None):
     length += 1
     done = obs['is_last']
     if done:
-      print(f'Episode of length {length} with score {score:.4f}.')
+      print(f'[{rid}] Episode of length {length} with score {score:.4f}.')
     promise = actor(obs)
     try:
       act = promise()
       act = {k: v for k, v in act.items() if not k.startswith('log_')}
     except embodied.distr.ReconnectError:
-      print('Starting new episode because the client reconnected.')
+      print(f'[{rid}] Starting new episode because the client reconnected.')
       done = True
     except embodied.distr.RemoteError as e:
-      print(f'Shutting down env due to agent error: {e}')
+      print(f'[{rid}] Shutting down env due to agent error: {e}')
       sys.exit(0)
     count += 1
     now = time.time()
     if now - start >= 60:
       fps = count / (now - start)
-      print(f'Env steps per second: {fps:.1f}')
+      print(f'[{rid}] Env steps per second: {fps:.1f}')
       start = now
       count = 0
 

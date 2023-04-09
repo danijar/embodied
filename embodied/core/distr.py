@@ -1,10 +1,10 @@
+import concurrent.futures
 import ctypes
-import queue as queuelib
 import sys
 import threading
 import time
 import traceback
-import uuid
+from collections import deque
 
 import numpy as np
 
@@ -17,8 +17,12 @@ class ReconnectError(RuntimeError): pass
 
 class Client:
 
-  def __init__(self, address, ipv6=False, timeout=60):
+  def __init__(self, address, identity=None, ipv6=False, timeout=10):
+    if identity is None:
+      identity = np.random.randint(2 ** 32)
+    assert isinstance(identity, int), (type(identity), identity)
     self.address = address
+    self.identity = identity
     self.ipv6 = ipv6
     self.timeout = timeout
     self.socket = None
@@ -31,7 +35,7 @@ class Client:
     if self.pending:
       self._receive()
     self.socket.send(basics.pack(data))
-    self.once and print('Sent first request.')
+    self.once and self._print('Sent first request.')
     self.pending = True
     return self._receive
 
@@ -39,12 +43,11 @@ class Client:
     import zmq
     context = zmq.Context.instance()
     self.socket = context.socket(zmq.REQ)
-    self.socket.setsockopt(zmq.IDENTITY, uuid.uuid4().bytes)
+    self.socket.setsockopt(zmq.IDENTITY, self.identity.to_bytes(16, 'big'))
     self.ipv6 and self.socket.setsockopt(zmq.IPV6, 1)
-    if self.timeout > 0:
-      self.socket.RCVTIMEO = int(1000 * self.timeout)
+    self.socket.RCVTIMEO = int(1000 * self.timeout)
     address = self._resolve(self.address)
-    basics.print_(f'Client connecting to {address}', color='green')
+    self._print(f'Client connecting to {address}', color='green')
     self.socket.connect(address)
     self.pending = False
     self.once = True
@@ -54,202 +57,148 @@ class Client:
 
   def _receive(self):
     import zmq
-    start = time.time()  # TODO
     try:
-      recieved = self.socket.recv()
-      self.once and print('Received first response.')
+      while True:
+        received = self.socket.recv()
+        self.once and self._print('Received first response.')
+        self.once = False
+        if received == b'wait':
+          self.socket.send(b'waiting')
+          continue
+        else:
+          break
     except zmq.Again:
-      print(f'Request timed out ({time.time() - start:.2f}s), reconnecting.')
+      self._print('Reconnecting because server did not respond.', color='red')
       self.socket.close(linger=0)
       self._connect()
       raise ReconnectError()
-    except Exception as e:
-      raise RuntimeError(f'Failed to receive data from server: {e}')
-    result = basics.unpack(recieved)
+    result = basics.unpack(received)
     if result.get('type', 'data') == 'error':
       msg = result.get('message', None)
       raise RemoteError(f'Server responded with an error: {msg}')
     self.pending = False
-    self.once = False
     return result
+
+  def _print(self, text, color=None):
+    text = f'[{self.identity}] {text}'
+    if color:
+      basics.print_(text, color=color)
+    else:
+      print(text)
 
 
 class Server:
 
-  def __init__(self, port, function, ipv6=False):
-    address = f'tcp://*:{port}'
-    import zmq
-    context = zmq.Context.instance()
-    self.socket = context.socket(zmq.REP)
-    basics.print_(f'Server listening at {address}', color='green')
-    ipv6 and self.socket.setsockopt(zmq.IPV6, 1)
-    self.socket.bind(address)
-    self.function = function
-
-  def run(self):
-    while True:
-      payload = self.socket.recv()
-      inputs = basics.unpack(payload)
-      assert isinstance(inputs, dict), type(inputs)
-      try:
-        result = self.function(inputs)
-        assert isinstance(result, dict), type(result)
-      except Exception as e:
-        result = {'type': 'error', 'message': str(e)}
-        self.socket.send(basics.pack(payload))
-        raise
-      payload = basics.pack(result)
-      self.socket.send(payload)
-
-
-class BatchServer:
-
-  def __init__(self, port, batch, function, ipv6=False):
-    address = f'tcp://*:{port}'
+  def __init__(self, function, port, ipv6=False, batch=-1, threads=1):
     import zmq
     context = zmq.Context.instance()
     self.socket = context.socket(zmq.ROUTER)
     ipv6 and self.socket.setsockopt(zmq.IPV6, 1)
+    address = f'tcp://*:{port}'
     basics.print_(f'BatchServer listening at {address}', color='green')
     self.socket.bind(address)
-    self.batch = batch
     self.function = function
-    self.buffer = None
+    self.batch = batch
+    self.workers = concurrent.futures.ThreadPoolExecutor(threads)
+    self.promises = deque()
+    self.inputs = deque()
+    self.requests = {}
+    self.outputs = {}
     self.once = True
+    self.error = None
 
   def run(self):
     while True:
-      inputs, addresses = self._receive()
-      results, addresses, exception = self._process(inputs, addresses)
-      self._respond(results, addresses)
-      if exception:
-        raise exception
-      self.once = False
+      start = time.time()
+      self._step()
+      duration = time.time() - start
+      time.sleep(max(0, 0.001 - duration))
 
-  def _receive(self):
-    addresses = []
-    for i in range(self.batch):
-      self.once and print(f'Waiting for request {i} of {self.batch}.')
-      address, empty, payload = self.socket.recv_multipart()
-      data = basics.unpack(payload)
-      assert isinstance(data, dict), type(data)
-      if self.buffer is None:
-        self.buffer = {
-            k: np.empty((self.batch, *v.shape), v.dtype)
-            for k, v in data.items() if not isinstance(v, str)}
-      for key, value in data.items():
-        self.buffer[key][i] = value
-      addresses.append(address)
-    return self.buffer, addresses
-
-  def _process(self, inputs, addresses):
-      try:
-        results = self.function(inputs, [x.hex() for x in addresses])
-        assert isinstance(results, dict), type(results)
-        for key, value in results.items():
-          if not isinstance(value, str):
-            assert len(value) == self.batch, (key, value.shape)
-      except Exception as e:
-        results = {'type': 'error', 'message': str(e)}
-        return results, addresses, e
-      return results, addresses, None
-
-  def _respond(self, results, addresses):
+  def _step(self):
     import zmq
-    for i, address in enumerate(addresses):
-      self.once and print(f'Sending response {i} of {self.batch}.')
-      payload = basics.pack({
-          k: v if isinstance(v, str) else v[i]
-          for k, v in results.items()})
-      try:
-        self.socket.send_multipart([address, b'', payload], zmq.NOBLOCK)
-      except zmq.Again:
-        print('A client was not available to receive a response.')
 
-
-class AsyncBatchServer:
-
-  def __init__(self, port, workers, batch, function, ipv6=False):
-    address = f'tcp://*:{port}'
-    import zmq
-    context = zmq.Context.instance()
-    self.socket = context.socket(zmq.ROUTER)
-    basics.print_(f'BatchServer listening at {address}', color='green')
-    ipv6 and self.socket.setsockopt(zmq.IPV6, 1)
-    self.socket.bind(address)
-    self.workers = workers
-    self.batch = batch
-    self.function = function
-    self.incoming = queuelib.Queue()
-    self.outgoing = queuelib.Queue()
-    self.lock = threading.Lock()
-
-  def run(self):
-    workers = []
-    workers.append(Thread(self._receiver))
-    workers.append(Thread(self._responder))
-    for _ in range(self.workers):
-      workers.append(Thread(self._processor))
-    run(workers)
-
-  def _receiver(self):
-    while True:
-      self._receive()
-
-  def _processor(self):
-    while True:
-      self._process()
-
-  def _responder(self):
-    while True:
-      self._respond()
-
-  def _receive(self):
-    import zmq
-    inputs = None
-    addresses = []
-    for i in range(self.batch):
+    # If there are new messages, dispatch them to the respective queue.
+    try:
       while True:
-        try:
-          with self.lock:
-            address, empty, payload = self.socket.recv_multipart(zmq.NOBLOCK)
-          break
-        except zmq.Again:
-          time.sleep(0.001)
-      data = basics.unpack(payload)
-      assert isinstance(data, dict), type(data)
-      if inputs is None:
-        inputs = {
-            k: np.empty((self.batch, *v.shape), v.dtype)
-            for k, v in data.items() if not isinstance(v, str)}
-      for key, value in data.items():
-        inputs[key][i] = value
-      addresses.append(address)
-    self.incoming.put((inputs, addresses))
+        now = time.time()
+        addr, empty, message = self.socket.recv_multipart(zmq.NOBLOCK)
+        self.requests[addr] = now
+        if message != b'waiting':
+          self.inputs.append((addr, message))
+    except zmq.Again:
+      pass
 
-  def _process(self):
-    inputs, addresses = self.incoming.get()
-    results = self.function(inputs, [x.hex() for x in addresses])
-    assert isinstance(results, dict), type(results)
-    for key, value in results.items():
-      if not isinstance(value, str):
-        assert len(value) == self.batch, (key, value.shape)
-    self.outgoing.put((results, addresses))
+    # If we have accumulated enough inputs, remove them from the queue and
+    # dispatch them to the worker pool.
+    if len(self.inputs) >= max(1, self.batch):
+      inputs = [self.inputs.popleft() for _ in range(max(1, self.batch))]
+      addrs, inputs = [a for a, x in inputs], [x for a, x in inputs]
+      self.promises.append(self.workers.submit(self._work, addrs, inputs))
 
-  def _respond(self):
-    import zmq
-    results, addresses = self.outgoing.get()
-    payloads = [
-        basics.pack({
-            k: v if isinstance(v, str) else v[i]
-            for k, v in results.items()})
-        for i, _ in enumerate(addresses)]
-    for address, payload in zip(addresses, payloads):
-      try:
-        with self.lock:
-          self.socket.send_multipart([address, b'', payload], zmq.NOBLOCK)
-      except zmq.Again:
-        print('A client was not available to receive a response.')
+    # If any background tasks have finished, remove their promises from the
+    # queue and resolve them.
+    while self.promises and self.promises[0].done():
+      self.promises.popleft().result()
+
+    # If any of the background tasks have set the error field, then wait for
+    # all other background tasks to finish first.
+    if self.error:
+      [x.result() for x in self.promises]
+
+    # Send all available results back to their respective clients. The
+    # result is sent instead of the heartbeat, so we remove the heartbeat for
+    # the same client from the queue.
+    for addr in list(self.outputs.keys()):
+      if addr not in self.requests:
+        # This can happen if we just sent a heartbeat recently and have not
+        # received confirmation from the client yet.
+        continue
+      message = self.outputs.pop(addr)
+      del self.requests[addr]
+      # When ROUTER sockets reply to clients that are unreachable, they drop
+      # messages by default, which is what we want here.
+      # https://zguide.zeromq.org/docs/chapter3/#ROUTER-Error-Handling
+      self.socket.send_multipart([addr, b'', message])
+      # self.socket.send_multipart([addr, b'', message], zmq.NOBLOCK)
+
+    # Respond with waiting to requests that are older than one second.
+    now = time.time()
+    for addr, arrival in list(self.requests.items()):
+      if now - arrival >= 1.0:
+        del self.requests[addr]
+        self.socket.send_multipart([addr, b'', b'wait'])
+        # self.socket.send_multipart([addr, b'', message], zmq.NOBLOCK)
+
+    # If any of the background tasks have set the error field, raise the
+    # error here after we have responded to the clients.
+    if self.error:
+      raise self.error
+
+  def _work(self, addrs, inputs):
+    error = None
+    inputs = [basics.unpack(x) for x in inputs]
+    inputs = {
+        k: [inputs[i][k] for i in range(len(inputs))]
+        for k in inputs[0].keys()}
+    inputs = {
+        k: v if isinstance(v[0], str) else np.asarray(v)
+        for k, v in inputs.items()}
+    if self.batch < 1:
+      inputs = {k: v[0] for k, v in inputs.items()}
+    try:
+      results = self.function(inputs, [x.hex() for x in addrs])
+      if self.batch <= 0:
+        results = {k: [v] for k, v in results.items()}
+      results = {
+          a: {k: v[i] for k, v in results.items()}
+          for i, a in enumerate(addrs)}
+    except Exception as e:
+      error = e
+      results = {a: {'type': 'error', 'message': str(e)} for a in addrs}
+    results = {a: basics.pack(v) for a, v in results.items()}
+    self.outputs.update(results)
+    if error and not self.error:
+      self.error = error
 
 
 class Thread(threading.Thread):
