@@ -201,6 +201,234 @@ class RSSM(nj.Module):
       return {'logit': logit, 'mask': mask}
 
 
+class SimpleRSSM(nj.Module):
+
+  def __init__(
+      self, deter=1024, stoch=32, classes=32, unroll=False,
+      unimix=0.01, action_clip=1.0, bottleneck=-1, **kw):
+    self._deter = deter
+    self._stoch = stoch
+    self._classes = classes
+    self._unroll = unroll
+    self._unimix = unimix
+    self._action_clip = action_clip
+    self._bottleneck = bottleneck
+    self._kw = kw
+
+  def initial(self, batch_size):
+    state = dict(
+        deter=jnp.zeros([batch_size, self._deter], f32),
+        logit=jnp.zeros([batch_size, self._stoch, self._classes], f32),
+        stoch=jnp.zeros([batch_size, self._stoch, self._classes], f32))
+    deter = self.get('initial', jnp.zeros, state['deter'][0].shape, f32)
+    state['deter'] = jnp.repeat(jnp.tanh(deter)[None], batch_size, 0)
+    state['stoch'] = self._prior(cast(state['deter']), sample=True)['stoch']
+    return cast(state)
+
+  def observe(self, embed, action, is_first, state=None):
+    state = state or self.initial(action.shape[0])
+    swap = lambda x: x.transpose([1, 0] + list(range(2, len(x.shape))))
+    step = lambda prev, inputs: self.obs_step(prev, *inputs)
+    inputs = swap(action), swap(embed), swap(is_first)
+    post = jaxutils.scan(step, inputs, state, self._unroll)
+    post = {k: swap(v) for k, v in post.items()}
+    return post
+
+  def imagine(self, action, state=None):
+    state = state or self.initial(action.shape[0])
+    swap = lambda x: x.transpose([1, 0] + list(range(2, len(x.shape))))
+    action = swap(action)
+    prior = jaxutils.scan(self.img_step, action, state, self._unroll)
+    prior = {k: swap(v) for k, v in prior.items()}
+    return prior
+
+  def obs_step(self, prev_state, prev_action, embed, is_first):
+    deter = self._gru(prev_state, prev_action, is_first)
+    x = jnp.concatenate([deter, embed], -1)
+    x = self.get('obs_out', Linear, **self._kw)(x)
+    stats = self._stats('obs_stats', x)
+    stoch = self.get_dist(stats).sample(seed=nj.rng())
+    post = {'deter': deter, 'stoch': stoch, **stats}
+    return cast(post)
+
+  def img_step(self, prev_state, prev_action):
+    deter = self._gru(prev_state, prev_action)
+    return self._prior(deter, sample=True)
+
+  def get_dist(self, stats):
+    logit = stats['logit'].astype(f32)
+    return tfd.Independent(jaxutils.OneHotDist(logit), 1)
+
+  def loss(self, post, free=1.0):
+    prior = self._prior(post['deter'], sample=False, post=post)
+    dyn = self.get_dist(sg(post)).kl_divergence(self.get_dist(prior))
+    rep = self.get_dist(post).kl_divergence(self.get_dist(sg(prior)))
+    if free:
+      dyn = jnp.maximum(dyn, free)
+      rep = jnp.maximum(rep, free)
+    return {'dyn': dyn, 'rep': rep}, prior
+
+  def _prior(self, deter, sample, post=None):
+    x = self.get('img_out', Linear, **self._kw)(deter)
+    stats = self._stats('img_stats', x)
+    stoch = self.get_dist(stats).sample(seed=nj.rng()) if sample else None
+    return cast({'deter': deter, 'stoch': stoch, **stats})
+
+  def _gru(self, prev_state, prev_action, is_first=None):
+    prev_action = cast(prev_action)
+    if self._action_clip > 0.0:
+      prev_action *= sg(self._action_clip / jnp.maximum(
+          self._action_clip, jnp.abs(prev_action)))
+    if is_first is not None:
+      prev_state, prev_action = tree_map(
+          lambda prev, init: jaxutils.switch(is_first, init, prev),
+          (prev_state, prev_action),
+          (self.initial(len(is_first)), jnp.zeros_like(prev_action)))
+    batch_shape = prev_state['deter'].shape[:-1]
+    x = jnp.concatenate([
+        prev_state['stoch'].reshape((*batch_shape, -1)),
+        cast(prev_action).reshape((*batch_shape, -1))], -1)
+    x = self.get('img_in', Linear, **self._kw)(x)
+    x = jnp.concatenate([prev_state['deter'], x], -1)
+    if self._bottleneck > 0:
+      kw = {**self._kw, 'units': self._bottleneck}
+      x = self.get('bottleneck', Linear, **kw)(x)
+    kw = {**self._kw, 'act': 'none', 'units': 3 * self._deter}
+    x = self.get('gru', Linear, **kw)(x)
+    reset, cand, update = jnp.split(x, 3, -1)
+    reset = jax.nn.sigmoid(reset)
+    cand = jnp.tanh(reset * cand)
+    update = jax.nn.sigmoid(update - 1)
+    deter = update * cand + (1 - update) * prev_state['deter']
+    return deter
+
+  def _stats(self, name, x):
+    x = self.get(name, Linear, self._stoch * self._classes)(x)
+    logit = x.reshape(x.shape[:-1] + (self._stoch, self._classes))
+    if self._unimix:
+      probs = jax.nn.softmax(logit, -1)
+      uniform = jnp.ones_like(probs) / probs.shape[-1]
+      probs = (1 - self._unimix) * probs + self._unimix * uniform
+      logit = jnp.log(probs)
+    return {'logit': logit}
+
+
+class EarlyRSSM(nj.Module):
+
+  def __init__(
+      self, deter=1024, stoch=32, classes=32, unroll=False,
+      unimix=0.01, action_clip=1.0, bottleneck=-1, prior_layers=3, **kw):
+    self._deter = deter
+    self._stoch = stoch
+    self._classes = classes
+    self._unroll = unroll
+    self._unimix = unimix
+    self._action_clip = action_clip
+    self._bottleneck = bottleneck
+    self._prior_layers = prior_layers
+    self._kw = kw
+
+  def initial(self, batch_size):
+    deter = self.get('initial', jnp.zeros, [self._deter], f32)
+    state = dict(
+        deter=jnp.repeat(jnp.tanh(deter)[None], batch_size, 0),
+        logit=jnp.zeros([batch_size, self._stoch, self._classes], f32),
+        stoch=jnp.zeros([batch_size, self._stoch, self._classes], f32))
+    return cast(state)
+
+  def observe(self, embed, action, is_first, state=None):
+    state = state or self.initial(action.shape[0])
+    swap = lambda x: x.transpose([1, 0] + list(range(2, len(x.shape))))
+    step = lambda prev, inputs: self.obs_step(prev, *inputs)
+    inputs = swap(action), swap(embed), swap(is_first)
+    post = jaxutils.scan(step, inputs, state, self._unroll)
+    post = {k: swap(v) for k, v in post.items()}
+    return post
+
+  def imagine(self, action, state=None):
+    state = state or self.initial(action.shape[0])
+    swap = lambda x: x.transpose([1, 0] + list(range(2, len(x.shape))))
+    action = swap(action)
+    prior = jaxutils.scan(self.img_step, action, state, self._unroll)
+    prior = {k: swap(v) for k, v in prior.items()}
+    return prior
+
+  def obs_step(self, prev_state, prev_action, embed, is_first):
+    x = jnp.concatenate([prev_state['deter'], prev_action, embed], -1)
+    x = self.get('obs_out', Linear, **self._kw)(x)
+    stats = self._stats('obs_stats', x)
+    stoch = self.get_dist(stats).sample(seed=nj.rng())
+    deter = self._gru(prev_state, prev_action, stoch, is_first)
+    post = {'deter': deter, 'stoch': stoch, **stats}
+    return cast(post)
+
+  def img_step(self, prev_state, prev_action):
+    prior = self._prior(prev_state, prev_action, sample=True)
+    deter = self._gru(prev_state, prev_action, prior['stoch'])
+    post = {'deter': deter, **prior}
+    return cast(post)
+
+  def get_dist(self, stats):
+    logit = stats['logit'].astype(f32)
+    return tfd.Independent(jaxutils.OneHotDist(logit), 1)
+
+  def loss(self, post, prev_action, free=1.0):
+    prior = self._prior(post, prev_action, sample=False)
+    dyn = self.get_dist(sg(post)).kl_divergence(self.get_dist(prior))
+    rep = self.get_dist(post).kl_divergence(self.get_dist(sg(prior)))
+    if free:
+      dyn = jnp.maximum(dyn, free)
+      rep = jnp.maximum(rep, free)
+    return {'dyn': dyn, 'rep': rep}, prior
+
+  def _prior(self, prev_state, prev_action, sample):
+    x = jnp.concatenate([prev_state['deter'], prev_action], -1)
+    for i in range(self._prior_layers):
+      x = self.get(f'prior{i}', Linear, **self._kw)(x)
+    stats = self._stats('img_stats', x)
+    stoch = self.get_dist(stats).sample(seed=nj.rng()) if sample else None
+    return cast({'stoch': stoch, **stats})
+
+  def _gru(self, prev_state, prev_action, stoch, is_first=None):
+    prev_action = cast(prev_action)
+    if self._action_clip > 0.0:
+      prev_action *= sg(self._action_clip / jnp.maximum(
+          self._action_clip, jnp.abs(prev_action)))
+    if is_first is not None:
+      prev_state, prev_action = tree_map(
+          lambda prev, init: jaxutils.switch(is_first, init, prev),
+          (prev_state, prev_action),
+          (self.initial(len(is_first)), jnp.zeros_like(prev_action)))
+    batch_shape = prev_state['deter'].shape[:-1]
+    x = jnp.concatenate([
+        prev_state['stoch'].reshape((*batch_shape, -1)),
+        cast(prev_action).reshape((*batch_shape, -1)),
+        cast(stoch).reshape((*batch_shape, -1))], -1)
+    x = self.get('img_in', Linear, **self._kw)(x)
+    x = jnp.concatenate([prev_state['deter'], x], -1)
+    if self._bottleneck > 0:
+      kw = {**self._kw, 'units': self._bottleneck}
+      x = self.get('bottleneck', Linear, **kw)(x)
+    kw = {**self._kw, 'act': 'none', 'units': 3 * self._deter}
+    x = self.get('gru', Linear, **kw)(x)
+    reset, cand, update = jnp.split(x, 3, -1)
+    reset = jax.nn.sigmoid(reset)
+    cand = jnp.tanh(reset * cand)
+    update = jax.nn.sigmoid(update - 1)
+    deter = update * cand + (1 - update) * prev_state['deter']
+    return deter
+
+  def _stats(self, name, x):
+    x = self.get(name, Linear, self._stoch * self._classes)(x)
+    logit = x.reshape(x.shape[:-1] + (self._stoch, self._classes))
+    if self._unimix:
+      probs = jax.nn.softmax(logit, -1)
+      uniform = jnp.ones_like(probs) / probs.shape[-1]
+      probs = (1 - self._unimix) * probs + self._unimix * uniform
+      logit = jnp.log(probs)
+    return {'logit': logit}
+
+
 class MultiEncoder(nj.Module):
 
   def __init__(

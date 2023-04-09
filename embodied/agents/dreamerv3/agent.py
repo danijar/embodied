@@ -113,7 +113,20 @@ class WorldModel(nj.Module):
     shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
     shapes = {k: v for k, v in shapes.items() if not k.startswith('log_')}
     self.encoder = nets.MultiEncoder(shapes, **config.encoder, name='enc')
-    self.rssm = nets.RSSM(**config.rssm, name='rssm')
+
+    if config.rssm_type == 'rssm':
+      self.rssm = nets.RSSM(**config.rssm, name='rssm')
+    elif config.rssm_type == 'simple':
+      kw = dict(config.rssm)
+      [kw.pop(key) for key in ('impl', 'maskgit')]
+      self.rssm = nets.SimpleRSSM(**kw, name='rssm')
+    elif config.rssm_type == 'early':
+      kw = dict(config.rssm)
+      [kw.pop(key) for key in ('impl', 'maskgit')]
+      self.rssm = nets.EarlyRSSM(**kw, name='rssm')
+    else:
+      raise NotImplementedError(config.rssm_type)
+
     self.heads = {
         'decoder': nets.MultiDecoder(shapes, **config.decoder, name='dec'),
         'reward': nets.MLP((), **config.reward_head, name='rew'),
@@ -151,7 +164,12 @@ class WorldModel(nj.Module):
       out = out if isinstance(out, dict) else {name: out}
       dists.update(out)
     losses = {}
-    rssm_losses, prior = self.rssm.loss(post, **self.config.rssm_loss)
+    if self.config.rssm_type == 'early':
+      rssm_losses, prior = self.rssm.loss(
+          post, prev_actions, **self.config.rssm_loss)
+    else:
+      rssm_losses, prior = self.rssm.loss(
+          post, **self.config.rssm_loss)
     losses.update(rssm_losses)
     for key, dist in dists.items():
       loss = -dist.log_prob(data[key].astype(jnp.float32))
