@@ -37,14 +37,18 @@ class Space:
     return self._discrete
 
   def __repr__(self):
+    low = None if self.low is None else self.low.min()
+    high = None if self.high is None else self.high.min()
     return (
         f'Space(dtype={self.dtype.name}, '
         f'shape={self.shape}, '
-        f'low={self.low.min()}, '
-        f'high={self.high.max()})')
+        f'low={low}, '
+        f'high={high})')
 
   def __contains__(self, value):
     value = np.asarray(value)
+    if np.issubdtype(self.dtype, str):
+      return np.issubdtype(value.dtype, str)
     if value.shape != self.shape:
       return False
     if (value > self.high).any():
@@ -63,6 +67,9 @@ class Space:
     return self._random.uniform(low, high, self.shape).astype(self.dtype)
 
   def _infer_low(self, dtype, shape, low, high):
+    if np.issubdtype(dtype, str):
+      assert low is None, low
+      return None
     if low is not None:
       try:
         return np.broadcast_to(low, shape)
@@ -78,6 +85,9 @@ class Space:
       raise ValueError('Cannot infer low bound from shape and dtype.')
 
   def _infer_high(self, dtype, shape, low, high):
+    if np.issubdtype(dtype, str):
+      assert high is None, high
+      return None
     if high is not None:
       try:
         return np.broadcast_to(high, shape)

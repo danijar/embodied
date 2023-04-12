@@ -1,6 +1,8 @@
 import concurrent.futures
 import os
+from functools import partial as bind
 
+import chex
 import embodied
 import jax
 import jax.numpy as jnp
@@ -72,7 +74,11 @@ class JAXAgent(embodied.Agent):
           np.asarray, state, is_leaf=lambda x: isinstance(x, list))
       state = self._convert_inps(state, self.policy_devices)
 
-    (outs, state), _ = self._policy(varibs, rng, obs, state, mode=mode)
+    if self.config.debug_nans:
+      policy = self._policy[mode]
+      (outs, state), _ = policy(varibs, rng, obs, state)
+    else:
+      (outs, state), _ = self._policy(varibs, rng, obs, state, mode=mode)
     if not self.single_device:
       if self.sync_promise and self.sync_promise.done():
         self.policy_varibs = self.sync_promise.result()
@@ -195,7 +201,7 @@ class JAXAgent(embodied.Agent):
       os.environ['XLA_FLAGS'] = ' '.join(xla_flags)
     jax.config.update('jax_platform_name', self.config.platform)
     jax.config.update('jax_disable_jit', not self.config.jit)
-    jax.config.update('jax_debug_nans', self.config.debug_nans)
+    # jax.config.update('jax_debug_nans', self.config.debug_nans)
     if self.config.transfer_guard:
       jax.config.update('jax_transfer_guard', 'disallow')
     if self.config.platform == 'cpu':
@@ -226,6 +232,24 @@ class JAXAgent(embodied.Agent):
       kw = dict(devices=self.policy_devices)
       self._init_policy = nj.pmap(self._init_policy, 'i', **kw)
       self._policy = nj.pmap(self._policy, 'i', static=['mode'], **kw)
+
+    if self.config.debug_nans:
+      inner = self._train
+      self._train = chex.chexify(self._train)
+      self._train.inner = inner
+      def policy_train(*a, fn=self._policy, **kw):
+        return fn(*a, **kw, mode='train')
+      def policy_eval(*a, fn=self._policy, **kw):
+        return fn(*a, **kw, mode='eval')
+      def policy_explore(*a, fn=self._policy, **kw):
+        return fn(*a, **kw, mode='explore')
+      from jax.experimental import checkify
+      errors = checkify.float_checks | checkify.user_checks
+      self._policy = {
+          'train': chex.chexify(policy_train, True, errors),
+          'eval': chex.chexify(policy_eval, True, errors),
+          'explore': chex.chexify(policy_explore, True, errors),
+      }
 
   def _convert_inps(self, value, devices, rng=False, block=False):
     if len(devices) == 1:
@@ -276,7 +300,10 @@ class JAXAgent(embodied.Agent):
     data = self._dummy_batch({**obs_space, **act_space}, dims)
     data = self._convert_inps(data, self.train_devices)
     state, varibs = self._init_train(varibs, rng, data['is_first'])
-    varibs = self._train(varibs, rng, data, state, init_only=True)
+    if self.config.debug_nans:
+      varibs = self._train.inner(varibs, rng, data, state, init_only=True)
+    else:
+      varibs = self._train(varibs, rng, data, state, init_only=True)
     # obs = self._dummy_batch(obs_space, (1,))
     # state, varibs = self._init_policy(varibs, rng, obs['is_first'])
     # varibs = self._policy(
@@ -297,7 +324,7 @@ class JAXAgent(embodied.Agent):
     return varibs
 
   def _dummy_batch(self, spaces, batch_dims):
-    spaces = list(spaces.items())
+    spaces = [(k, v) for k, v in spaces.items() if not k.startswith('log_')]
     data = {k: np.zeros(v.shape, v.dtype) for k, v in spaces}
     for dim in reversed(batch_dims):
       data = {k: np.repeat(v[None], dim, axis=0) for k, v in data.items()}
