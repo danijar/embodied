@@ -93,6 +93,38 @@ class NormalizeAction(base.Wrapper):
     return self.env.step({**action, self._key: orig})
 
 
+class OneHotObservation(base.Wrapper):
+
+  def __init__(self, env, key):
+    super().__init__(env)
+    space = env.obs_space[key]
+    assert space.dtype in (np.uint32, np.uint64), space
+    self._count = int(space.high)
+    self._key = key
+
+  @functools.cached_property
+  def obs_space(self):
+    shape = (self._count,)
+    space = spacelib.Space(np.float32, shape, 0, 1)
+    space.sample = functools.partial(self._sample, self._count)
+    space._discrete = True
+    return {**self.env.obs_space, self._key: space}
+
+  def step(self, action):
+    obs = self.env.step(action)
+    onehot = np.zeros(self._count, np.float32)
+    onehot[obs[self._key]] = 1.0
+    obs[self._key] = onehot
+    return obs
+
+  @staticmethod
+  def _sample(count):
+    index = np.random.randint(0, count)
+    sample = np.zeros(count, np.float32)
+    sample[index] = 1.0
+    return sample
+
+
 class OneHotAction(base.Wrapper):
 
   def __init__(self, env, key='action'):
@@ -104,7 +136,7 @@ class OneHotAction(base.Wrapper):
   def act_space(self):
     shape = (self._count,)
     space = spacelib.Space(np.float32, shape, 0, 1)
-    space.sample = functools.partial(self._sample_action, self._count)
+    space.sample = functools.partial(self._sample, self._count)
     space._discrete = True
     return {**self.env.act_space, self._key: space}
 
@@ -117,11 +149,11 @@ class OneHotAction(base.Wrapper):
     return self.env.step({**action, self._key: index})
 
   @staticmethod
-  def _sample_action(count):
+  def _sample(count):
     index = np.random.randint(0, count)
-    action = np.zeros(count, dtype=np.float32)
-    action[index] = 1.0
-    return action
+    sample = np.zeros(count, np.float32)
+    sample[index] = 1.0
+    return sample
 
 
 class ExpandScalars(base.Wrapper):
@@ -256,7 +288,7 @@ class DiscretizeAction(base.Wrapper):
     shape = (self._dims, len(self._values))
     space = spacelib.Space(np.float32, shape, 0, 1)
     space.sample = functools.partial(
-        self._sample_action, self._dims, self._values)
+        self._sample, self._dims, self._values)
     space._discrete = True
     return {**self.env.act_space, self._key: space}
 
@@ -270,7 +302,7 @@ class DiscretizeAction(base.Wrapper):
     return self.env.step({**action, self._key: continuous})
 
   @staticmethod
-  def _sample_action(dims, values):
+  def _sample(dims, values):
     indices = np.random.randint(0, len(values), dims)
     action = np.zeros((dims, len(values)), dtype=np.float32)
     action[np.arange(dims), indices] = 1.0

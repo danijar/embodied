@@ -1,9 +1,11 @@
 import re
+from functools import partial as bind
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from jax.experimental import checkify
 from tensorflow_probability.substrates import jax as tfp
 
 from . import ninjax as nj
@@ -11,11 +13,18 @@ from . import ninjax as nj
 tfd = tfp.distributions
 tree_map = jax.tree_util.tree_map
 sg = lambda x: tree_map(jax.lax.stop_gradient, x)
+f32 = jnp.float32
 COMPUTE_DTYPE = jnp.float32
+ENABLE_CHECKS = False
 
 
 def cast_to_compute(values):
   return tree_map(lambda x: x.astype(COMPUTE_DTYPE), values)
+
+
+def check(predicate, message, **kwargs):
+  if ENABLE_CHECKS:
+    checkify.check(predicate, message, **kwargs)
 
 
 def parallel():
@@ -27,6 +36,7 @@ def parallel():
 
 
 def tensorstats(tensor, prefix=None):
+  assert tensor.size > 0, tensor.shape
   metrics = {
       'mean': tensor.mean(),
       'std': tensor.std(),
@@ -47,38 +57,47 @@ def subsample(values, amount=1024):
   return values
 
 
-def scan(fn, inputs, start, unroll=True, modify=False):
+def scan(fn, inputs, start, unroll=True, axis=0, modify=False):
+  if axis:
+    inputs = tree_map(lambda x: x.swapaxes(0, axis), inputs)
   fn2 = lambda carry, inp: (fn(carry, inp),) * 2
-  if not unroll:
-    return nj.scan(fn2, start, inputs, modify=modify)[1]
-  length = len(jax.tree_util.tree_leaves(inputs)[0])
-  carrydef = jax.tree_util.tree_structure(start)
-  carry = start
-  outs = []
-  for index in range(length):
-    carry, out = fn2(carry, tree_map(lambda x: x[index], inputs))
-    flat, treedef = jax.tree_util.tree_flatten(out)
-    assert treedef == carrydef, (treedef, carrydef)
-    outs.append(flat)
-  outs = [
-      jnp.stack([carry[i] for carry in outs], 0)
-      for i in range(len(outs[0]))]
-  return carrydef.unflatten(outs)
+  if unroll:
+    length = len(jax.tree_util.tree_leaves(inputs)[0])
+    carrydef = jax.tree_util.tree_structure(start)
+    carry = start
+    outs = []
+    for index in range(length):
+      carry, out = fn2(carry, tree_map(lambda x: x[index], inputs))
+      flat, treedef = jax.tree_util.tree_flatten(out)
+      assert treedef == carrydef, (treedef, carrydef)
+      outs.append(flat)
+    outs = [
+        jnp.stack([carry[i] for carry in outs], 0)
+        for i in range(len(outs[0]))]
+    outs = carrydef.unflatten(outs)
+  else:
+    outs = nj.scan(fn2, start, inputs, modify=modify)[1]
+  if axis:
+    outs = tree_map(lambda x: x.swapaxes(0, axis), outs)
+  return outs
 
 
 def symlog(x):
-  return jnp.sign(x) * jnp.log(1 + jnp.abs(x))
+  return jnp.sign(x) * jnp.log1p(jnp.abs(x))
 
 
 def symexp(x):
-  return jnp.sign(x) * (jnp.exp(jnp.abs(x)) - 1)
+  return jnp.sign(x) * jnp.expm1(jnp.abs(x))
 
 
 def switch(pred, lhs, rhs):
-  assert lhs.shape == rhs.shape, (pred.shape, lhs.shape, rhs.shape)
-  while len(pred.shape) < len(lhs.shape):
-    pred = pred[..., None]
-  return jnp.where(pred, lhs, rhs)
+  def fn(lhs, rhs):
+    assert lhs.shape == rhs.shape, (pred.shape, lhs.shape, rhs.shape)
+    mask = pred
+    while len(mask.shape) < len(lhs.shape):
+      mask = mask[..., None]
+    return jnp.where(mask, lhs, rhs)
+  return tree_map(fn, lhs, rhs)
 
 
 class OneHotDist(tfd.OneHotCategorical):
@@ -168,6 +187,8 @@ class TwoHotDist:
 
   def __init__(self, logits, bins, dims=0, transfwd=None, transbwd=None):
     assert logits.shape[-1] == len(bins), (logits.shape, len(bins))
+    assert logits.dtype == f32, logits.dtype
+    assert bins.dtype == f32, bins.dtype
     self.logits = logits
     self.probs = jax.nn.softmax(logits)
     self.dims = tuple([-x for x in range(1, dims + 1)])
@@ -184,6 +205,7 @@ class TwoHotDist:
     return self.transbwd((self.probs * self.bins).sum(-1))
 
   def log_prob(self, x):
+    assert x.dtype == f32, x.dtype
     x = self.transfwd(x)
     below = (self.bins <= x[..., None]).astype(jnp.int32).sum(-1) - 1
     above = len(self.bins) - (
@@ -348,7 +370,7 @@ class Optimizer(nj.Module):
 
   def __init__(
       self, lr, opt='adam', eps=1e-5, clip=100.0, warmup=0, wd=0.0,
-      wd_pattern=r'/(w|kernel)$', lateclip=0.0):
+      wd_pattern=r'/(w|kernel)$', lateclip=0.0, init_grad_scale=1e4):
     assert wd_pattern[0] not in ('0', '1')
     # assert self.path not in self.PARAM_COUNTS
     self.PARAM_COUNTS[self.path] = None
@@ -378,7 +400,7 @@ class Optimizer(nj.Module):
     if self.scaling:
       self.opt = optax.apply_if_finite(self.opt, max_consecutive_errors=1000)
       self.grad_scale = nj.Variable(
-          jnp.array, 1e4, jnp.float32, name='grad_scale')
+          jnp.array, init_grad_scale, jnp.float32, name='grad_scale')
       self.good_steps = nj.Variable(
           jnp.array, 0, jnp.int32, name='good_steps')
 
@@ -391,9 +413,12 @@ class Optimizer(nj.Module):
       if self.scaling:
         loss *= sg(self.grad_scale.read())
       return loss, aux
+
     metrics = {}
     loss, params, grads, aux = nj.grad(
         wrapped, modules, has_aux=True)(*args, **kwargs)
+    if not isinstance(modules, (list, tuple)):
+      modules = [modules]
     if not self.PARAM_COUNTS[self.path]:
       count = sum([np.prod(x.shape) for x in params.values()])
       print(f'Optimizer {self.name} has {count:,} variables.')
@@ -401,27 +426,38 @@ class Optimizer(nj.Module):
     if parallel():
       grads = tree_map(lambda x: jax.lax.pmean(x, 'i'), grads)
     if self.scaling:
-      grads = tree_map(lambda x: x / self.grad_scale.read(), grads)
-      finite = self._update_scale(grads)
-      metrics[f'{self.name}_grad_scale'] = self.grad_scale.read()
-      metrics[f'{self.name}_grad_overflow'] = (~finite).astype(jnp.float32)
+      invscale = 1.0 / self.grad_scale.read()
+      grads = tree_map(lambda x: x * invscale, grads)
     optstate = self.get('state', self.opt.init, params)
     updates, optstate = self.opt.update(grads, optstate, params)
     self.put('state', optstate)
     nj.context().update(optax.apply_updates(params, updates))
-    norm = optax.global_norm(grads)
+
+    grad_norm = optax.global_norm(grads)
+    update_norm = optax.global_norm(updates)
+    param_norm = optax.global_norm([x.getm() for x in modules])
+    isfin = jnp.isfinite
     if self.scaling:
-      norm = jnp.where(jnp.isfinite(norm), norm, jnp.nan)
-    self.step.write(self.step.read() + jnp.isfinite(norm).astype(jnp.int32))
+      self._update_scale(grads, jnp.isfinite(grad_norm))
+      metrics['grad_scale'] = self.grad_scale.read()
+      metrics['grad_overflow'] = (~jnp.isfinite(grad_norm)).astype(jnp.float32)
+      grad_norm = jnp.where(jnp.isfinite(grad_norm), grad_norm, jnp.nan)
+      self.step.write(self.step.read() + isfin(grad_norm).astype(jnp.int32))
+    else:
+      check(isfin(grad_norm), f'{self.path} grad norm: {{x}}', x=grad_norm)
+      self.step.write(self.step.read() + 1)
+    check(isfin(update_norm), f'{self.path} updates: {{x}}', x=update_norm)
+    check(isfin(param_norm), f'{self.path} params: {{x}}', x=param_norm)
+
     metrics['loss'] = loss.mean()
-    metrics['grad_norm'] = norm
+    metrics['grad_norm'] = grad_norm
+    metrics['update_norm'] = update_norm
+    metrics['param_norm'] = param_norm
     metrics['grad_steps'] = self.step.read()
     metrics = {f'{self.name}_{k}': v for k, v in metrics.items()}
     return (metrics, aux) if has_aux else metrics
 
-  def _update_scale(self, grads):
-    finite = jnp.array([
-        jnp.isfinite(x).all() for x in jax.tree_util.tree_leaves(grads)]).all()
+  def _update_scale(self, grads, finite):
     keep = (finite & (self.good_steps.read() < 1000))
     incr = (finite & (self.good_steps.read() >= 1000))
     decr = ~finite
@@ -444,6 +480,13 @@ def late_grad_clip(value=1.0):
   return optax.GradientTransformation(init_fn, update_fn)
 
 
+def concat_dict(mapping, batch_shape=None):
+  tensors = [v for _, v in sorted(mapping.items(), key=lambda x: x[0])]
+  if batch_shape is not None:
+    tensors = [x.reshape((*batch_shape, -1)) for x in tensors]
+  return jnp.concatenate(tensors, -1)
+
+
 def tree_keys(params, prefix=''):
   if hasattr(params, 'items'):
     return type(params)({
@@ -455,6 +498,23 @@ def tree_keys(params, prefix=''):
     return prefix
   else:
     raise TypeError(type(params))
+
+
+def transform_with_static(transform, argname):
+  def new_transform(fn, *args, **kwargs):
+    cache = {}
+    def new_function(*args2, **kwargs2):
+      value = kwargs2.pop(argname, '_default')
+      if value not in cache:
+        if value == '_default':
+          specialized = fn
+        else:
+          specialized = bind(fn, **{argname: value})
+          specialized.__name__ = fn.__name__
+        cache[value] = transform(specialized, *args, **kwargs)
+      return cache[value](*args2, **kwargs2)
+    return new_function
+  return new_transform
 
 
 class SlowUpdater:

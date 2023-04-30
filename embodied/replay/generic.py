@@ -31,7 +31,7 @@ class Generic:
       self.online_stride = length
       self.online_counters = defaultdict(int)
     self.saver = directory and saver.Saver(directory, chunks)
-    self.itemsize = 0
+    # self.itemsize = 0
     self.metrics = {
         'samples': 0,
         'sample_wait_dur': 0,
@@ -51,7 +51,7 @@ class Generic:
     m = self.metrics
     stats = {
         'size': len(self),
-        'ram_gb': len(self) * self.itemsize / (1024 ** 3),
+        # 'ram_gb': len(self) * self.itemsize / (1024 ** 3),
         'inserts': m['inserts'],
         'samples': m['samples'],
         'insert_wait_avg': ratio(m['insert_wait_dur'], m['inserts']),
@@ -68,8 +68,8 @@ class Generic:
     step['id'] = np.asarray(embodied.uuid(step.get('id')))
     stream = self.streams[worker]
     stream.append(step)
-    if self.itemsize == 0:
-      self.itemsize = sum(x.nbytes for x in step.values())
+    # if self.itemsize == 0:
+    #   self.itemsize = sum(x.nbytes for x in step.values())
     self.saver and self.saver.add(step, worker)
     self.counters[worker] += 1
     if self.online:

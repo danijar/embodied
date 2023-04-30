@@ -18,6 +18,7 @@ sys.path.append(str(directory.parent.parent.parent))
 __package__ = directory.name
 
 import embodied
+import numpy as np
 from embodied import wrappers
 
 
@@ -129,7 +130,7 @@ def make_logger(parsed, logdir, step, config):
       embodied.logger.TerminalOutput(config.filter),
       embodied.logger.JSONLOutput(logdir, 'metrics.jsonl'),
       embodied.logger.JSONLOutput(logdir, 'scores.jsonl', 'episode/score'),
-      embodied.logger.TensorBoardOutput(logdir),
+      embodied.logger.TensorBoardOutput(logdir, config.run.log_video_fps),
   ], multiplier)
   return logger
 
@@ -159,7 +160,7 @@ def wrapped_env(config, batch, **overrides):
   ctor = bind(make_env, config, **overrides)
   if batch and config.envs.parallel != 'none':
     ctor = bind(embodied.Parallel, ctor, config.envs.parallel)
-  if config.envs.restart:
+  if config.envs.restarts:
     ctor = bind(wrappers.RestartOnException, ctor)
   if batch:
     envs = [ctor() for _ in range(config.envs.amount)]
@@ -183,9 +184,7 @@ def make_env(config, **overrides):
       'minecraft': 'embodied.envs.minecraft:Minecraft',
       'loconav': 'embodied.envs.loconav:LocoNav',
       'pinpad': 'embodied.envs.pinpad:PinPad',
-      # TODO
-      'procgen': lambda task, **kw: from_gym.FromGym(
-          f'procgen:procgen-{task}-v0', **kw),
+      'langroom': 'embodied.envs.langroom:LangRoom',
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
@@ -199,6 +198,11 @@ def make_env(config, **overrides):
 
 def wrap_env(env, config):
   args = config.wrapper
+  for name, space in env.obs_space.items():
+    if name.startswith('log_'):
+      continue
+    if space.dtype in (np.uint32, np.uint64):
+      env = wrappers.OneHotObservation(env, name)
   for name, space in env.act_space.items():
     if name == 'reset':
       continue

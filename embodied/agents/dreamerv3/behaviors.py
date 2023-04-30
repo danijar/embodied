@@ -14,12 +14,17 @@ class Greedy(nj.Module):
 
   def __init__(self, wm, act_space, config):
     rewfn = lambda s: wm.heads['reward'](s).mean()[1:]
+    rewfn = lambda s, f=rewfn: f(s) * config.reward_scales.extr
     if config.critic_type == 'vfunction':
       critics = {'extr': agent.VFunction(rewfn, config, name='critic')}
     else:
       raise NotImplementedError(config.critic_type)
+    act_priors = None
+    if config.talk_prior:
+      act_priors = {
+          'talk': lambda s: wm.heads['decoder'](s, cnn=False)['text']}
     self.ac = agent.ImagActorCritic(
-        critics, {'extr': 1.0}, act_space, config, name='ac')
+        critics, {'extr': 1.0}, act_space, config, act_priors, name='ac')
 
   def initial(self, batch_size):
     return self.ac.initial(batch_size)
@@ -76,10 +81,12 @@ class Explore(nj.Module):
         continue
       if key == 'extr':
         rewfn = lambda s: wm.heads['reward'](s).mean()[1:]
+        rewfn = lambda s, f=rewfn: f(s) * config.reward_scales.extr
         critics[key] = agent.VFunction(rewfn, config, name=key)
       else:
         rewfn = self.REWARDS[key](
             wm, act_space, config, name=key + '_reward')
+        rewfn = lambda s, f=rewfn: f(s) * config.reward_scales[key]
         critics[key] = agent.VFunction(rewfn, config, name=key)
         self.rewards[key] = rewfn
     scales = {k: v for k, v in config.expl_rewards.items() if v}

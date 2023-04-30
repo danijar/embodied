@@ -53,6 +53,19 @@ class Client:
     self.once = True
 
   def _resolve(self, address):
+    if address.startswith('/bns/'):
+      assert self.ipv6, (address, self.ipv6)
+      self._print(f'BNS address detected: {address}')
+      from google3.chubby.python.public import pychubbyutil
+      while True:
+        try:
+          address, port = pychubbyutil.ResolveBNSName(address)
+          break
+        except pychubbyutil.NoResultsError:
+          self._print('BNS address not found, retrying.')
+          time.sleep(10)
+      address = f'[{address}]:{port}'
+      self._print(f'BNS address resolved to: {address}')
     return f'tcp://{address}'
 
   def _receive(self):

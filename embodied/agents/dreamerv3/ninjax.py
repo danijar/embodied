@@ -62,6 +62,7 @@ def pure(fun, nested=False):
   state in and out. The result is a pure function that is composable with JAX
   transformation. The pure function can be used as follows:
   `out, state = fun(state, rng, *args, **kwargs)`."""
+  @functools.wraps(fun)
   def purified(
       state, rng, *args, create=None, modify=None, ignore=None, **kwargs):
     context = CONTEXT.get(threading.get_ident(), None)
@@ -88,8 +89,8 @@ def pure(fun, nested=False):
     before = context
     try:
       name = fun.__name__
-      if rng.shape == ():
-        rng = jax.random.PRNGKey(rng)
+      # if rng.shape == ():
+      #   rng = jnp.stack([0, rng], -1)
       context = Context(state.copy(), rng, create, modify, ignore, [], name)
       CONTEXT[threading.get_ident()] = context
       out = fun(*args, **kwargs)

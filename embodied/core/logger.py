@@ -240,6 +240,7 @@ class TensorBoardOutput(AsyncOutput):
     import tensorflow as tf
     import tensorflow.compat.v1 as tf1
     name = name if isinstance(name, str) else name.decode('utf-8')
+    assert video.dtype in (np.float32, np.uint8), (video.shape, video.dtype)
     if np.issubdtype(video.dtype, np.floating):
       video = np.clip(255 * video, 0, 255).astype(np.uint8)
     try:
@@ -331,6 +332,23 @@ class MLFlowOutput:
     else:
       tags = {'resume_id': resume_id or ''}
       self._mlflow.start_run(run_name=run_name, tags=tags)
+
+
+class XDataOutput:
+
+  def __init__(self, dataframe='results'):
+    from google3.learning.deepmind.xdata import xdata
+    self._writer = xdata.bt.writer(
+        xdata.get_auto_data_id(), dataframe, stateless=True)
+
+  def __call__(self, summaries):
+    bystep = collections.defaultdict(dict)
+    for step, name, value in summaries:
+      if len(value.shape) == 4:
+        continue  # Videos are not supported.
+      bystep[step][name] = value
+    for step, metrics in bystep.items():
+      self._writer.write({'step': step, **metrics})
 
 
 def _encode_gif(frames, fps):

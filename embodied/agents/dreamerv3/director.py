@@ -32,25 +32,29 @@ class Director(nj.Module):
     self.wm = wm
     self.config = config
     self.extr_reward = lambda s: wm.heads['reward'](s).mean()[1:]
+    self.act_space = act_space
     VF = agent.VFunction
 
     wconfig = config.update({
         'actor.inputs': self.config.worker_inputs,
         'critic.inputs': self.config.worker_inputs,
+        'actent': self.config.worker_actent,
     })
     self.worker = agent.ImagActorCritic({
-        'extr': VF(lambda s: s['reward_extr'], wconfig, name='extr_v'),
-        'expl': VF(lambda s: s['reward_expl'], wconfig, name='expl_v'),
-        'goal': VF(lambda s: s['reward_goal'], wconfig, name='goal_v'),
+        'extr': VF(lambda s: s['reward_extr'], wconfig, name='w_extr_v'),
+        'expl': VF(lambda s: s['reward_expl'], wconfig, name='w_expl_v'),
+        'goal': VF(lambda s: s['reward_goal'], wconfig, name='w_goal_v'),
     }, config.worker_rews, act_space, wconfig, name='worker')
 
-    skill_space = embodied.Space(np.int32, config.skill_shape)
-    mconfig = config.update({})
+    mgr_act_space = {'skill': embodied.Space(np.int32, config.skill_shape)}
+    mconfig = config.update({
+        'actent': self.config.manager_actent,
+    })
     self.manager = agent.ImagActorCritic({
-        'extr': VF(lambda s: s['reward_extr'], mconfig, name='extr_v'),
-        'expl': VF(lambda s: s['reward_expl'], mconfig, name='expl_v'),
-        'goal': VF(lambda s: s['reward_goal'], mconfig, name='goal_v'),
-    }, config.manager_rews, skill_space, mconfig, name='manager')
+        'extr': VF(lambda s: s['reward_extr'], mconfig, name='m_extr_v'),
+        'expl': VF(lambda s: s['reward_expl'], mconfig, name='m_expl_v'),
+        'goal': VF(lambda s: s['reward_goal'], mconfig, name='m_goal_v'),
+    }, config.manager_rews, mgr_act_space, mconfig, name='manager')
 
     self.goal_shape = (config.rssm.deter,)
     self.goal_feat = nets.Input(['deter'])
@@ -76,14 +80,14 @@ class Director(nj.Module):
         self.config.env_skill_duration)
     skill = sg(jaxutils.switch(
         carry['step'] % duration == 0,
-        self.manager.actor(latent).sample(seed=nj.rng()),
+        self.manager.actor(latent)['skill'].sample(seed=nj.rng()),
         carry['skill']))
     goal = sg(jaxutils.switch(
         carry['step'] % duration == 0,
         self.dec({**latent, 'skill': skill}).mode(),
         carry['goal']))
     dist = self.worker.actor(sg({**latent, 'goal': goal}))
-    outs = {'action': dist.sample(seed=nj.rng())}
+    outs = {k: v.sample(seed=nj.rng()) for k, v in dist.items()}
     # TODO: Visualization
     # if 'image' in self.wm.heads['decoder'].shapes:
     #   outs['log_goal'] = self.wm.heads['decoder']({
@@ -132,9 +136,10 @@ class Director(nj.Module):
       traj = imagine(
           bind(self.policy, imag=True), start, self.config.imag_horizon,
           carry=self.initial(len(start['is_first'])))
-      traj['reward_extr'] = self.extr_reward(traj)
-      traj['reward_expl'] = self.expl_reward(traj)
-      traj['reward_goal'] = self.goal_reward(traj)
+      scales = self.config.reward_scales
+      traj['reward_extr'] = self.extr_reward(traj) * scales.extr
+      traj['reward_expl'] = self.expl_reward(traj) * scales.expl
+      traj['reward_goal'] = self.goal_reward(traj) * scales.goal
       wtraj = self.split_traj(traj)
       mtraj = self.abstract_traj(traj)
       wloss, wmets = self.worker.loss(wtraj)
@@ -218,7 +223,7 @@ class Director(nj.Module):
       feat = self.goal_feat(start).astype(f32)
       return jax.random.permutation(nj.rng(), feat).astype(f32)
     if impl == 'manager':
-      skill = self.manager.actor(start).sample(seed=nj.rng())
+      skill = self.manager.actor(start)['skill'].sample(seed=nj.rng())
       return self.dec({**start, 'skill': skill}).mode()
     if impl == 'prior':
       skill = self.prior.sample(len(start['is_terminal']), seed=nj.rng())
@@ -257,7 +262,7 @@ class Director(nj.Module):
 
   def abstract_traj(self, traj):
     traj = traj.copy()
-    traj['action'] = traj.pop('skill')
+    # traj['action'] = traj.pop('skill')
     k = self.config.train_skill_duration
     reshape = lambda x: x.reshape((x.shape[0] // k, k, *x.shape[1:]))
     w = jnp.cumprod(reshape(traj['cont']), 1)
@@ -284,7 +289,10 @@ class Director(nj.Module):
     # Prepare initial state.
     decoder = self.wm.heads['decoder']
     states = self.wm.rssm.observe(
-        self.wm.encoder(data)[:6], data['action'][:6], data['is_first'][:6])
+        self.wm.encoder(data)[:6],
+        {k: data[k][:6] for k in self.act_space},
+        data['is_first'][:6],
+        self.wm.rssm.initial(len(data['is_first'][:6])))
     start = {k: v[:, 4] for k, v in states.items()}
     start['is_terminal'] = data['is_terminal'][:6, 4]
     goal = self.propose_goal(start, impl)
@@ -300,7 +308,7 @@ class Director(nj.Module):
     # Stich together into videos.
     videos = {}
     for k in rollout.keys():
-      if k not in decoder.cnn_shapes:
+      if k not in decoder.cnn_keys:
         continue
       length = 1 + self.config.worker_report_horizon
       rows = []
