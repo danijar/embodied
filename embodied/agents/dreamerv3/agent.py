@@ -225,13 +225,6 @@ class WorldModel(nj.Module):
   def imagine(self, policy, start, horizon, carry=None):
     carry = carry or {}
 
-    # print('-' * 79)
-    # print({k: v.shape for k, v in start.items()})
-    # # carry = self.initial(len(list(start.values())[0]))
-    # print('-' * 79)
-    # print(list(self.rssm.initial(1).keys()))
-    # import sys; sys.exit()
-
     state_keys = list(self.rssm.initial(1).keys())
     state = {k: v for k, v in start.items() if k in state_keys}
 

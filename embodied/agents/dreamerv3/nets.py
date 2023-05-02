@@ -256,9 +256,10 @@ class MultiEncoder(nj.Module):
     for key, space in spaces.items():
       if key in ('is_first', 'is_last', 'is_terminal'):
         continue
-      if len(space.shape) in (1, 2) and re.match(mlp_keys, key):
+      dims = len(space.shape) + bool(space.dtype in (np.uint32, np.uint64))
+      if dims in (1, 2) and re.match(mlp_keys, key):
         self.mlp_keys.append(key)
-      if len(space.shape) == 3 and re.match(cnn_keys, key):
+      if dims == 3 and re.match(cnn_keys, key):
         self.cnn_keys.append(key)
     print('Encoder CNN shapes:', {k: spaces[k].shape for k in self.cnn_keys})
     print('Encoder MLP shapes:', {k: spaces[k].shape for k in self.mlp_keys})
@@ -278,21 +279,22 @@ class MultiEncoder(nj.Module):
   def __call__(self, data, batchdims=2):
     assert len(data['is_first'].shape) == batchdims
     data = data.copy()
-    outputs = []
     for key, space in self.spaces.items():
-      if np.issubdtype(space.dtype, np.signedinteger):
-        assert space.low == 0
+      if space.dtype in (np.uint32, np.uint64):
+        assert space.shape == () and (space.low == 0).all(), space
         data[key] = jax.nn.one_hot(data[key], space.high)
+    outputs = []
     if self.cnn_keys:
-      feat = self._cnn_input(data, batchdims, jaxutils.COMPUTE_DTYPE)
-      x = feat.reshape((-1, *feat.shape[batchdims:]))
+      x = self._cnn_input(data, batchdims, jaxutils.COMPUTE_DTYPE)
+      x = x.reshape((-1, *x.shape[batchdims:]))
       x = self._cnn(x)
       outputs.append(x)
     if self.mlp_keys:
-      feat = self._mlp_input(data, batchdims, f32)
+      x = self._mlp_input(data, batchdims, f32)
+      x = x.reshape((-1, *x.shape[batchdims:]))
       x = jaxutils.symlog(x) if self._symlog else x
       x = jaxutils.cast_to_compute(x)
-      x = self._mlp(x)
+      x = self._mlp(x, batchdims=1)
       outputs.append(x)
     x = jnp.concatenate(outputs, -1)
     x = x.reshape((*data['is_first'].shape, -1))
@@ -312,9 +314,10 @@ class MultiDecoder(nj.Module):
     for key, space in spaces.items():
       if key in ('is_first', 'is_last', 'is_terminal', 'reward'):
         continue
-      if len(space.shape) in (1, 2) and re.match(mlp_keys, key):
+      dims = len(space.shape) + bool(space.dtype in (np.uint32, np.uint64))
+      if dims in (1, 2) and re.match(mlp_keys, key):
         self.mlp_keys.append(key)
-      if len(space.shape) == 3 and re.match(cnn_keys, key):
+      if dims == 3 and re.match(cnn_keys, key):
         self.cnn_keys.append(key)
     print('Decoder CNN shapes:', {k: spaces[k].shape for k in self.cnn_keys})
     print('Decoder MLP shapes:', {k: spaces[k].shape for k in self.mlp_keys})
@@ -337,7 +340,7 @@ class MultiDecoder(nj.Module):
         if space.discrete and space.dtype == np.float32:
           dists[key] = 'onehot'
         elif space.discrete:
-          dists[key] = 'softmax'
+          dists[key] = f'softmax{space.high}'
         else:
           dists[key] = mlp_dist
       self._mlp = MLP(
@@ -535,8 +538,12 @@ class Dist(nj.Module):
     kw['outscale'] = self._outscale
     kw['outnorm'] = self._outnorm
     shape = self._shape
+
     if self._dist.endswith('_twohot'):
       shape = (*self._shape, self._bins)
+    if self._dist.startswith('softmax'):
+      classes = int(self._dist[len('softmax'):])
+      shape = (*self._shape, classes)
 
     out = self.get('out', Linear, int(np.prod(shape)), **kw)(inputs)
     out = out.reshape(inputs.shape[:-1] + shape).astype(f32)
@@ -574,6 +581,11 @@ class Dist(nj.Module):
       if self._shape:
         dist = tfd.Independent(dist, len(self._shape))
       return dist
+    if self._dist.startswith('softmax'):
+      dist = tfd.Categorical(out)
+      if len(self._shape) > 1:
+        dist = tfd.Independent(dist, len(self._shape) - 1)
+      return dist
     if self._dist == 'onehot':
       if self._unimix:
         probs = jax.nn.softmax(out, -1)
@@ -584,7 +596,7 @@ class Dist(nj.Module):
       if len(self._shape) > 1:
         dist = tfd.Independent(dist, len(self._shape) - 1)
       dist.minent = 0.0
-      dist.maxent = np.prod(self._shape[:-1]) * jnp.log(self._shape[-1])
+      dist.maxent = np.prod(self._shape[:-1]) * np.log(self._shape[-1])
       return dist
     raise NotImplementedError(self._dist)
 

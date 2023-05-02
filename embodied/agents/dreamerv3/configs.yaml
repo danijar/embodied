@@ -239,6 +239,8 @@ langroom:
   task: langroom_talk
   run.log_keys_video: [image, log_image]
   run.log_video_fps: 5
+  encoder: {mlp_keys: 'text', cnn_keys: 'image'}
+  decoder: {mlp_keys: 'text', cnn_keys: 'image'}
 
 small:
   rssm.deter: 512
