@@ -40,18 +40,16 @@ def Wrapper(agent_cls):
 class JAXAgent(embodied.Agent):
 
   def __init__(self, agent_cls, obs_space, act_space, step, config):
-    self.config = config.jax
-    self.batch_size = config.batch_size
-    self.batch_length = config.batch_length
-    self.data_loaders = config.data_loaders
+    self.config = config
+    self.jaxcfg = config.jax
     self.logdir = embodied.Path(config.logdir)
     self._setup()
     self.agent = agent_cls(obs_space, act_space, step, config, name='agent')
     self.rng = np.random.default_rng(config.seed)
 
-    available = jax.devices(self.config.platform)
-    self.policy_devices = [available[i] for i in self.config.policy_devices]
-    self.train_devices = [available[i] for i in self.config.train_devices]
+    available = jax.devices(self.jaxcfg.platform)
+    self.policy_devices = [available[i] for i in self.jaxcfg.policy_devices]
+    self.train_devices = [available[i] for i in self.jaxcfg.train_devices]
     self.single_device = (self.policy_devices == self.train_devices) and (
         len(self.policy_devices) == 1)
     print(f'JAX devices ({jax.local_device_count()}):', available)
@@ -70,7 +68,7 @@ class JAXAgent(embodied.Agent):
     self.mets_promise = None
     self.sync_promise = None
 
-    self.should_sync = embodied.when.Every(self.config.sync_every)
+    self.should_sync = embodied.when.Every(self.jaxcfg.sync_every)
     if not self.single_device:
       self.policy_varibs = self._copy_varibs(self.varibs)
 
@@ -139,7 +137,7 @@ class JAXAgent(embodied.Agent):
       # for name, count in jaxutils.Optimizer.PARAM_COUNTS.items():
       #   return_mets[f'params_{name}'] = float(count)
 
-    if self.config.profiler:
+    if self.jaxcfg.profiler:
       outdir, copyto = self.logdir, None
       if str(outdir).startswith(('gs://', '/gcs/')):
         copyto = outdir
@@ -170,8 +168,8 @@ class JAXAgent(embodied.Agent):
 
   def dataset(self, generator):
     batcher = embodied.Batcher(
-        sources=[generator] * self.batch_size,
-        workers=self.data_loaders,
+        sources=[generator] * self.config.batch_size,
+        workers=self.config.data_loaders,
         postprocess=lambda x: {
             **self._convert_inps(x, self.train_devices),
             'rng': self._next_rngs(self.train_devices)},
@@ -201,23 +199,23 @@ class JAXAgent(embodied.Agent):
       tf.config.set_visible_devices([], 'TPU')
     except Exception as e:
       print('Could not disable TensorFlow devices:', e)
-    if not self.config.prealloc:
+    if not self.jaxcfg.prealloc:
       os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.8'
     xla_flags = []
-    if self.config.logical_cpus:
-      count = self.config.logical_cpus
+    if self.jaxcfg.logical_cpus:
+      count = self.jaxcfg.logical_cpus
       xla_flags.append(f'--xla_force_host_platform_device_count={count}')
     if xla_flags:
       os.environ['XLA_FLAGS'] = ' '.join(xla_flags)
-    jax.config.update('jax_platform_name', self.config.platform)
-    jax.config.update('jax_disable_jit', not self.config.jit)
-    # jax.config.update('jax_debug_nans', self.config.debug_nans)
-    if self.config.transfer_guard:
+    jax.config.update('jax_platform_name', self.jaxcfg.platform)
+    jax.config.update('jax_disable_jit', not self.jaxcfg.jit)
+    # jax.config.update('jax_debug_nans', self.jaxcfg.debug_nans)
+    if self.jaxcfg.transfer_guard:
       jax.config.update('jax_transfer_guard', 'disallow')
-    if self.config.platform == 'cpu':
-      jax.config.update('jax_disable_most_optimizations', self.config.debug)
-    jaxutils.COMPUTE_DTYPE = getattr(jnp, self.config.precision)
+    if self.jaxcfg.platform == 'cpu':
+      jax.config.update('jax_disable_most_optimizations', self.jaxcfg.debug)
+    jaxutils.COMPUTE_DTYPE = getattr(jnp, self.jaxcfg.precision)
 
   def _transform(self):
     self._init_policy = nj.pure(lambda x: self.agent.policy_initial(len(x)))
@@ -243,7 +241,8 @@ class JAXAgent(embodied.Agent):
       kw = dict(devices=self.policy_devices)
       self._init_policy = nj.pmap(self._init_policy, 'i', **kw)
       self._policy = nj.pmap(self._policy, 'i', static=['mode'], **kw)
-    if self.config.checks:
+    if self.jaxcfg.checks:
+      assert self.config.run.actor_batch == 1, 'chex is not thread-safe'
       jaxutils.ENABLE_CHECKS = True
       self._policy = jaxutils.transform_with_static(
           self._checkify, 'mode')(self._policy)
@@ -312,7 +311,7 @@ class JAXAgent(embodied.Agent):
   def _init_varibs(self, obs_space, act_space):
     varibs = {}
     rng = self._next_rngs(self.train_devices, mirror=True)
-    dims = (self.batch_size, self.batch_length)
+    dims = (self.config.batch_size, self.config.batch_length)
     data = self._dummy_batch({**obs_space, **act_space}, dims)
     data = self._convert_inps(data, self.train_devices)
     state, varibs = self._init_train(varibs, rng, data['is_first'])

@@ -277,7 +277,12 @@ class MultiEncoder(nj.Module):
 
   def __call__(self, data, batchdims=2):
     assert len(data['is_first'].shape) == batchdims
+    data = data.copy()
     outputs = []
+    for key, space in self.spaces.items():
+      if np.issubdtype(space.dtype, np.signedinteger):
+        assert space.low == 0
+        data[key] = jax.nn.one_hot(data[key], space.high)
     if self.cnn_keys:
       feat = self._cnn_input(data, batchdims, jaxutils.COMPUTE_DTYPE)
       x = feat.reshape((-1, *feat.shape[batchdims:]))
@@ -299,7 +304,7 @@ class MultiDecoder(nj.Module):
   def __init__(
       self, spaces, inputs=['tensor'], cnn_keys=r'.*', mlp_keys=r'.*',
       mlp_layers=4, mlp_units=512, cnn='resize', cnn_depth=48, cnn_blocks=2,
-      image_dist='mse', vector_dist='mse', resize='stride', bins=255,
+      cnn_dist='mse', mlp_dist='mse', resize='stride', bins=255,
       outscale=1.0, minres=4, cnn_sigmoid=False, **kw):
     self.spaces = spaces
     self.mlp_keys = []
@@ -334,11 +339,11 @@ class MultiDecoder(nj.Module):
         elif space.discrete:
           dists[key] = 'softmax'
         else:
-          dists[key] = vector_dist
+          dists[key] = mlp_dist
       self._mlp = MLP(
           shapes, mlp_layers, mlp_units, dists, **mlp_kw, name='mlp')
     self._inputs = Input(inputs)
-    self._image_dist = image_dist
+    self._image_dist = cnn_dist
 
   def __call__(self, inputs, batchdims=2, cnn=True, mlp=True):
     feat = self._inputs(inputs, batchdims, jaxutils.COMPUTE_DTYPE)
@@ -797,15 +802,8 @@ def get_act(name):
     return name
   elif name == 'none':
     return lambda x: x
-  # elif name == 'hard_silu':
-  #   return lambda x: jnp.where(
-  #       jnp.abs(x) < 3, x * (x + 3) / 6, jnp.maximum(0, x))
-  elif name == 'hard_silu':
-    return lambda x: jnp.clip(x + 3, 0, 6) * x / 6
   elif name == 'mish':
     return lambda x: x * jnp.tanh(jax.nn.softplus(x))
-  elif name == 'gelu2':
-    return lambda x: jax.nn.sigmoid(1.702 * x) * x
   elif hasattr(jax.nn, name):
     return getattr(jax.nn, name)
   else:

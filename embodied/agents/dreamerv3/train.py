@@ -185,6 +185,8 @@ def make_env(config, **overrides):
       'loconav': 'embodied.envs.loconav:LocoNav',
       'pinpad': 'embodied.envs.pinpad:PinPad',
       'langroom': 'embodied.envs.langroom:LangRoom',
+      'procgen': lambda task, **kw: from_gym.FromGym(
+          f'procgen:procgen-{task}-v0', **kw),  # TODO
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
@@ -198,11 +200,6 @@ def make_env(config, **overrides):
 
 def wrap_env(env, config):
   args = config.wrapper
-  for name, space in env.obs_space.items():
-    if name.startswith('log_'):
-      continue
-    if space.dtype in (np.uint32, np.uint64):
-      env = wrappers.OneHotObservation(env, name)
   for name, space in env.act_space.items():
     if name == 'reset':
       continue

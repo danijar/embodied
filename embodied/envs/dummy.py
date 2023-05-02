@@ -17,6 +17,8 @@ class Dummy(embodied.Env):
     return {
         'image': embodied.Space(np.uint8, self._size + (3,)),
         'vector': embodied.Space(np.float32, (7,)),
+        # 'token': embodied.Space(np.int32, (), 0, 256),
+        'log_text': embodied.Space(str),
         'step': embodied.Space(np.int32, (), 0, self._length),
         'reward': embodied.Space(np.float32),
         'is_first': embodied.Space(bool),
@@ -46,6 +48,8 @@ class Dummy(embodied.Env):
     return dict(
         image=np.zeros(self._size + (3,), np.uint8),
         vector=np.zeros(7, np.float32),
+        # token=np.zeros((), np.int32),
+        log_text='hello world',
         step=self._step,
         reward=reward,
         is_first=is_first,

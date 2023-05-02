@@ -69,8 +69,8 @@ class Agent(nj.Module):
 
   def train(self, data, state):
     self.config.jax.jit and print('Tracing train function.')
-    metrics = {}
     data = self.preprocess(data)
+    metrics = {}
     state, outs, mets = self.wm.train(data, state)
     metrics.update(mets)
     context = {**data, **outs}
@@ -104,10 +104,12 @@ class Agent(nj.Module):
       space = spaces[key]
       if len(space.shape) >= 3 and space.dtype == np.uint8:
         value = jaxutils.cast_to_compute(value) / 255.0
-      elif value.dtype in (np.uint32, np.uint64):
-        value = jax.nn.one_hot(value, space.high)
-      else:
-        value = value.astype(jnp.float32)
+      # elif jnp.issubdtype(value.dtype, jnp.unsignedinteger):
+      #   value = value.astype(jnp.uint32)
+      # elif jnp.issubdtype(value.dtype, jnp.floating):
+      #   value = value.astype(jnp.flaot32)
+      # else:
+      #   raise NotImplementedError(value.dtype)
       result[key] = value
     result['cont'] = 1.0 - result['is_terminal'].astype(jnp.float32)
     return result
@@ -136,11 +138,22 @@ class WorldModel(nj.Module):
         'reward': nets.MLP((), **config.reward_head, name='rew'),
         'cont': nets.MLP((), **config.cont_head, name='cont')}
 
+    if self.config.loss_scales.qhead:
+      cfg = config.critic.update(inputs=['deter', 'stoch', 'action'])
+      self.qhead = nets.MLP((), **cfg, name='qhead')
+      self.qslow = nets.MLP((), **cfg, name='qslow')
+      self.updater = jaxutils.SlowUpdater(
+          self.qhead, self.qslow,
+          self.config.slow_critic_fraction,
+          self.config.slow_critic_update)
+
     self.opt = jaxutils.Optimizer(name='model_opt', **config.model_opt)
+
     scales = self.config.loss_scales.copy()
-    image, vector = scales.pop('image'), scales.pop('vector')
-    scales.update({k: image for k in self.heads['decoder'].cnn_keys})
-    scales.update({k: vector for k in self.heads['decoder'].mlp_keys})
+    cnn = scales.pop('dec_cnn')
+    mlp = scales.pop('dec_mlp')
+    scales.update({k: cnn for k in self.heads['decoder'].cnn_keys})
+    scales.update({k: mlp for k in self.heads['decoder'].mlp_keys})
     self.scales = scales
 
   def initial(self, batch_size):
@@ -155,6 +168,8 @@ class WorldModel(nj.Module):
     mets, (carry, outs, metrics) = self.opt(
         modules, self.loss, data, carry, has_aux=True)
     metrics.update(mets)
+    if self.config.loss_scales.qhead:
+      self.updater()
     return carry, outs, metrics
 
   def loss(self, data, carry):
@@ -179,6 +194,23 @@ class WorldModel(nj.Module):
         raise Exception(f'Error in {name} loss.') from e
       assert loss.shape == embed.shape[:2], (key, loss.shape)
       losses[key] = loss
+
+    if self.config.loss_scales.qhead:
+      discount = 1 - 1 / self.config.horizon
+      qslow = self.qslow({**data, **feats}).mean()
+      r = data['reward']
+      c = (1 - data['is_first'].astype(jnp.float32))
+      # TODO: retrace
+      # data['logpi']  # TODO
+      # discount
+      qtarget = r + c * discount * qslow
+      without_last = tree_map(lambda x: x[:, :-1], {**data, **feats})
+      losses['qhead'] = -self.qhead(without_last).log_prob(sg(qtarget[:, 1:]))
+
+    if self.scales['sparse']:
+      lhs = states['deter'][:, :-1]
+      rhs = states['deter'][:, 1:]
+      losses['sparse'] = jnp.abs(lhs - rhs)
 
     scaled = {k: v.mean() * self.scales[k] for k, v in losses.items()}
     model_loss = sum(scaled.values())

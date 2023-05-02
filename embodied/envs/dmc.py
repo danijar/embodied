@@ -59,6 +59,9 @@ class DMC(embodied.Env):
     obs = self._env.step(action)
     if self._render:
       obs['image'] = self.render()
+    for key, space in self.obs_space.items():
+      if np.issubdtype(space.dtype, np.floating):
+        assert np.isfinite(obs[key]).all(), (key, obs[key])
     return obs
 
   def render(self):

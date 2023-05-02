@@ -5,11 +5,12 @@ import tracemalloc
 class Usage:
 
   def __init__(self, trace_malloc=False):
+    import psutil
     self.trace_malloc = trace_malloc
     if trace_malloc:
       tracemalloc.start()
       self._snapshot = None
-    self.groups = {}
+    self.groups = {'main': [psutil.Process()]}
 
   def processes(self, name, procs):
     import psutil
