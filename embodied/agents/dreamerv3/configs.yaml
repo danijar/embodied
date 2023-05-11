@@ -4,9 +4,8 @@ defaults:
   method: name
   task: dummy_disc
   logdir: /dev/null
-  replay: uniform
+  replay: replay
   replay_size: 1e6
-  replay_online: False
   eval_dir: ''
   filter: '.*'
 
@@ -63,7 +62,7 @@ defaults:
     minecraft: {size: [64, 64], break_speed: 100.0, logs: False}
     dmc: {size: [64, 64], repeat: 2, camera: -1}
     loconav: {size: [64, 64], repeat: 2, camera: -1}
-    langroom: {length: 200}
+    langroom: {length: 200, vocab_size: 15}
 
   # Agent
   task_behavior: Greedy
@@ -71,7 +70,6 @@ defaults:
   batch_size: 16
   batch_length: 64
   data_loaders: 8
-  clip_action: False
 
   # World Model
   grad_heads: [decoder, reward, cont]
@@ -82,11 +80,14 @@ defaults:
   encoder: {mlp_keys: '.*', cnn_keys: '.*', act: silu, norm: layer, mlp_layers: 5, mlp_units: 1024, cnn: resnet, cnn_depth: 96, cnn_blocks: 0, resize: stride, winit: normal, fan: avg, minres: 4, symlog: True}
   decoder: {mlp_keys: '.*', cnn_keys: '.*', act: silu, norm: layer, mlp_layers: 5, mlp_units: 1024, cnn: resnet, cnn_depth: 96, cnn_blocks: 0, cnn_dist: mse, mlp_dist: symlog_mse, inputs: [deter, stoch], resize: stride, winit: normal, fan: avg, outscale: 1.0, minres: 4, cnn_sigmoid: False}
   reward_head: {layers: 5, units: 1024, act: silu, norm: layer, dist: symexp_twohot, outscale: 0.0, outnorm: False, inputs: [deter, stoch], winit: normal, fan: avg, bins: 255}
-  qhead: {layers: 5, units: 1024, act: silu, norm: layer, dist: symexp_twohot, outscale: 0.0, outnorm: False, inputs: [deter, stoch], winit: normal, fan: avg, bins: 255}
   cont_head: {layers: 5, units: 1024, act: silu, norm: layer, dist: binary, outscale: 1.0, outnorm: False, inputs: [deter, stoch], winit: normal, fan: avg}
-  loss_scales: {dec_cnn: 1.0, dec_mlp: 1.0, reward: 1.0, cont: 1.0, dyn: 0.5, rep: 0.1, actor: 1.0, critic: 1.0, slowreg: 1.0, sparse: 0.0, qhead: 0.0}
+  loss_scales: {dec_cnn: 1.0, dec_mlp: 1.0, reward: 1.0, cont: 1.0, dyn: 0.5, rep: 0.1, actor: 1.0, critic: 1.0, slowreg: 1.0, sparse: 0.0, repval: 0.0}
   rssm_loss: {free: 1.0}
   model_opt: {opt: adam, lr: 1e-4, eps: 1e-8, clip: 1000.0, wd: 0.0, warmup: 0, lateclip: 0.0}
+  repval: False
+  repval_separate: False
+  repval_lambda: 0.5
+  repval_horizon: 15
 
   # Actor Critic
   actor: {layers: 5, units: 1024, act: silu, norm: layer, minstd: 0.1, maxstd: 1.0, outscale: 1.0, outnorm: False, unimix: 0.01, inputs: [deter, stoch], winit: normal, fan: avg}

@@ -43,27 +43,29 @@ class Random(nj.Module):
 
   def __init__(self, wm, act_space, config):
     self.config = config
-    self.act_space = act_space
+    self.dists = {k: self._make_dist(s) for k, s in act_space.items()}
 
   def initial(self, batch_size):
     return jnp.zeros(batch_size)
 
   def policy(self, latent, state):
-    batch_size = len(state)
-    shape = (batch_size,) + self.act_space.shape
-    if self.act_space.discrete:
-      dist = jaxutils.OneHotDist(jnp.zeros(shape))
-    else:
-      dist = tfd.Uniform(-jnp.ones(shape), jnp.ones(shape))
-      dist = tfd.Independent(dist, 1)
-    action = dist.sample(seed=nj.rng())
-    return {'action': action}, state
+    action = {
+        k: v.sample(len(state), seed=nj.rng())
+        for k, v in self.dists.items()}
+    return action, state
 
   def train(self, imagine, start, data):
     return None, {}
 
   def report(self, data):
     return {}
+
+  def _make_dist(self, space):
+    if space.discrete:
+      dist = jaxutils.OneHotDist(jnp.zeros((*space.shape, space.high)))
+    else:
+      dist = tfd.Independent(tfd.Uniform(space.low, space.high), 1)
+    return dist
 
 
 class Explore(nj.Module):

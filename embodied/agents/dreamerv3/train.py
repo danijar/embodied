@@ -18,7 +18,6 @@ sys.path.append(str(directory.parent.parent.parent))
 __package__ = directory.name
 
 import embodied
-import numpy as np
 from embodied import wrappers
 
 
@@ -137,11 +136,18 @@ def make_logger(parsed, logdir, step, config):
 
 def make_replay(
     config, directory=None, is_eval=False, rate_limit=False, **kwargs):
-  assert config.replay == 'uniform' or not rate_limit
+  assert config.replay in ('replay', 'uniform') or not rate_limit
   length = config.batch_length
   size = config.replay_size // 10 if is_eval else config.replay_size
-  if config.replay == 'uniform' or is_eval:
-    kw = {'online': config.replay_online}
+  if config.replay == 'replay':
+    kw = {}
+    if rate_limit and config.run.train_ratio > 0:
+      kw['samples_per_insert'] = config.run.train_ratio / config.batch_length
+      kw['tolerance'] = 10 * config.batch_size
+      kw['min_size'] = config.batch_size
+    replay = embodied.replay.Replay(length, size, directory, **kw)
+  elif config.replay == 'uniform':
+    kw = {}
     if rate_limit and config.run.train_ratio > 0:
       kw['samples_per_insert'] = config.run.train_ratio / config.batch_length
       kw['tolerance'] = 10 * config.batch_size
@@ -149,8 +155,6 @@ def make_replay(
     replay = embodied.replay.Uniform(length, size, directory, **kw)
   elif config.replay == 'reverb':
     replay = embodied.replay.Reverb(length, size, directory)
-  elif config.replay == 'chunks':
-    replay = embodied.replay.NaiveChunks(length, size, directory)
   else:
     raise NotImplementedError(config.replay)
   return replay
@@ -172,6 +176,8 @@ def wrapped_env(config, batch, **overrides):
 def make_env(config, **overrides):
   from embodied.envs import from_gym
   suite, task = config.task.split('_', 1)
+  if suite == 'procgen':
+    import procgen  # noqa
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',
@@ -203,12 +209,10 @@ def wrap_env(env, config):
   for name, space in env.act_space.items():
     if name == 'reset':
       continue
-    elif space.discrete:
-      env = wrappers.OneHotAction(env, name)
-    elif args.discretize:
-      env = wrappers.DiscretizeAction(env, name, args.discretize)
-    else:
+    elif not space.discrete:
       env = wrappers.NormalizeAction(env, name)
+      if args.discretize:
+        env = wrappers.DiscretizeAction(env, name, args.discretize)
   env = wrappers.ExpandScalars(env)
   if args.length:
     env = wrappers.TimeLimit(env, args.length, args.reset)

@@ -45,6 +45,7 @@ RUN pip3 install crafter
 RUN pip3 install dm_control
 RUN pip3 install robodesk
 RUN pip3 install bsuite
+RUN pip3 install procgen
 
 # Agent
 RUN pip3 install jax[cuda11_cudnn82] -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html

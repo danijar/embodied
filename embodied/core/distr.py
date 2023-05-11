@@ -4,11 +4,12 @@ import sys
 import threading
 import time
 import traceback
-from collections import deque
+from collections import deque, defaultdict
 
 import numpy as np
 
 from . import basics
+from . import metrics
 
 
 class RemoteError(RuntimeError): pass
@@ -47,7 +48,7 @@ class Client:
     self.ipv6 and self.socket.setsockopt(zmq.IPV6, 1)
     self.socket.RCVTIMEO = int(1000 * self.timeout)
     address = self._resolve(self.address)
-    self._print(f'Client connecting to {address}', color='green')
+    self._print(f'Connecting to {address}', color='green')
     self.socket.connect(address)
     self.pending = False
     self.once = True
@@ -108,17 +109,25 @@ class Server:
     self.socket = context.socket(zmq.ROUTER)
     ipv6 and self.socket.setsockopt(zmq.IPV6, 1)
     address = f'tcp://*:{port}'
-    basics.print_(f'BatchServer listening at {address}', color='green')
+    basics.print_(f'Listening at {address}', color='green')
     self.socket.bind(address)
     self.function = function
     self.batch = batch
+    self.threads = threads
     self.workers = concurrent.futures.ThreadPoolExecutor(threads)
     self.promises = deque()
     self.inputs = deque()
     self.requests = {}
     self.outputs = {}
+    self.metrics = metrics.Metrics()
     self.once = True
     self.error = None
+
+  def stats(self):
+    return {
+        **self.metrics.result(),
+        'workers': self.threads,
+    }
 
   def run(self):
     while True:
@@ -129,6 +138,8 @@ class Server:
 
   def _step(self):
     import zmq
+    start = time.time()
+    agg = ('min', 'mean', 'max')
 
     # If there are new messages, dispatch them to the respective queue.
     try:
@@ -143,6 +154,10 @@ class Server:
 
     # If we have accumulated enough inputs, remove them from the queue and
     # dispatch them to the worker pool.
+    # TODO: This could cause an increasing backlog because we're potentially
+    # enqueueing more input batches than there are worker threads. But the
+    # number of input batches is bounded by the number of parallel
+    # environments, so the backlog is bounded.
     if len(self.inputs) >= max(1, self.batch):
       inputs = [self.inputs.popleft() for _ in range(max(1, self.batch))]
       addrs, inputs = [a for a, x in inputs], [x for a, x in inputs]
@@ -161,13 +176,15 @@ class Server:
     # Send all available results back to their respective clients. The
     # result is sent instead of the heartbeat, so we remove the heartbeat for
     # the same client from the queue.
+    now = time.time()
     for addr in list(self.outputs.keys()):
       if addr not in self.requests:
         # This can happen if we just sent a heartbeat recently and have not
         # received confirmation from the client yet.
         continue
       message = self.outputs.pop(addr)
-      del self.requests[addr]
+      arrival = self.requests.pop(addr)
+      self.metrics.scalar('result_time', now - arrival, agg)
       # When ROUTER sockets reply to clients that are unreachable, they drop
       # messages by default, which is what we want here.
       # https://zguide.zeromq.org/docs/chapter3/#ROUTER-Error-Handling
@@ -179,6 +196,7 @@ class Server:
     for addr, arrival in list(self.requests.items()):
       if now - arrival >= 1.0:
         del self.requests[addr]
+        self.metrics.scalar('heartbeat_time', now - arrival, agg)
         self.socket.send_multipart([addr, b'', b'wait'])
         # self.socket.send_multipart([addr, b'', message], zmq.NOBLOCK)
 
@@ -186,6 +204,9 @@ class Server:
     # error here after we have responded to the clients.
     if self.error:
       raise self.error
+
+    self.metrics.scalar('jobs', len(self.promises), agg)
+    self.metrics.scalar('step_time', time.time() - start, agg)
 
   def _work(self, addrs, inputs):
     error = None

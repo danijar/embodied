@@ -59,7 +59,6 @@ class JAXAgent(embodied.Agent):
     self._transform()
     self.varibs = self._init_varibs(obs_space, act_space)
     self.updates = embodied.Counter()
-    self.once = True
 
     self.outs_worker = concurrent.futures.ThreadPoolExecutor(1)
     self.mets_worker = concurrent.futures.ThreadPoolExecutor(1)
@@ -131,12 +130,6 @@ class JAXAgent(embodied.Agent):
       self.mets_promise = self.mets_worker.submit(
           self._convert_mets, mets, self.train_devices)
 
-    if self.once:
-      self.once = False
-      # assert jaxutils.Optimizer.PARAM_COUNTS
-      # for name, count in jaxutils.Optimizer.PARAM_COUNTS.items():
-      #   return_mets[f'params_{name}'] = float(count)
-
     if self.jaxcfg.profiler:
       outdir, copyto = self.logdir, None
       if str(outdir).startswith(('gs://', '/gcs/')):
@@ -185,6 +178,7 @@ class JAXAgent(embodied.Agent):
     return jax.device_get(varibs)
 
   def load(self, state):
+    chex.assert_trees_all_equal_shapes(self.varibs, state)
     if len(self.train_devices) == 1:
       self.varibs = jax.device_put(state, self.train_devices[0])
     else:
@@ -242,7 +236,7 @@ class JAXAgent(embodied.Agent):
       self._init_policy = nj.pmap(self._init_policy, 'i', **kw)
       self._policy = nj.pmap(self._policy, 'i', static=['mode'], **kw)
     if self.jaxcfg.checks:
-      assert self.config.run.actor_batch == 1, 'chex is not thread-safe'
+      assert self.config.run.actor_threads == 1, 'chex is not thread-safe'
       jaxutils.ENABLE_CHECKS = True
       self._policy = jaxutils.transform_with_static(
           self._checkify, 'mode')(self._policy)

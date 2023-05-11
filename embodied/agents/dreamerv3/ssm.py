@@ -255,7 +255,7 @@ class S5Model(nj.Module):
           winit='uniform', fan='avg')(h)
       h = jax.nn.glu(h)
       # h = dropout(h)
-      x = x + h
+      x = x + h  # TODO: This sometimes fails?
       if not self._prenorm:
         x = self.get(f'norm{i}', nets.Norm, 'layer', 1e-9)(x)
     if self._prenorm:

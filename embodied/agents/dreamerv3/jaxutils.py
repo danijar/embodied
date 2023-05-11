@@ -366,14 +366,10 @@ class Moments(nj.Module):
 
 class Optimizer(nj.Module):
 
-  PARAM_COUNTS = {}
-
   def __init__(
       self, lr, opt='adam', eps=1e-5, clip=100.0, warmup=0, wd=0.0,
       wd_pattern=r'/(w|kernel)$', lateclip=0.0, init_grad_scale=1e4):
     assert wd_pattern[0] not in ('0', '1')
-    # assert self.path not in self.PARAM_COUNTS
-    self.PARAM_COUNTS[self.path] = None
     wd_pattern = re.compile(wd_pattern)
     chain = []
     if clip:
@@ -403,6 +399,7 @@ class Optimizer(nj.Module):
           jnp.array, init_grad_scale, jnp.float32, name='grad_scale')
       self.good_steps = nj.Variable(
           jnp.array, 0, jnp.int32, name='good_steps')
+    self.once = True
 
   def __call__(self, modules, lossfn, *args, has_aux=False, **kwargs):
     def wrapped(*args, **kwargs):
@@ -419,10 +416,12 @@ class Optimizer(nj.Module):
         wrapped, modules, has_aux=True)(*args, **kwargs)
     if not isinstance(modules, (list, tuple)):
       modules = [modules]
-    if not self.PARAM_COUNTS[self.path]:
-      count = sum([np.prod(x.shape) for x in params.values()])
-      print(f'Optimizer {self.name} has {count:,} variables.')
-      self.PARAM_COUNTS[self.path] = count
+
+    param_count = sum([np.prod(x.shape) for x in params.values()])
+    if self.once:
+      self.once = False
+      print(f'Optimizer {self.name} has {param_count:,} variables.')
+
     if parallel():
       grads = tree_map(lambda x: jax.lax.pmean(x, 'i'), grads)
     if self.scaling:
@@ -454,6 +453,7 @@ class Optimizer(nj.Module):
     metrics['update_norm'] = update_norm
     metrics['param_norm'] = param_norm
     metrics['grad_steps'] = self.step.read()
+    metrics['param_count'] = param_count
     metrics = {f'{self.name}_{k}': v for k, v in metrics.items()}
     return (metrics, aux) if has_aux else metrics
 

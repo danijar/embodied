@@ -7,13 +7,15 @@ import embodied
 import numpy as np
 
 from . import saver
+from . import limiters
+from . import selectors
 
 
 class Generic:
 
   def __init__(
       self, length, capacity, remover, sampler, limiter, directory,
-      overlap=None, online=False, chunks=1024):
+      overlap=None, online=False, chunksize=1024):
     assert capacity is None or 1 <= capacity
     self.length = length
     self.capacity = capacity
@@ -30,7 +32,7 @@ class Generic:
       self.online_queue = deque()
       self.online_stride = length
       self.online_counters = defaultdict(int)
-    self.saver = directory and saver.Saver(directory, chunks)
+    self.saver = directory and saver.Saver(directory, chunksize)
     # self.itemsize = 0
     self.metrics = {
         'samples': 0,
@@ -40,7 +42,7 @@ class Generic:
         'insert_wait_dur': 0,
         'insert_wait_count': 0,
     }
-    self.load()
+    # self.load()
 
   def __len__(self):
     return len(self.table)
@@ -170,3 +172,27 @@ def wait(predicate, message, sleep=0.001, notify=1.0):
       notified = True
     time.sleep(sleep)
     first = False
+
+
+class Uniform(Generic):
+
+  def __init__(
+      self, length, capacity=None, directory=None, online=False,
+      chunksize=1024, min_size=1, samples_per_insert=None, tolerance=1e4,
+      seed=0):
+    if samples_per_insert:
+      limiter = limiters.SamplesPerInsert(
+          samples_per_insert, tolerance, min_size)
+    else:
+      limiter = limiters.MinSize(min_size)
+    assert not capacity or min_size <= capacity
+    super().__init__(
+        length=length,
+        capacity=capacity,
+        remover=selectors.Fifo(),
+        sampler=selectors.Uniform(seed),
+        limiter=limiter,
+        directory=directory,
+        online=online,
+        chunksize=chunksize,
+    )

@@ -3,6 +3,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import ruamel.yaml as yaml
+from tensorflow_probability.substrates import jax as tfp
+tfd = tfp.distributions
+f32 = jnp.float32
 tree_map = jax.tree_util.tree_map
 sg = lambda x: tree_map(jax.lax.stop_gradient, x)
 
@@ -37,6 +40,8 @@ class Agent(nj.Module):
     self.wm = WorldModel(self.obs_space, self.act_space, config, name='wm')
     self.task_behavior = getattr(behaviors, config.task_behavior)(
         self.wm, self.act_space, self.config, name='task_behavior')
+    if self.config.repval:
+      self.wm.repval_behav = self.task_behavior
     if config.expl_behavior == 'None':
       self.expl_behavior = self.task_behavior
     else:
@@ -62,9 +67,10 @@ class Agent(nj.Module):
     task_act, task_state = self.task_behavior.policy(state, task_state)
     expl_act, expl_state = self.expl_behavior.policy(state, expl_state)
     act = {'eval': task_act, 'explore': expl_act, 'train': task_act}[mode]
-    if self.config.clip_action:
-      act = {k: jnp.clip(v, -1, 1) for k, v in act.items()}
     state = ((state, act), task_state, expl_state)
+    act = {
+        k: jnp.argmax(act[k], -1) if s.discrete else act[k]
+        for k, s in self.act_space.items()}
     return act, state
 
   def train(self, data, state):
@@ -74,7 +80,7 @@ class Agent(nj.Module):
     state, outs, mets = self.wm.train(data, state)
     metrics.update(mets)
     context = {**data, **outs}
-    start = tree_map(lambda x: x.reshape([-1] + list(x.shape[2:])), context)
+    start = tree_map(lambda x: x.reshape((-1, *x.shape[2:])), context)
     _, mets = self.task_behavior.train(self.wm.imagine, start, context)
     metrics.update(mets)
     if self.config.expl_behavior != 'None':
@@ -102,6 +108,8 @@ class Agent(nj.Module):
       if key.startswith('log_') or key in ('reset', 'key', 'id'):
         continue
       space = spaces[key]
+      if key in self.act_space and space.discrete:
+        value = jax.nn.one_hot(value, space.high)
       if len(space.shape) >= 3 and space.dtype == np.uint8:
         value = jaxutils.cast_to_compute(value) / 255.0
       # elif jnp.issubdtype(value.dtype, jnp.unsignedinteger):
@@ -138,41 +146,39 @@ class WorldModel(nj.Module):
         'reward': nets.MLP((), **config.reward_head, name='rew'),
         'cont': nets.MLP((), **config.cont_head, name='cont')}
 
-    if self.config.loss_scales.qhead:
-      cfg = config.critic.update(inputs=['deter', 'stoch', 'action'])
-      self.qhead = nets.MLP((), **cfg, name='qhead')
-      self.qslow = nets.MLP((), **cfg, name='qslow')
-      self.updater = jaxutils.SlowUpdater(
-          self.qhead, self.qslow,
-          self.config.slow_critic_fraction,
-          self.config.slow_critic_update)
+    if self.config.repval and self.config.repval_separate:
+      self.heads['repval'] = nets.MLP((), name='repval', **self.config.critic)
 
     self.opt = jaxutils.Optimizer(name='model_opt', **config.model_opt)
-
     scales = self.config.loss_scales.copy()
     cnn = scales.pop('dec_cnn')
     mlp = scales.pop('dec_mlp')
     scales.update({k: cnn for k in self.heads['decoder'].cnn_keys})
     scales.update({k: mlp for k in self.heads['decoder'].mlp_keys})
     self.scales = scales
+    self.repval_behav = None
 
   def initial(self, batch_size):
-    latent = self.rssm.initial(batch_size)
+    bs = batch_size
+    latent = self.rssm.initial(bs)
     action = {
-        k: jnp.zeros((batch_size, *v.shape))
+        k: jnp.zeros(
+            (bs, *v.shape, int(v.high)) if v.discrete else (bs, *v.shape))
         for k, v in self.act_space.items()}
     return latent, action
 
   def train(self, data, carry):
     modules = [self.encoder, self.rssm, *self.heads.values()]
+    if self.config.repval and not self.config.repval_separate:
+      critic = self.repval_behav.ac.critics['extr'].net
+      modules.append(critic)
     mets, (carry, outs, metrics) = self.opt(
         modules, self.loss, data, carry, has_aux=True)
     metrics.update(mets)
-    if self.config.loss_scales.qhead:
-      self.updater()
     return carry, outs, metrics
 
   def loss(self, data, carry):
+    metrics = {}
     embed = self.encoder(data)
     prev_state, prev_action = carry
     prev_actions = {
@@ -187,30 +193,56 @@ class WorldModel(nj.Module):
       out = out if isinstance(out, dict) else {name: out}
       dists.update(out)
     losses, stats = self.rssm.loss(states, **self.config.rssm_loss)
+
+    if self.repval_behav:
+      critic = self.repval_behav.ac.critics['extr']
+      context = {**data, **states}
+      rew = data['reward'].swapaxes(0, 1)
+      disc = (1 - data['is_terminal'].astype(jnp.float32)).swapaxes(0, 1)
+      disc *= 1 - 1 / self.config.horizon
+
+      start = tree_map(lambda x: x.reshape((-1, *x.shape[2:])), context)
+      horizon = self.config.repval_horizon
+      traj = self.imagine(self.repval_behav.policy, start, horizon)
+      val = critic.score(traj, slow=True)[0][0]
+      val = val.reshape(data['reward'].shape).swapaxes(0, 1)
+
+      lam = self.config.repval_lambda
+      vals = [val[-1]]
+      interm = rew[1:] + disc[1:] * val[1:] * (1 - lam)
+      for t in reversed(range(len(disc) - 1)):
+        vals.append(interm[t] + disc[1 + t] * lam * vals[-1])
+      target = sg(jnp.stack(list(reversed(vals)), 0).swapaxes(0, 1))
+
+      if self.config.repval_separate:
+        data['repval'] = target
+        dist = dists['repval']
+      else:
+        inp = context if 'repval' in self.config.grad_heads else sg(context)
+        dist = critic.net(inp)
+        loss = -dist.log_prob(target)
+        losses['repval'] = loss
+
+      metrics['repval_target'] = target.mean()
+      metrics['repval_imag'] = val.mean()
+      metrics['repval_pred'] = dist.mean().mean()
+
     for key, dist in dists.items():
       try:
         loss = -dist.log_prob(data[key].astype(jnp.float32))
       except Exception as e:
-        raise Exception(f'Error in {name} loss.') from e
+        raise Exception(f'Error in {name} loss:\n\n{e}.') from e
       assert loss.shape == embed.shape[:2], (key, loss.shape)
       losses[key] = loss
 
-    if self.config.loss_scales.qhead:
-      discount = 1 - 1 / self.config.horizon
-      qslow = self.qslow({**data, **feats}).mean()
-      r = data['reward']
-      c = (1 - data['is_first'].astype(jnp.float32))
-      # TODO: retrace
-      # data['logpi']  # TODO
-      # discount
-      qtarget = r + c * discount * qslow
-      without_last = tree_map(lambda x: x[:, :-1], {**data, **feats})
-      losses['qhead'] = -self.qhead(without_last).log_prob(sg(qtarget[:, 1:]))
+    for key, dist in dists.items():
+      if hasattr(dist, 'entropy'):
+        metrics[f'{key}_pred_entropy'] = dist.entropy().mean()
 
-    if self.scales['sparse']:
-      lhs = states['deter'][:, :-1]
-      rhs = states['deter'][:, 1:]
-      losses['sparse'] = jnp.abs(lhs - rhs)
+    # if self.scales['sparse']:
+    #   lhs = states['deter'][:, :-1]
+    #   rhs = states['deter'][:, 1:]
+    #   losses['sparse'] = jnp.abs(lhs - rhs)
 
     scaled = {k: v.mean() * self.scales[k] for k, v in losses.items()}
     model_loss = sum(scaled.values())
@@ -219,15 +251,14 @@ class WorldModel(nj.Module):
     new_state = {k: v[:, -1] for k, v in states.items()}
     new_action = {k: data[k][:, -1] for k in self.act_space}
     carry = new_state, new_action
-    metrics = self._metrics(data, dists, states, stats, losses, model_loss)
+    metrics.update(self._metrics(
+        data, dists, states, stats, losses, model_loss))
     return model_loss, (carry, feats, metrics)
 
   def imagine(self, policy, start, horizon, carry=None):
     carry = carry or {}
-
     state_keys = list(self.rssm.initial(1).keys())
     state = {k: v for k, v in start.items() if k in state_keys}
-
     action, carry = policy(state, carry)
     keys = list(state.keys()) + list(action.keys()) + list(carry.keys())
     assert len(set(keys)) == len(keys), ('Colliding keys', keys)
@@ -238,12 +269,9 @@ class WorldModel(nj.Module):
       action, carry = policy(state, carry)
       return state, action, carry
 
-    # carry, outputs = nj.scan(fn, carry, jnp.arange(horizon))
-
     states, actions, carries = jaxutils.scan(
         step, jnp.arange(horizon), (state, action, carry),
         self.config.imag_unroll)
-
     states, actions, carries = tree_map(
         lambda traj, first: jnp.concatenate([first[None], traj], 0),
         (states, actions, carries), (state, action, carry))
@@ -331,7 +359,9 @@ class ImagActorCritic(nj.Module):
     else:
       self.grad = 'reinforce'
     dist1, dist2 = config.actor_dist_disc, config.actor_dist_cont
-    shapes = {k: v.shape for k, v in act_space.items()}
+    shapes = {
+        k: (*s.shape, int(s.high)) if s.discrete else s.shape
+        for k, s in act_space.items()}
     dists = {k: dist1 if v.discrete else dist2 for k, v in act_space.items()}
     self.actor = nets.MLP(
         **config.actor, name='actor', shape=shapes, dist=dists)
@@ -385,7 +415,10 @@ class ImagActorCritic(nj.Module):
     }[self.grad]
     ent = {k: v.entropy()[:-1] for k, v in policy.items()}
     for key, fn in self.act_priors.items():
-      ent[key] = -policy[key].kl_divergence(fn(sg(traj)))[:-1]
+      pi = policy[key]
+      if isinstance(pi, jaxutils.OneHotDist):
+        pi = tfd.Categorical(pi.logits_parameter())
+      ent[key] = -pi.kl_divergence(fn(sg(traj)))[:-1]
     loss -= self.config.actent * sum(ent.values())
     loss *= sg(traj['weight'])[:-1]
     loss *= self.config.loss_scales.actor

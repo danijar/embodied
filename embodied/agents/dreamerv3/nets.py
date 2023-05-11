@@ -750,7 +750,7 @@ class Input:
       raise ValueError(
           f'Error: {e}\n'
           f'Input shapes: {shapes}\n' +
-          f'Requested keys: {self._keys}')
+          f'Requested keys: {self.keys}')
     return xs
 
 

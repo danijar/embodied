@@ -9,8 +9,8 @@ import numpy as np
 class Reverb:
 
   def __init__(
-      self, length, capacity=None, directory=None, chunks=None, flush=100):
-    del chunks
+      self, length, capacity=None, directory=None, chunksize=None, flush=100):
+    del chunksize
     import reverb
     self.length = length
     self.capacity = capacity
@@ -49,7 +49,8 @@ class Reverb:
             for key, (shape, dtype) in self.signature.items()},
     )], port=None, checkpointer=self.checkpointer)
     self.client = reverb.Client(f'localhost:{self.server.port}')
-    self.writers = defaultdict(bind(self.client.trajectory_writer, self.length))
+    self.writers = defaultdict(
+        bind(self.client.trajectory_writer, self.length))
     self.counters = defaultdict(int)
 
   def __len__(self):

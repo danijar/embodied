@@ -1,5 +1,6 @@
 import collections
 import warnings
+from functools import partial as bind
 
 import numpy as np
 
@@ -10,9 +11,18 @@ class Metrics:
     self.scalars = collections.defaultdict(list)
     self.aggs = {}
     self.lasts = {}
+    self.fns = {
+        'mean': bind(np.nanmean, dtype=np.float64),
+        'sum': bind(np.nansum, dtype=np.float64),
+        'min': np.nanmin,
+        'max': np.nanmax,
+    }
 
   def scalar(self, key, value, agg='mean'):
-    assert agg in ('mean', 'sum', 'min', 'max')
+    if isinstance(agg, str):
+      assert agg in self.fns.keys()
+    else:
+      assert all(x in self.fns.keys() for x in agg)
     self.scalars[key].append(value)
     self.aggs[key] = agg
 
@@ -37,13 +47,11 @@ class Metrics:
       warnings.simplefilter('ignore', category=RuntimeWarning)
       for key, values in self.scalars.items():
         agg = self.aggs[key]
-        value = {
-            'mean': np.nanmean,
-            'sum': np.nansum,
-            'min': np.nanmin,
-            'max': np.nanmax,
-        }[agg](values, dtype=np.float64)
-        result[key] = value
+        if isinstance(agg, str):
+          result[key] = self.fns[agg](values)
+        else:
+          for x in agg:
+            result[f'{key}_{x}'] = self.fns[x](values)
     reset and self.reset()
     return result
 
