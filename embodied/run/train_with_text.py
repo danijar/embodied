@@ -1,24 +1,23 @@
 # TODO: WIP
 
-import io
 import re
-from datetime import datetime
 
 import embodied
 import numpy as np
 
 
-def train_save(agent, env, replay, logger, args):
+def train_with_text(agent, env, replay, logger, args):
 
   logdir = embodied.Path(args.logdir)
   logdir.mkdirs()
-  print('Logdir:', logdir)
+  print('Logdir', logdir)
   should_expl = embodied.when.Until(args.expl_until)
   should_train = embodied.when.Ratio(args.train_ratio / args.batch_steps)
   should_log = embodied.when.Clock(args.log_every)
   should_save = embodied.when.Clock(args.save_every)
   step = logger.step
   metrics = embodied.Metrics()
+  usage = embodied.Usage(args.trace_malloc)
   print('Observation space:', embodied.format(env.obs_space), sep='\n')
   print('Action space:', embodied.format(env.act_space), sep='\n')
 
@@ -56,25 +55,8 @@ def train_save(agent, env, replay, logger, args):
         stats[f'max_{key}'] = ep[key].max(0).mean()
     metrics.add(stats, prefix='stats')
 
-  epsdir = embodied.Path(args.logdir) / 'saved_episodes'
-  epsdir.mkdirs()
-  print('Saving episodes:', epsdir)
-  def save(ep):
-    time = datetime.now().strftime("%Y%m%dT%H%M%S")
-    uuid = str(embodied.uuid())
-    score = str(np.round(ep['reward'].sum(), 1)).replace('-', 'm')
-    length = len(ep['reward'])
-    filename = epsdir / f'{time}-{uuid}-len{length}-rew{score}.npz'
-    with io.BytesIO() as stream:
-      np.savez_compressed(stream, **ep)
-      stream.seek(0)
-      filename.write(stream.read(), mode='wb')
-    print('Saved episode:', filename)
-  saver = embodied.Worker(save, 'thread')
-
   driver = embodied.Driver(env)
   driver.on_episode(lambda ep, worker: per_episode(ep))
-  driver.on_episode(lambda ep, worker: saver(ep))
   driver.on_step(lambda tran, _: step.increment())
   driver.on_step(replay.add)
 
@@ -90,8 +72,29 @@ def train_save(agent, env, replay, logger, args):
     for _ in range(should_train(step)):
       with timer.scope('dataset'):
         batch[0] = next(dataset)
-      outs, state[0], mets = agent.train(batch[0], state[0])
+      # outs, state[0], mets = agent.train(batch[0], state[0])
+      prev_state = state[0]
+
+      outs, state[0], mets = agent.train(
+          batch[0], prev_state,
+          train_wm=True, train_ac=False, ignore_inputs=('image',))
       metrics.add(mets, prefix='train')
+
+      outs, state[0], mets = agent.train(
+          batch[0], prev_state,
+          train_wm=True, train_ac=False, ignore_inputs=('text',))
+      metrics.add(mets, prefix='train')
+
+      outs, state[0], mets = agent.train(
+          batch[0], prev_state,
+          train_wm=True, train_ac=False, ignore_inputs=())
+      metrics.add(mets, prefix='train')
+
+      outs, state[0], mets = agent.train(
+          batch[0], prev_state,
+          train_wm=False, train_ac=True, ignore_inputs=())
+      metrics.add(mets, prefix='train')
+
       if 'priority' in outs:
         replay.prioritize(outs['key'], outs['priority'])
     if should_log(step):
@@ -102,6 +105,7 @@ def train_save(agent, env, replay, logger, args):
       logger.add(report, prefix='report')
       logger.add(replay.stats, prefix='replay')
       logger.add(timer.stats(), prefix='timer')
+      logger.add(usage.stats(), prefix='usage')
       logger.write(fps=True)
   driver.on_step(train_step)
 

@@ -1,70 +1,77 @@
-# 1. Test setup:
+# Instructions
 #
-# docker run -it --rm --gpus all <base image>
+# 1) Test setup:
 #
-# The <base image> should be the name that is used after the FROM statement in
-# the Dockerfile below.
+#   docker run -it --rm --gpus all --privileged <base image> \
+#     sh -c 'ldconfig; nvidia-smi'
 #
-# If the above does not work, try adding the --privileged flag and changing the
-# command to `sh -c 'ldconfig -v && nvidia-smi'`.
+# 2) Start training:
 #
-# 2. Start training:
+#   docker build -f agents/dreamerv3/Dockerfile -t img . && \
+#   docker run -it --rm --gpus all -v ~/logdir/docker:/logdir img \
+#     sh -c 'ldconfig; scripts/xvfb_run.sh python agents/dreamerv3/train.py \
+#       --logdir "/logdir/$(date +%Y%m%d-%H%M%S)" \
+#       --configs crafter --task crafter_reward'
 #
-# docker build -f  dreamerv3/Dockerfile -t img . && \ docker run -it --rm
-# --gpus all -v ~/logdir:/logdir img \ sh scripts/xvfb_run.sh python3
-# dreamerv3/train.py \ --logdir "/logdir/$(date +%Y%m%d-%H%M%S)" \ --configs
-# dmc_vision --task dmc_walker_walk
+# 3) See results:
 #
-# 3. See results:
+#   tensorboard --logdir ~/logdir/docker
 #
-# tensorboard --logdir ~/logdir
 
 # System
-# FROM nvidia/cuda:11.4.2-cudnn8-devel-ubuntu20.04
-FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
-ARG DEBIAN_FRONTEND=noninteractive
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/San_Francisco
 ENV PYTHONUNBUFFERED 1
-ENV PIP_DISABLE_PIP_VERSION_CHECK 1
 ENV PIP_NO_CACHE_DIR 1
+ENV PIP_ROOT_USER_ACTION=ignore
 RUN apt-get update && apt-get install -y \
-  ffmpeg git python3-pip vim libglew-dev \
-  x11-xserver-utils xvfb \
+  ffmpeg git vim curl software-properties-common \
+  libglew-dev x11-xserver-utils xvfb \
   && apt-get clean
-RUN pip3 install --upgrade pip
+
+# Workdir
+RUN mkdir /embodied
+WORKDIR /embodied
+
+# Python
+RUN add-apt-repository ppa:deadsnakes/ppa
+RUN apt-get update && apt-get install -y python3.11 python3.11-venv && apt-get clean
+RUN python3.11 -m venv ./venv --upgrade-deps
+ENV PATH="/embodied/venv/bin:$PATH"
 
 # Envs
-ENV MUJOCO_GL egl
-ENV DMLAB_DATASET_PATH /dmlab_data
 COPY scripts scripts
-RUN sh scripts/install-dmlab.sh
 RUN sh scripts/install-atari.sh
+RUN sh scripts/install-dmlab.sh
 RUN sh scripts/install-minecraft.sh
-ENV NUMBA_CACHE_DIR=/tmp
-RUN pip3 install crafter
-RUN pip3 install dm_control
-RUN pip3 install robodesk
-RUN pip3 install bsuite
-RUN pip3 install procgen
+RUN pip install dm_control
+RUN pip install robodesk
+RUN pip install bsuite
+# RUN pip install procgen
+RUN pip install crafter
+ENV MUJOCO_GL egl
+# ENV DMLAB_DATASET_PATH /dmlab_data
+# ENV NUMBA_CACHE_DIR=/tmp
 
 # Agent
-RUN pip3 install jax[cuda11_cudnn82] -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-RUN pip3 install jaxlib
-RUN pip3 install tensorflow_probability
-RUN pip3 install optax
-RUN pip3 install tensorflow-cpu
+RUN mkdir -p agents/dreamerv3
+COPY agents/dreamerv3/requirements.txt agents/dreamerv3/requirements.txt
+RUN pip install -r agents/dreamerv3/requirements.txt \
+  -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ENV XLA_PYTHON_CLIENT_MEM_FRACTION 0.8
 
-# Google Cloud DNS cache (optional)
+# Embodied
+COPY requirements.txt requirements.txt
+RUN pip install -r requirements.txt
+
+# Source
+COPY . .
+
+# Cloud
 ENV GCS_RESOLVE_REFRESH_SECS=60
 ENV GCS_REQUEST_CONNECTION_TIMEOUT_SECS=300
 ENV GCS_METADATA_REQUEST_TIMEOUT_SECS=300
 ENV GCS_READ_REQUEST_TIMEOUT_SECS=300
 ENV GCS_WRITE_REQUEST_TIMEOUT_SECS=600
-
-# Embodied
-RUN pip3 install numpy cloudpickle ruamel.yaml rich zmq msgpack psutil
-COPY . /embodied
-RUN chown -R 1000:root /embodied && chmod -R 775 /embodied
-
-WORKDIR embodied
+# RUN chown -R 1000:root . && chmod -R 775 .

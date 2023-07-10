@@ -61,7 +61,7 @@ class LangRoom(embodied.Env):
         'is_last': embodied.Space(bool),
         'is_terminal': embodied.Space(bool),
         'log_image': embodied.Space(np.uint8, (res, 4 * res, 3)),
-        'log_text': embodied.Space(str),
+        # 'log_text': embodied.Space(str),
     }
 
   @property
@@ -100,17 +100,41 @@ class LangRoom(embodied.Env):
 
     # talk = VOCAB[action['talk']]
     index = action['talk']
-    talk = VOCAB[index] if index < len(VOCAB) else f'<token {index}>'
+    talk = VOCAB[index] if index < len(VOCAB) else f'<{index}>'
+
+    # if self.task == 'talk':
+    #   if talk == '':
+    #     reward = 0
+    #   elif self.target not in COLORS:
+    #     reward = -0.01
+    #   elif talk == self.target:
+    #     reward = 1
+    #   else:
+    #     reward = -0.1
+
+    # if self.task == 'talk':
+    #   if self.target == '':
+    #     if talk == self.target:
+    #       reward = 0
+    #     else:
+    #       reward = -0.001
+    #   else:
+    #     if talk == self.target:
+    #       reward = 10
+    #     else:
+    #       reward = -0.001
 
     if self.task == 'talk':
-      if talk == '':
-        reward = 0
-      elif self.target not in COLORS:
-        reward = -0.01
-      elif talk == self.target:
-        reward = 1
+      if self.target == '':
+        if talk == self.target:
+          reward = +0.001
+        else:
+          reward = -0.001
       else:
-        reward = -0.1
+        if talk == self.target:
+          reward = 10
+        else:
+          reward = -0.001
 
     elif self.task == 'acc':
       if talk == self.target:
@@ -152,7 +176,7 @@ class LangRoom(embodied.Env):
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_terminal,
-        log_text=str(self.target),
+        # log_text=str(self.target),
         log_image=log_image.transpose((1, 0, 2)),
     )
 

@@ -5,6 +5,8 @@ import traceback
 
 import numpy as np
 
+from . import timer
+
 
 class Batcher:
 
@@ -24,15 +26,16 @@ class Batcher:
         self._queues.append(queue)
         assignments[index % workers][0].append(source)
         assignments[index % workers][1].append(queue)
-      for args in assignments:
+      for i, args in enumerate(assignments):
         creator = threading.Thread(
-            target=self._creator, args=args, daemon=True)
+            target=self._creator, args=args, daemon=True,
+            name=f'creator{i}')
         creator.start()
         self._threads.append(creator)
       self._batches = queuelib.Queue(prefetch_batch)
       batcher = threading.Thread(
           target=self._batcher, args=(self._queues, self._batches),
-          daemon=True)
+          daemon=True, name='batcher')
       batcher.start()
       self._threads.append(batcher)
     else:
@@ -58,7 +61,8 @@ class Batcher:
 
   def __next__(self):
     if self._workers:
-      batch = self._batches.get()
+      with timer.section('batcher_next'):
+        batch = self._batches.get()
     else:
       elems = [next(x) for x in self._iterators]
       batch = {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
@@ -67,27 +71,36 @@ class Batcher:
     return batch
 
   def _creator(self, sources, outputs):
+    # import psutil
+    # psutil.Process().nice(10)
     try:
       iterators = [source() for source in sources]
       while self._running:
         for iterator, queue in zip(iterators, outputs):
-          queue.put(next(iterator))
+          with timer.section('batcher_create'):
+            data = next(iterator)
+          queue.put(data)
     except Exception as e:
       e.stacktrace = ''.join(traceback.format_exception(*sys.exc_info()))
       outputs[0].put(e)
       raise
 
   def _batcher(self, sources, output):
+    # import psutil
+    # psutil.Process().nice(10)
     try:
       while self._running:
-        elems = [x.get() for x in sources]
+        with timer.section('batcher_pull'):
+          elems = [x.get() for x in sources]
         for elem in elems:
           if isinstance(elem, Exception):
             raise elem
-        batch = {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
+        with timer.section('batcher_stack'):
+          batch = {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
         if self._postprocess:
-          batch = self._postprocess(batch)
-        output.put(batch)  # Will wait here if the queue is full.
+          with timer.section('batcher_postproc'):
+            batch = self._postprocess(batch)
+        output.put(batch)
     except Exception as e:
       e.stacktrace = ''.join(traceback.format_exception(*sys.exc_info()))
       output.put(e)

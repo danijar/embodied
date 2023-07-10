@@ -114,6 +114,9 @@ class Cache:
 
   def __init__(self, cache_dir):
     self._cache_dir = cache_dir
+    import tensorflow as tf
+    tf.config.set_visible_devices([], 'GPU')
+    tf.config.set_visible_devices([], 'TPU')
 
   def get_path(self, key):
     import hashlib, os

@@ -18,7 +18,6 @@ class Dummy(embodied.Env):
         'image': embodied.Space(np.uint8, self._size + (3,)),
         'vector': embodied.Space(np.float32, (7,)),
         # 'token': embodied.Space(np.int32, (), 0, 256),
-        'log_text': embodied.Space(str),
         'step': embodied.Space(np.int32, (), 0, self._length),
         'reward': embodied.Space(np.float32),
         'is_first': embodied.Space(bool),
@@ -38,20 +37,19 @@ class Dummy(embodied.Env):
     if action['reset'] or self._done:
       self._step = 0
       self._done = False
-      return self._obs(0.0, is_first=True)
+      return self._obs(0, is_first=True)
     action = action['action']
     self._step += 1
     self._done = (self._step >= self._length)
-    return self._obs(1.0, is_last=self._done, is_terminal=self._done)
+    return self._obs(1, is_last=self._done, is_terminal=self._done)
 
   def _obs(self, reward, is_first=False, is_last=False, is_terminal=False):
     return dict(
         image=np.zeros(self._size + (3,), np.uint8),
         vector=np.zeros(7, np.float32),
         # token=np.zeros((), np.int32),
-        log_text='hello world',
-        step=self._step,
-        reward=reward,
+        step=np.int32(self._step),
+        reward=np.float32(reward),
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_terminal,

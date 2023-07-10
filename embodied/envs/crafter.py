@@ -4,10 +4,11 @@ import numpy as np
 
 class Crafter(embodied.Env):
 
-  def __init__(self, task, size=(64, 64), outdir=None, seed=None):
+  def __init__(self, task, size=(64, 64), logs=True, outdir=None, seed=None):
     assert task in ('reward', 'noreward')
     import crafter
     self._env = crafter.Env(size=size, reward=(task == 'reward'), seed=seed)
+    self._logs = logs
     if outdir:
       outdir = embodied.Path(outdir)
       self._env = crafter.Recorder(
@@ -29,9 +30,10 @@ class Crafter(embodied.Env):
         'is_terminal': embodied.Space(bool),
         'log_reward': embodied.Space(np.float32),
     }
-    spaces.update({
-        f'log_achievement_{k}': embodied.Space(np.int32)
-        for k in self._achievements})
+    if self._logs:
+      spaces.update({
+          f'log_achievement_{k}': embodied.Space(np.int32)
+          for k in self._achievements})
     return spaces
 
   @property
@@ -56,18 +58,20 @@ class Crafter(embodied.Env):
   def _obs(
       self, image, reward, info,
       is_first=False, is_last=False, is_terminal=False):
-    log_achievements = {
-        f'log_achievement_{k}': info['achievements'][k] if info else 0
-        for k in self._achievements}
-    return dict(
+    obs = dict(
         image=image,
-        reward=reward,
+        reward=np.float32(reward),
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_terminal,
         log_reward=np.array(info['reward'] if info else 0.0, np.float32),
-        **log_achievements,
     )
+    if self._logs:
+      log_achievements = {
+          f'log_achievement_{k}': info['achievements'][k] if info else 0
+          for k in self._achievements}
+      obs.update({k: np.int32(v) for k, v in log_achievements.items()})
+    return obs
 
   def render(self):
     return self._env.render()

@@ -143,7 +143,7 @@ class Atari(embodied.Env):
       image = image[:, :, None]
     return dict(
         image=image,
-        reward=reward,
+        reward=np.float32(reward),
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_last,

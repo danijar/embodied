@@ -97,7 +97,8 @@ class MinecraftDiamond(embodied.Wrapper):
 
   def step(self, action):
     obs = self.env.step(action)
-    obs['reward'] = sum([fn(obs, self.env.inventory) for fn in self.rewards])
+    reward = sum([fn(obs, self.env.inventory) for fn in self.rewards])
+    obs['reward'] = np.float32(reward)
     return obs
 
 

@@ -5,6 +5,15 @@ import sys
 import warnings
 from functools import partial as bind
 
+# def warn_with_traceback(
+#       message, category, filename, lineno, file=None, line=None):
+#   log = file if hasattr(file, 'write') else sys.stderr
+#   import traceback
+#   traceback.print_stack(file=log)
+#   log.write(warnings.formatwarning(
+#       message, category, filename, lineno, line))
+# warnings.showwarning = warn_with_traceback
+
 warnings.filterwarnings('ignore', '.*box bound precision lowered.*')
 warnings.filterwarnings('ignore', '.*using stateful random seeds*')
 warnings.filterwarnings('ignore', '.*is a deprecated alias for.*')
@@ -22,8 +31,13 @@ from embodied import wrappers
 
 
 def main(argv=None):
-  from . import agent as agt
 
+  embodied.print(r"---  ___                           __   ______ ---")
+  embodied.print(r"--- |   \ _ _ ___ __ _ _ __  ___ _ \ \ / /__ / ---")
+  embodied.print(r"--- | |) | '_/ -_) _` | '  \/ -_) '/\ V / |_ \ ---")
+  embodied.print(r"--- |___/|_| \___\__,_|_|_|_\___|_|  \_/ |___/ ---")
+
+  from . import agent as agt
   parsed, other = embodied.Flags(configs=['defaults']).parse_known(argv)
   config = embodied.Config(agt.Agent.configs['defaults'])
   for name in parsed.configs:
@@ -32,7 +46,7 @@ def main(argv=None):
   args = embodied.Config(
       **config.run, logdir=config.logdir,
       batch_steps=config.batch_size * config.batch_length)
-  # print(config)
+  print('Run script:', args.script)
 
   logdir = embodied.Path(args.logdir)
   if args.script != 'parallel_env':
@@ -40,6 +54,8 @@ def main(argv=None):
     config.save(logdir / 'config.yaml')
     step = embodied.Counter()
     logger = make_logger(parsed, logdir, step, config)
+
+  embodied.timer.global_timer.enabled = args.timer
 
   cleanup = []
   try:
@@ -94,11 +110,28 @@ def main(argv=None):
       ctor = bind(wrapped_env, config, batch=False)
       step = embodied.Counter()
       env = ctor()
+
       agent = agt.Agent(env.obs_space, env.act_space, step, config)
+
+      # # TODO
+      # from embodied import random
+      # agent = random.RandomAgent(env.obs_space, env.act_space)
+
       env.close()
-      replay = make_replay(config, logdir / 'replay', rate_limit=True)
+
+      # replay = make_replay(config, logdir / 'replay', rate_limit=True)
+      # embodied.run.parallel(
+      #     agent, replay, logger, ctor, config.envs.amount, args)
+
+      # embodied.run.parallel(
+      #     agent, logger,
+      #     make_replay(config, logdir / 'replay', rate_limit=True),
+      #     ctor, config.envs.amount, args)
+
       embodied.run.parallel(
-          agent, replay, logger, ctor, config.envs.amount, args)
+          agent, logger,
+          bind(make_replay, config, logdir / 'replay', rate_limit=True),
+          ctor, config.envs.amount, args)
 
     elif args.script == 'parallel_agent':
       ctor = bind(wrapped_env, config, batch=False)
@@ -116,6 +149,14 @@ def main(argv=None):
         replica_id = int(os.environ['JOB_COMPLETION_INDEX'])
       embodied.run.parallel_env(replica_id, ctor, args)
 
+    # elif args.script == 'train_with_text':
+    #   replay = make_replay(config, logdir / 'replay')
+    #   env = wrapped_env(config, batch=True)
+    #   cleanup.append(env)
+    #   step = embodied.Counter()
+    #   agent = agt.Agent(env.obs_space, env.act_space, step, config)
+    #   embodied.run.train_with_text(agent, env, replay, logger, args)
+
     else:
       raise NotImplementedError(args.script)
   finally:
@@ -126,57 +167,46 @@ def main(argv=None):
 def make_logger(parsed, logdir, step, config):
   multiplier = config.env.get(config.task.split('_')[0], {}).get('repeat', 1)
   logger = embodied.Logger(step, [
-      embodied.logger.TerminalOutput(config.filter),
+      embodied.logger.TerminalOutput(config.filter, 'Agent'),
       embodied.logger.JSONLOutput(logdir, 'metrics.jsonl'),
       embodied.logger.JSONLOutput(logdir, 'scores.jsonl', 'episode/score'),
-      embodied.logger.TensorBoardOutput(logdir, config.run.log_video_fps),
+      embodied.logger.TensorBoardOutput(
+          logdir, config.run.log_video_fps, videos=config.tensorboard_videos),
   ], multiplier)
   return logger
 
 
-def make_replay(
-    config, directory=None, is_eval=False, rate_limit=False, **kwargs):
-  assert config.replay in ('replay', 'uniform') or not rate_limit
+def make_replay(config, directory=None, is_eval=False, rate_limit=False):
   length = config.batch_length
   size = config.replay_size // 10 if is_eval else config.replay_size
-  if config.replay == 'replay':
-    kw = {}
-    if rate_limit and config.run.train_ratio > 0:
-      kw['samples_per_insert'] = config.run.train_ratio / config.batch_length
-      kw['tolerance'] = 10 * config.batch_size
-      kw['min_size'] = config.batch_size
-    replay = embodied.replay.Replay(length, size, directory, **kw)
-  elif config.replay == 'uniform':
-    kw = {}
-    if rate_limit and config.run.train_ratio > 0:
-      kw['samples_per_insert'] = config.run.train_ratio / config.batch_length
-      kw['tolerance'] = 10 * config.batch_size
-      kw['min_size'] = config.batch_size
-    replay = embodied.replay.Uniform(length, size, directory, **kw)
-  elif config.replay == 'reverb':
-    replay = embodied.replay.Reverb(length, size, directory)
-  else:
-    raise NotImplementedError(config.replay)
+  kwargs = {}
+  if rate_limit and config.run.train_ratio > 0:
+    kwargs['samples_per_insert'] = config.run.train_ratio / config.batch_length
+    kwargs['tolerance'] = 10 * config.batch_size
+    kwargs['min_size'] = config.batch_size
+  replay = embodied.replay.Replay(length, size, directory, **kwargs)
   return replay
 
 
 def wrapped_env(config, batch, **overrides):
-  ctor = bind(make_env, config, **overrides)
-  if batch and config.envs.parallel != 'none':
-    ctor = bind(embodied.Parallel, ctor, config.envs.parallel)
-  if config.envs.restarts:
-    ctor = bind(wrappers.RestartOnException, ctor)
   if batch:
-    envs = [ctor() for _ in range(config.envs.amount)]
+    envs = []
+    for index in range(config.envs.amount):
+      ctor = bind(make_env, config, index, **overrides)
+      if batch and config.envs.parallel != 'none':
+        ctor = bind(embodied.Parallel, ctor, config.envs.parallel)
+      if config.envs.restarts:
+        ctor = bind(wrappers.RestartOnException, ctor)
+      envs.append(ctor())
     return embodied.BatchEnv(envs, config.envs.parallel)
   else:
-    return ctor()
+    return make_env(config, index=0, **overrides)
 
 
-def make_env(config, **overrides):
+def make_env(config, index, **overrides):
   from embodied.envs import from_gym
   suite, task = config.task.split('_', 1)
-  if suite == 'procgen':
+  if suite == 'procgen':  # TODO
     import procgen  # noqa
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
@@ -200,6 +230,8 @@ def make_env(config, **overrides):
     ctor = getattr(module, cls)
   kwargs = config.env.get(suite, {})
   kwargs.update(overrides)
+  if kwargs.get('use_seed', False):
+    kwargs['seed'] = hash((config.seed, index))
   env = ctor(task, **kwargs)
   return wrap_env(env, config)
 

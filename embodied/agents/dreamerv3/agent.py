@@ -8,6 +8,10 @@ tfd = tfp.distributions
 f32 = jnp.float32
 tree_map = jax.tree_util.tree_map
 sg = lambda x: tree_map(jax.lax.stop_gradient, x)
+is_list = lambda x: isinstance(x, list)
+# TODO
+is_inner_list = lambda x: (
+    isinstance(x, list) and (not x or hasattr(x[0], 'shape')))
 
 import logging
 logger = logging.getLogger()
@@ -57,40 +61,52 @@ class Agent(nj.Module):
   def train_initial(self, batch_size):
     return self.wm.initial(batch_size)
 
-  def policy(self, obs, state, mode='train'):
-    self.config.jax.jit and print('Tracing policy function.')
-    obs = self.preprocess(obs)
-    (prev_state, prev_action), task_state, expl_state = state
-    embed = self.wm.encoder(obs, batchdims=1)
-    state = self.wm.rssm.obs_step(
-        prev_state, prev_action, embed, obs['is_first'])
-    task_act, task_state = self.task_behavior.policy(state, task_state)
-    expl_act, expl_state = self.expl_behavior.policy(state, expl_state)
-    act = {'eval': task_act, 'explore': expl_act, 'train': task_act}[mode]
-    state = ((state, act), task_state, expl_state)
-    act = {
-        k: jnp.argmax(act[k], -1) if s.discrete else act[k]
-        for k, s in self.act_space.items()}
-    return act, state
+  def policy(self, obs, carry, mode='train'):
 
-  def train(self, data, state):
-    self.config.jax.jit and print('Tracing train function.')
+    # TODO
+    carry = tree_map(
+        lambda x: jnp.stack(x, 0) if isinstance(x, list) else x, carry,
+        is_leaf=is_list)
+
+    self.config.jax.jit and embodied.print('Tracing policy function', 'yellow')
+    obs = self.preprocess(obs)
+    (prev_state, prev_action), task_state, expl_state = carry
+    embed = self.wm.encoder(obs, batchdims=1)
+    carry = self.wm.rssm.obs_step(
+        prev_state, prev_action, embed, obs['is_first'])
+    task_act, task_state = self.task_behavior.policy(carry, task_state)
+    expl_act, expl_state = self.expl_behavior.policy(carry, expl_state)
+    act = {'eval': task_act, 'explore': expl_act, 'train': task_act}[mode]
+    carry = ((carry, act), task_state, expl_state)
+    act = {
+        k: jnp.argmax(act[k], -1).astype(jnp.int32) if s.discrete else act[k]
+        for k, s in self.act_space.items()}
+    return act, carry
+
+  def train(self, data, carry, train_wm=True, train_ac=True, ignore_inputs=()):
+    self.config.jax.jit and embodied.print('Tracing train function', 'yellow')
     data = self.preprocess(data)
+    for key in ignore_inputs:
+      data[key] = jnp.zeros_like(data[key])
     metrics = {}
-    state, outs, mets = self.wm.train(data, state)
-    metrics.update(mets)
-    context = {**data, **outs}
-    start = tree_map(lambda x: x.reshape((-1, *x.shape[2:])), context)
-    _, mets = self.task_behavior.train(self.wm.imagine, start, context)
-    metrics.update(mets)
-    if self.config.expl_behavior != 'None':
-      _, mets = self.expl_behavior.train(self.wm.imagine, start, context)
-      metrics.update({'expl_' + key: value for key, value in mets.items()})
+    if train_wm:
+      outs, carry, mets = self.wm.train(data, carry, ignore_inputs)
+      metrics.update(mets)
+    else:
+      _, outs, carry = self.wm.observe(data, carry)
+    if train_ac:
+      context = {**data, **outs}
+      start = tree_map(lambda x: x.reshape((-1, *x.shape[2:])), context)
+      _, mets = self.task_behavior.train(self.wm.imagine, start, context)
+      metrics.update(mets)
+      if self.config.expl_behavior != 'None':
+        _, mets = self.expl_behavior.train(self.wm.imagine, start, context)
+        metrics.update({'expl_' + key: value for key, value in mets.items()})
     outs = {}
-    return outs, state, metrics
+    return outs, carry, metrics
 
   def report(self, data):
-    self.config.jax.jit and print('Tracing report function.')
+    self.config.jax.jit and embodied.print('Tracing report function', 'yellow')
     data = self.preprocess(data)
     report = {}
     report.update(self.wm.report(data))
@@ -109,7 +125,7 @@ class Agent(nj.Module):
         continue
       space = spaces[key]
       if key in self.act_space and space.discrete:
-        value = jax.nn.one_hot(value, space.high)
+        value = jax.nn.one_hot(value, int(space.high))
       if len(space.shape) >= 3 and space.dtype == np.uint8:
         value = jaxutils.cast_to_compute(value) / 255.0
       # elif jnp.issubdtype(value.dtype, jnp.unsignedinteger):
@@ -167,31 +183,26 @@ class WorldModel(nj.Module):
         for k, v in self.act_space.items()}
     return latent, action
 
-  def train(self, data, carry):
+  def train(self, data, carry, ignore_inputs=()):
     modules = [self.encoder, self.rssm, *self.heads.values()]
     if self.config.repval and not self.config.repval_separate:
       critic = self.repval_behav.ac.critics['extr'].net
       modules.append(critic)
-    mets, (carry, outs, metrics) = self.opt(
-        modules, self.loss, data, carry, has_aux=True)
+    mets, (outs, carry, metrics) = self.opt(
+        modules, self.loss, data, carry, ignore_inputs, has_aux=True)
     metrics.update(mets)
-    return carry, outs, metrics
+    return outs, carry, metrics
 
-  def loss(self, data, carry):
+  def loss(self, data, carry, ignore_inputs=()):
     metrics = {}
-    embed = self.encoder(data)
-    prev_state, prev_action = carry
-    prev_actions = {
-        k: jnp.concatenate([prev_action[k][:, None], data[k][:, :-1]], 1)
-        for k in self.act_space}
-    states = self.rssm.observe(
-        prev_state, prev_actions, embed, data['is_first'])
+    states, feats, carry = self.observe(data, carry)
+
     dists = {}
-    feats = {**states, 'embed': embed}
     for name, head in self.heads.items():
       out = head(feats if name in self.config.grad_heads else sg(feats))
       out = out if isinstance(out, dict) else {name: out}
       dists.update(out)
+    dists = {k: v for k, v in dists.items() if k not in ignore_inputs}
     losses, stats = self.rssm.loss(states, **self.config.rssm_loss)
 
     if self.repval_behav:
@@ -232,12 +243,15 @@ class WorldModel(nj.Module):
         loss = -dist.log_prob(data[key].astype(jnp.float32))
       except Exception as e:
         raise Exception(f'Error in {name} loss:\n\n{e}.') from e
-      assert loss.shape == embed.shape[:2], (key, loss.shape)
+      assert loss.shape == feats['embed'].shape[:2], (key, loss.shape)
       losses[key] = loss
 
     for key, dist in dists.items():
       if hasattr(dist, 'entropy'):
-        metrics[f'{key}_pred_entropy'] = dist.entropy().mean()
+        metrics[f'{key}_head_entropy'] = dist.entropy().mean()
+      if isinstance(dist, tfd.Categorical):
+        accuracy = (dist.mode() == data[key]).astype(f32)
+        metrics[f'{key}_head_accuracy'] = accuracy.mean()
 
     # if self.scales['sparse']:
     #   lhs = states['deter'][:, :-1]
@@ -248,12 +262,23 @@ class WorldModel(nj.Module):
     model_loss = sum(scaled.values())
     assert model_loss.shape == ()
     out.update({f'{k}_loss': v for k, v in losses.items()})
-    new_state = {k: v[:, -1] for k, v in states.items()}
-    new_action = {k: data[k][:, -1] for k in self.act_space}
-    carry = new_state, new_action
     metrics.update(self._metrics(
         data, dists, states, stats, losses, model_loss))
-    return model_loss, (carry, feats, metrics)
+    return model_loss, (feats, carry, metrics)
+
+  def observe(self, data, carry):
+    embed = self.encoder(data)
+    prev_state, prev_action = carry
+    prev_acts = {
+        k: jnp.concatenate([prev_action[k][:, None], data[k][:, :-1]], 1)
+        for k in self.act_space}
+    states = self.rssm.observe(
+        prev_state, prev_acts, embed, data['is_first'])
+    new_state = {k: v[:, -1] for k, v in states.items()}
+    new_action = {k: data[k][:, -1] for k in self.act_space}
+    carry = (new_state, new_action)
+    outs = {**states, 'embed': embed}
+    return states, outs, carry
 
   def imagine(self, policy, start, horizon, carry=None):
     carry = carry or {}
@@ -292,15 +317,13 @@ class WorldModel(nj.Module):
     state = self.initial(len(data['is_first']))
     report = {}
     report.update(self.loss(data, state)[-1][-1])
-    states = self.rssm.observe(
-        self.rssm.initial(len(data['is_first'][:6])),
-        {k: data[k][:6, :5] for k in self.act_space},
-        self.encoder(data)[:6, :5],
-        data['is_first'][:6, :5])
+    states, _, _ = self.observe(
+        {k: v[:6, :5] for k, v in data.items()},
+        self.initial(len(data['is_first'][:6])))
     start = {k: v[:, -1] for k, v in states.items()}
     recon = self.heads['decoder'](states)
-    openl = self.heads['decoder'](self.rssm.imagine(
-        start, {k: data[k][:6, 5:] for k in self.act_space}))
+    prev_acts = {k: data[k][:6, 5 - 1: -1] for k in self.act_space}
+    openl = self.heads['decoder'](self.rssm.imagine(start, prev_acts))
     for key in self.heads['decoder'].cnn_keys:
       truth = data[key][:6].astype(jnp.float32)
       model = jnp.concatenate([recon[key].mode()[:, :5], openl[key].mode()], 1)
@@ -379,6 +402,10 @@ class ImagActorCritic(nj.Module):
       action = {k: v.sample(seed=nj.rng()) for k, v in dist.items()}
     else:
       action = {k: v.mode() for k, v in dist.items()}
+
+    # import time
+    # jax.debug.callback(lambda: time.sleep(2.0))
+
     return action, carry
 
   def train(self, imagine, start, context):
@@ -429,7 +456,7 @@ class ImagActorCritic(nj.Module):
     metrics = {}
     for key, space in self.act_space.items():
       act = jnp.argmax(traj[key], -1) if space.discrete else traj[key]
-      metrics.update(jaxutils.tensorstats(act, f'{key}_action'))
+      metrics.update(jaxutils.tensorstats(act.astype(f32), f'{key}_action'))
       rand = (ent[key] - policy[key].minent) / (
           policy[key].maxent - policy[key].minent)
       rand = rand.mean(range(2, len(rand.shape)))
@@ -451,7 +478,8 @@ class VFunction(nj.Module):
     self.updater = jaxutils.SlowUpdater(
         self.net, self.slow,
         self.config.slow_critic_fraction,
-        self.config.slow_critic_update)
+        self.config.slow_critic_update,
+        name='updater')
     self.opt = jaxutils.Optimizer(name='critic_opt', **self.config.critic_opt)
 
   def train(self, traj, actor):

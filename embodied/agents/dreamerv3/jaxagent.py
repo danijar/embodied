@@ -1,6 +1,9 @@
-import concurrent.futures
 import functools
 import os
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial as bind
 
 import chex
 import embodied
@@ -40,72 +43,128 @@ def Wrapper(agent_cls):
 class JAXAgent(embodied.Agent):
 
   def __init__(self, agent_cls, obs_space, act_space, step, config):
+    self.obs_space = obs_space
+    self.act_space = act_space
     self.config = config
     self.jaxcfg = config.jax
     self.logdir = embodied.Path(config.logdir)
     self._setup()
     self.agent = agent_cls(obs_space, act_space, step, config, name='agent')
     self.rng = np.random.default_rng(config.seed)
+    self.keys = [
+        k for k in list(obs_space.keys()) + list(act_space.keys())
+        if not k.startswith('_') and k != 'reset']
 
     available = jax.devices(self.jaxcfg.platform)
+    print(f'JAX devices ({jax.local_device_count()}):', available)
+    if self.jaxcfg.assert_num_devices > 0:
+      assert len(available) == self.jaxcfg.assert_num_devices, (
+          available, len(available), self.jaxcfg.assert_num_devices)
     self.policy_devices = [available[i] for i in self.jaxcfg.policy_devices]
     self.train_devices = [available[i] for i in self.jaxcfg.train_devices]
-    self.single_device = (self.policy_devices == self.train_devices) and (
-        len(self.policy_devices) == 1)
-    print(f'JAX devices ({jax.local_device_count()}):', available)
     print('Policy devices:', ', '.join([str(x) for x in self.policy_devices]))
     print('Train devices: ', ', '.join([str(x) for x in self.train_devices]))
+    self.single_device = (self.policy_devices == self.train_devices) and (
+        len(self.policy_devices) == 1)
 
     self._transform()
-    self.varibs = self._init_varibs(obs_space, act_space)
+    with embodied.timer.section('agent_init'):
+      self.varibs = self._init_varibs(obs_space, act_space)
     self.updates = embodied.Counter()
 
-    self.outs_worker = concurrent.futures.ThreadPoolExecutor(1)
-    self.mets_worker = concurrent.futures.ThreadPoolExecutor(1)
-    self.sync_worker = concurrent.futures.ThreadPoolExecutor(1)
+    pattern = re.compile(r'/(actor|wm/enc|wm/rssm)/')  # TODO
+    self.copy_keys = [k for k in self.varibs.keys() if pattern.search(k)]
+
+    self.outs_worker = ThreadPoolExecutor(1, 'jaxagent_outs')
+    self.mets_worker = ThreadPoolExecutor(1, 'jaxagent_mets')
+    self.sync_worker = ThreadPoolExecutor(1, 'jaxagent_sync')
     self.outs_promise = None
     self.mets_promise = None
     self.sync_promise = None
 
+    self.policy_lock = threading.Lock()
+
     self.should_sync = embodied.when.Every(self.jaxcfg.sync_every)
     if not self.single_device:
-      self.policy_varibs = self._copy_varibs(self.varibs)
+      varibs = {k: self.varibs[k] for k in self.copy_keys}
+      self.policy_varibs = self._copy_varibs(varibs)
 
-  def policy(self, obs, state=None, mode='train'):
-    obs = self._filter_data(obs.copy())
-    obs = self._convert_inps(obs, self.policy_devices)
-    rng = self._next_rngs(self.policy_devices)
+  def init_policy(self, batch_size):
     varibs = self.varibs if self.single_device else self.policy_varibs
-
-    if state is None:
-      state, _ = self._init_policy(varibs, rng, obs['is_first'])
-    else:
-      state = tree_map(
-          np.asarray, state, is_leaf=lambda x: isinstance(x, list))
-      state = self._convert_inps(state, self.policy_devices)
-
-    (outs, state), _ = self._policy(varibs, rng, obs, state, mode=mode)
-    if not self.single_device:
-      if self.sync_promise and self.sync_promise.done():
-        self.policy_varibs = self.sync_promise.result()
-        self.sync_promise = None
-    outs = self._convert_outs(outs, self.policy_devices)
-
-    # TODO: Consider keeping policy states in accelerator memory.
+    rng = self._next_rngs(self.policy_devices)
+    is_first = np.ones(batch_size, bool)
+    is_first = self._convert_inps(is_first, self.policy_devices)
+    state, _ = self._init_policy(varibs, rng, is_first)
     state = self._convert_outs(state, self.policy_devices)
+    return state
 
+  def init_train(self, batch_size):
+    rng = self._next_rngs(self.train_devices)
+    is_first = np.ones(batch_size, bool)
+    is_first = self._convert_inps(is_first, self.train_devices)
+    state, _ = self._init_train(self.varibs, rng, is_first)
+    return state
+
+  @embodied.timer.section('jaxagent_policy')
+  def policy(self, obs, state=None, mode='train'):
+    # assert state is not None
+    if state is None:
+      state = self.init_policy(len(obs['is_first']))
+    obs = self._filter_data(obs)
+    varibs = self.varibs if self.single_device else self.policy_varibs
+    with self.policy_lock:
+      with embodied.timer.section('prepare_state'):
+        state = tree_map(
+            lambda x: np.asarray(x) if isinstance(x, list) else x,
+            state, is_leaf=lambda x: isinstance(x, list))
+      with embodied.timer.section('upload_inputs'):
+        obs, state = self._convert_inps((obs, state), self.policy_devices)
+        rng = self._next_rngs(self.policy_devices)
+      with embodied.timer.section('agent_policy'):
+        (outs, state), _ = self._policy(
+            varibs, rng=rng, obs=obs, carry=state, mode=mode)
+    if not self.single_device:
+      with embodied.timer.section('swap_varibs'):
+        if self.sync_promise and self.sync_promise.done():
+          self.policy_varibs = self.sync_promise.result()
+          self.sync_promise = None
+    with embodied.timer.section('fetch_outputs'):
+      outs, state = self._convert_outs((outs, state), self.policy_devices)
     return outs, state
 
-  def train(self, data, state=None):
-    data = self._filter_data(data.copy())
+  @embodied.timer.section('jaxagent_train')
+  def train(self, data, state=None, **kwargs):
+    # assert state is not None
+    # if state is None:
+    #   state = self.init_train(len(data['is_first']))
+    data = data.copy()
     rng = data.pop('rng')
+    data = self._filter_data(data)
     if state is None:
       rng = self._next_rngs(self.train_devices)
       state, self.varibs = self._init_train(self.varibs, rng, data['is_first'])
-    prev_varibs = self.varibs
+    prev_varibs = {k: self.varibs[k] for k in self.copy_keys}
 
-    (outs, state, mets), self.varibs = self._train(
-        self.varibs, rng, data, state)
+    # # TODO
+    # if 'train_wm' not in kwargs:
+    #   kwargs['train_wm'] = True
+    # if 'train_ac' not in kwargs:
+    #   kwargs['train_ac'] = True
+    # if 'ignore_inputs' not in kwargs:
+    #   kwargs['ignore_inputs'] = ()
+
+    # TODO: Split variables into copied and not copied ones and then donate
+    # the ones that are not being copied to the actor.
+
+    # (outs, state, mets), self.varibs = self._train(
+    #     self.varibs, rng, data, state, **kwargs)
+
+    with embodied.timer.section('agent_train'):
+      allocated = {k: v for k, v in self.varibs.items() if k in self.copy_keys}
+      donated = {k: v for k, v in self.varibs.items() if k not in self.copy_keys}
+      (outs, state, mets), self.varibs = self._train(
+          allocated, donated=donated, rng=rng, data=data, carry=state, **kwargs)
+
     self.updates.increment()
 
     if not self.single_device:
@@ -137,11 +196,11 @@ class JAXAgent(embodied.Agent):
         outdir = embodied.Path('/tmp/profiler')
         outdir.mkdirs()
       if self.updates == 100:
-        print(f'Start JAX profiler ({str(outdir)})')
+        embodied.print(f'Start JAX profiler: {str(outdir)}', 'yellow')
         jax.profiler.start_trace(str(outdir))
       if self.updates == 140:
         from embodied.core import path as pathlib
-        print('Stop JAX profiler')
+        embodied.print('Stop JAX profiler', 'yellow')
         jax.profiler.stop_trace()
         if copyto:
           pathlib.GFilePath(outdir).copy(copyto)
@@ -149,13 +208,13 @@ class JAXAgent(embodied.Agent):
 
     return return_outs, state, return_mets
 
+  @embodied.timer.section('jaxagent_report')
   def report(self, data):
-    data = self._filter_data(data.copy())
-    # TODO: We could also do the same pipelining optimization used in train()
-    # but it doesn't really matter because report() is not called as often.
     data = data.copy()
     rng = data.pop('rng')
-    mets, _ = self._report(self.varibs, rng, data)
+    data = self._filter_data(data)
+    with embodied.timer.section('agent_report'):
+      mets, _ = self._report(self.varibs, rng, data)
     mets = self._convert_mets(mets, self.train_devices)
     return mets
 
@@ -170,21 +229,28 @@ class JAXAgent(embodied.Agent):
         prefetch_batch=1)
     return batcher()
 
+  @embodied.timer.section('jaxagent_save')
   def save(self):
     if len(self.train_devices) > 1:
       varibs = tree_map(lambda x: x[0], self.varibs)
     else:
       varibs = self.varibs
     return jax.device_get(varibs)
+    # jax.device_get(varibs)
+    # return {}  # TODO
 
+  @embodied.timer.section('jaxagent_load')
   def load(self, state):
-    chex.assert_trees_all_equal_shapes(self.varibs, state)
     if len(self.train_devices) == 1:
+      # chex.assert_trees_all_equal_shapes(self.varibs, state)
       self.varibs = jax.device_put(state, self.train_devices[0])
     else:
+      # chex.assert_trees_all_equal_shapes(
+      #     tree_map(lambda x: x[0], self.varibs), state)
       self.varibs = jax.device_put_replicated(state, self.train_devices)
     if not self.single_device:
-      self.policy_varibs = self._copy_varibs(self.varibs)
+      varibs = {k: self.varibs[k] for k in self.copy_keys}
+      self.policy_varibs = self._copy_varibs(varibs)
 
   def _setup(self):
     try:
@@ -212,46 +278,69 @@ class JAXAgent(embodied.Agent):
     jaxutils.COMPUTE_DTYPE = getattr(jnp, self.jaxcfg.precision)
 
   def _transform(self):
-    self._init_policy = nj.pure(lambda x: self.agent.policy_initial(len(x)))
     self._init_train = nj.pure(lambda x: self.agent.train_initial(len(x)))
-    self._policy = nj.pure(self.agent.policy)
+    self._init_policy = nj.pure(lambda x: self.agent.policy_initial(len(x)))
     self._train = nj.pure(self.agent.train)
+    self._policy = nj.pure(self.agent.policy)
     self._report = nj.pure(self.agent.report)
+
+    self._init_policy = bind(self._init_policy, modify=False)
+    self._train = lambda state, donated, rng, data, fn=self._train, **kw: (
+        fn({**state, **donated}, rng=rng, data=data, **kw))
+    self._policy = bind(self._policy, modify=False)
+    self._report = bind(self._report, modify=False)
+
+    train_static = ['train_wm', 'train_ac', 'ignore_inputs']  # TODO
+    policy_static = ['mode', 'modify', 'create']  # TODO
+    # TODO: Donation currently breaks checkpoint saving, because the donated
+    # parameters cannot be fetched in save() anymore.
+    train_donate = []  # ['donated']
+    policy_donate = []
+
     if len(self.train_devices) == 1:
       kw = dict(device=self.train_devices[0])
       self._init_train = nj.jit(self._init_train, **kw)
-      self._train = nj.jit(self._train, **kw)
+      self._train = nj.jit(
+          self._train, static=train_static, donate=train_donate, **kw)
       self._report = nj.jit(self._report, **kw)
     else:
       kw = dict(devices=self.train_devices)
       self._init_train = nj.pmap(self._init_train, 'i', **kw)
-      self._train = nj.pmap(self._train, 'i', **kw)
+      self._train = nj.pmap(
+          self._train, 'i', static=train_static, donate=train_donate, **kw)
       self._report = nj.pmap(self._report, 'i', **kw)
+
     if len(self.policy_devices) == 1:
       kw = dict(device=self.policy_devices[0])
       self._init_policy = nj.jit(self._init_policy, **kw)
-      self._policy = nj.jit(self._policy, static=['mode'], **kw)
+      self._policy = nj.jit(
+          self._policy, static=policy_static, donate=policy_donate, **kw)
     else:
       kw = dict(devices=self.policy_devices)
       self._init_policy = nj.pmap(self._init_policy, 'i', **kw)
-      self._policy = nj.pmap(self._policy, 'i', static=['mode'], **kw)
+      self._policy = nj.pmap(
+          self._policy, 'i', static=policy_static, donate=policy_donate, **kw)
+
+    self._init_policy = bind(self._init_policy, init=False)
+    self._policy = bind(self._policy, init=False)
+    self._report = bind(self._report, init=False)
+
     if self.jaxcfg.checks:
       assert self.config.run.actor_threads == 1, 'chex is not thread-safe'
       jaxutils.ENABLE_CHECKS = True
-      self._policy = jaxutils.transform_with_static(
-          self._checkify, 'mode')(self._policy)
-      self._train = jaxutils.transform_with_static(
-          self._checkify, 'init_only')(self._train)
-      self._report = self._checkify(self._report)
-      self._init_train = self._checkify(self._init_train)
-      self._init_policy = self._checkify(self._init_policy)
+      wrap = nj.static_support(self._checkify)
+      self._policy = wrap(self._policy, static=policy_static)
+      self._train = wrap(self._train, static=train_static + ['init'])
+      self._report = wrap(self._report)
+      self._init_train = wrap(self._init_train)
+      self._init_policy = wrap(self._init_policy)
 
-  def _checkify(self, fn):
-    fn = chex.chexify(fn, True, checkify.user_checks)
-    @functools.wraps(fn)
+  def _checkify(self, fun):
+    fun = chex.chexify(fun, True, checkify.user_checks)
+    @functools.wraps(fun)
     def transformed(*args, **kwargs):
       try:
-        return fn(*args, **kwargs)
+        return fun(*args, **kwargs)
       except Exception:
         chex.block_until_chexify_assertions_complete()
         raise
@@ -261,16 +350,32 @@ class JAXAgent(embodied.Agent):
     if len(devices) == 1:
       value = jax.device_put(value, devices[0])
     else:
-      check = tree_map(lambda x: len(x) % len(devices) == 0, value)
-      if not all(jax.tree_util.tree_leaves(check)):
+      D = len(devices)
+      try:
+        value = tree_map(lambda x: x.reshape((D, -1, *x.shape[1:])), value)
+      except Exception as e:
         shapes = tree_map(lambda x: x.shape, value)
-        raise ValueError(
-            f'Batch must by divisible by {len(devices)} devices: {shapes}')
-      value = tree_map(
-          lambda x: x.reshape((len(devices), -1) + x.shape[1:]), value)
-      shards = []
-      for i in range(len(devices)):
-        shards.append(tree_map(lambda x: x[i], value))
+        msg = f'Shapes are not divislbe by {D} devices: {shapes}'
+        raise ValueError(msg) from e
+      shards = [tree_map(lambda x: x[d], value) for d in range(D)]
+
+      # D = len(devices)
+      # def reshape(value):
+      #   N = len(value)
+      #   K = N // D
+      #   assert N % D == 0
+      #   if isinstance(value, list):
+      #     return [value[d * K: (d + 1) * K] for d in range(D)]
+      #   else:
+      #     return value.reshape((D, K, *value.shape[1:]))
+      # try:
+      #   value = tree_map(reshape, value, is_leaf=is_list)
+      # except Exception as e:
+      #   shapes = tree_map(lambda x: x.shape, value)
+      #   raise ValueError(f'Invalid shapes for {D} devices: {shapes}') from e
+      # shards = [
+      #     tree_map(lambda x: x[i], value, is_leaf=is_list) for i in range(D)]
+
       value = jax.device_put_sharded(shards, devices)
     if rng:
       value['rng'] = self._next_rngs(devices)
@@ -309,18 +414,22 @@ class JAXAgent(embodied.Agent):
     data = self._dummy_batch({**obs_space, **act_space}, dims)
     data = self._convert_inps(data, self.train_devices)
     state, varibs = self._init_train(varibs, rng, data['is_first'])
-    varibs = self._train(varibs, rng, data, state, init_only=True)
+    varibs = self._train(
+        varibs, rng=rng, data=data, carry=state, donated={}, apply=False)
     # obs = self._dummy_batch(obs_space, (1,))
     # state, varibs = self._init_policy(varibs, rng, obs['is_first'])
     # varibs = self._policy(
     #     varibs, rng, obs, state, mode='train', init_only=True)
     return varibs
 
+  @embodied.timer.section('copy_varibs')
   def _copy_varibs(self, varibs, block=False):
+    for key in varibs:
+      assert key in self.copy_keys, key
     if self.single_device:
       return varibs
     if len(self.train_devices) > 1:
-      varibs = tree_map(lambda x: x[0].device_buffer, self.varibs)
+      varibs = tree_map(lambda x: x[0].device_buffer, varibs)
     if len(self.policy_devices) == 1:
       varibs = jax.device_put(varibs, self.policy_devices[0])
     else:
@@ -330,9 +439,10 @@ class JAXAgent(embodied.Agent):
     return varibs
 
   def _filter_data(self, data):
-    return {
-        k: v for k, v in data.items()
-        if not k.startswith('log_') and k != 'reset'}
+    return {k: v for k, v in data.items() if k in self.keys}
+    # return {
+    #     k: v for k, v in data.items()
+    #     if not k.startswith('log_') and k != 'reset'}
 
   def _dummy_batch(self, spaces, batch_dims):
     spaces = [(k, v) for k, v in spaces.items()]

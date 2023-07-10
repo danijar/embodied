@@ -1,6 +1,7 @@
-import concurrent.futures
+import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial as bind
 
 import embodied
@@ -31,17 +32,20 @@ class Replay:
       self.limiter = limiters.MinSize(min_size)
 
     self.chunks = {}
-    self.chunkrefs = defaultdict(int)
+    self.refs = {}
+    self.refs_lock = threading.RLock()
 
     self.items = {}
     self.fifo = deque()
+    self.itemid = 0
 
     self.current = {}
     self.streams = defaultdict(deque)
+    self.rwlock = embodied.RWLock()
 
     if self.directory:
       self.directory.mkdirs()
-      self.workers = concurrent.futures.ThreadPoolExecutor(10)
+      self.workers = ThreadPoolExecutor(4, 'replay_saver')
       self.promises = {}
 
     self.metrics = {
@@ -56,13 +60,15 @@ class Replay:
   def __len__(self):
     return len(self.items)
 
-  @property
   def stats(self):
     ratio = lambda x, y: x / y if y else np.nan
     m = self.metrics
+    chunk_nbytes = sum(x.nbytes for x in list(self.chunks.values()))
     stats = {
-        'size': len(self),
-        # 'ram_gb': len(self) * self.itemsize / (1024 ** 3),
+        'items': len(self.items),
+        'chunks': len(self.chunks),
+        'streams': len(self.streams),
+        'ram_gb': chunk_nbytes / (1024 ** 3),
         'inserts': m['inserts'],
         'samples': m['samples'],
         'insert_wait_avg': ratio(m['insert_wait_dur'], m['inserts']),
@@ -74,109 +80,167 @@ class Replay:
       self.metrics[key] = 0
     return stats
 
+  def clear(self):
+    self.chunks.clear()
+    self.refs.clear()
+    self.items.clear()
+    self.fifo.clear()
+    self.itemid = 0
+    self.current.clear()
+    self.streams.clear()
+
+  @embodied.timer.section('replay_add')
   def add(self, step, worker=0):
-    step = {k: v for k, v in step.items() if not k.startswith('log_')}
-    step['id'] = np.asarray(embodied.uuid(step.get('id')))
+    with self.rwlock.reading:
 
-    if worker not in self.current:
-      chunk = chunklib.Chunk(self.chunksize)
-      self.chunks[chunk.uuid] = chunk
-      self.current[worker] = (chunk, 0)
-      self.chunkrefs[chunk.uuid] += 1
+      step = {k: v for k, v in step.items() if not k.startswith('log_')}
+      step = {k: np.asarray(v) for k, v in step.items()}
+      # step['id'] = np.asarray(embodied.uuid(step.get('id')))
 
-    chunk, index = self.current[worker]
-    stream = self.streams[worker]
-    chunk.append(step)
-    stream.append((chunk.uuid, index))
-    self.chunkrefs[chunk.uuid] += 1
-    index += 1
-    self.current[worker] = (chunk, index)
+      if worker not in self.current:
+        chunk = chunklib.Chunk(self.chunksize)
+        with self.refs_lock:
+          self.refs[chunk.uuid] = 1
+        self.chunks[chunk.uuid] = chunk
+        self.current[worker] = (chunk.uuid, 0)
 
-    if index == chunk.size:
-      succ = chunklib.Chunk(self.chunksize)
-      chunk.succ = succ.uuid
-      self.chunks[succ.uuid] = succ
-      self.current[worker] = (succ, 0)
-      self.chunkrefs[chunk.uuid] -= 1
-      self.chunkrefs[succ.uuid] += 1
-      if self.directory:
-        (worker in self.promises) and self.promises.pop(worker).result()
-        self.promises[worker] = self.workers.submit(chunk.save, self.directory)
+      chunkid, index = self.current[worker]
+      stream = self.streams[worker]
+      chunk = self.chunks[chunkid]
+      assert chunk.length == index, (chunk.length, index)
+      chunk.append(step)
+      assert chunk.length == index + 1, (chunk.length, index + 1)
+      stream.append((chunkid, index))
+      with self.refs_lock:
+        self.refs[chunkid] += 1
 
-    if len(stream) >= self.length:
-      dur = wait(self.limiter.want_insert, 'Replay insert is waiting')
-      self.metrics['inserts'] += 1
-      self.metrics['insert_wait_dur'] += dur
-      self.metrics['insert_wait_count'] += int(dur > 0)
-      chunkid, index = stream.popleft()
-      self._insert(chunkid, index)
+      index += 1
+      if index < chunk.size:
+        self.current[worker] = (chunkid, index)
+      else:
+        self._complete(chunk, worker)
+      assert len(self.streams) == len(self.current)
 
+      if len(stream) >= self.length:
+        # dur = self._wait(self.limiter.want_insert, 'Replay insert is waiting')
+        start = time.time()
+        while not self.limiter.want_insert():
+          time.sleep(0.001)
+        dur = time.time() - start
+        # TODO: These increments are not thread safe.
+        self.metrics['inserts'] += 1
+        self.metrics['insert_wait_dur'] += dur
+        self.metrics['insert_wait_count'] += int(dur >= 0.001)
+        chunkid, index = stream.popleft()
+        self._insert(chunkid, index)
+
+  @embodied.timer.section('replay_sample')
   def _sample(self):
-    dur = wait(self.limiter.want_sample, 'Replay sample is waiting')
+    # dur = self._wait(self.limiter.want_sample, 'Replay sample is waiting')
+    start = time.time()
+    while not self.limiter.want_sample():
+      time.sleep(0.001)
+    dur = time.time() - start
+    self.limiter.sample()
+    # TODO: These increments are not thread safe.
     self.metrics['samples'] += 1
     self.metrics['sample_wait_dur'] += dur
-    self.metrics['sample_wait_count'] += int(dur > 0)
-
-    chunkid, index = self.items[self.sampler()]
-    chunk = self.chunks[chunkid]
+    self.metrics['sample_wait_count'] += int(dur >= 0.001)
+    while True:
+      with embodied.timer.section('draw'):
+        itemid = self.sampler()
+      with embodied.timer.section('lookup'):
+        # Look up the item or repeat if it was already removed in the meantime.
+        try:
+          chunkid, index = self.items[itemid]
+          chunk = self.chunks[chunkid]
+          break
+        except KeyError:
+          continue
 
     available = chunk.length - index
     if available >= self.length:
-      seq = chunk.slice(index, self.length)
+      with embodied.timer.section('slice'):
+        seq = chunk.slice(index, self.length)
     else:
-      parts = [chunk.slice(index, available)]
-      remaining = self.length - available
-      while remaining > 0:
-        chunk = self.chunks[chunk.succ]
-        take = min(remaining, chunk.length)
-        parts.append(chunk.slice(0, take))
-        remaining -= take
-      seq = {
-          k: np.concatenate([p[k] for p in parts], 0)
-          for k in parts[0].keys()}
+      with embodied.timer.section('compose'):
+        parts = [chunk.slice(index, available)]
+        remaining = self.length - available
+        while remaining > 0:
+          chunk = self.chunks[chunk.succ]
+          take = min(remaining, chunk.length)
+          parts.append(chunk.slice(0, take))
+          remaining -= take
+        seq = {
+            k: np.concatenate([p[k] for p in parts], 0)
+            for k in parts[0].keys()}
 
-    if 'is_first' in seq:
-      seq['is_first'] = seq['is_first'].copy()
-      seq['is_first'][0] = True
+    with embodied.timer.section('isfirst'):
+      if 'is_first' in seq:
+        seq['is_first'] = seq['is_first'].copy()
+        seq['is_first'][0] = True
+
+    # self._the_seq = seq
+
     return seq
 
   def _insert(self, chunkid, index):
-    # assert 0 <= index < self.chunks[chunkid].length
-    itemid = embodied.uuid()
+    # itemid = embodied.uuid()
+    # itemid = random.randint(0, 2 ** 63)
+    itemid = self.itemid
+    self.itemid += 1
     self.items[itemid] = (chunkid, index)
     self.sampler[itemid] = (chunkid, index)
     self.fifo.append(itemid)
+    self.limiter.insert()
     while self.capacity and len(self.items) > self.capacity:
       self._remove()
 
+  # def _insert(self, chunk, index):
+  #   itemid = embodied.uuid()
+  #   self.items[itemid] = (chunk, index)
+  #   self.sampler[itemid] = (chunk, index)
+  #   self.fifo.append(itemid)
+  #   self.limiter.insert()
+  #   while self.capacity and len(self.items) > self.capacity:
+  #     self._remove()
+
   def _remove(self):
-    self.limiter.want_remove()
+    self.limiter.remove()
     itemid = self.fifo.popleft()
     del self.sampler[itemid]
     chunkid, index = self.items.pop(itemid)
-    self.chunkrefs[chunkid] -= 1
-    if self.chunkrefs[chunkid] < 1:
-      del self.chunkrefs[chunkid]
-      del self.chunks[chunkid]
-      # for chunk in self.chunks.values():
-      #   assert chunk.succ != chunkid
+    with self.refs_lock:
+      # try:
+      self.refs[chunkid] -= 1
+      if self.refs[chunkid] < 1:
+        del self.refs[chunkid]
+        chunk = self.chunks.pop(chunkid)
+        if chunk.succ in self.refs:
+          self.refs[chunk.succ] -= 1
+        # for chunk in self.chunks.values():
+        #   assert chunk.succ != chunkid
+      # except KeyError:
+      #   pass  # There is a bug that I will never find.
 
   def dataset(self):
     while True:
       yield self._sample()
+      # time.sleep(0.0001)
 
+  @embodied.timer.section('replay_save')
   def save(self, wait=False):
     if not self.directory:
       return
-    promises = self.promises.copy()
-    self.promises.clear()
-    [promise.result() for promise in promises.values()]
-    chunks = [chunk for chunk, index in self.current.values() if index]
-    save = bind(chunklib.Chunk.save, directory=self.directory)
-    promises = self.workers.map(save, chunks)
-    wait and list(promises)
-    return None
+    with self.rwlock.writing:
+      [x.result() for x in list(self.promises.values())]
+      for worker, (chunkid, _) in self.current.items():
+        chunk = self.chunks[chunkid]
+        if chunk.length > 0:
+          self._complete(chunk, worker)
+      wait and [x.result() for x in list(self.promises.values())]
 
+  @embodied.timer.section('replay_load')
   def load(self, data=None, directory=None, amount=None):
     assert data is None
     directory = directory or self.directory
@@ -185,20 +249,13 @@ class Replay:
       return
     revsorted = lambda x: list(reversed(sorted(list(x))))
     directory = embodied.Path(directory)
-    names_loaded = revsorted(x.filename for x in self.chunks.values())
+    names_loaded = revsorted(x.filename for x in list(self.chunks.values()))
     names_ondisk = revsorted(x.name for x in directory.glob('*.npz'))
+    names_ondisk = [x for x in names_ondisk if x not in names_loaded]
+    if not names_ondisk:
+      return
 
-    names_all = revsorted(names_loaded + names_ondisk)
-    uuids, succs, lens = zip(*[
-        x.rsplit('.', 1)[0].split('-')[1:] for x in names_all])
-    uuids = [embodied.uuid(x) for x in uuids]
-    succs = [embodied.uuid(x) for x in succs]
-    lens = {k: int(v) for k, v in zip(uuids, lens)}
-    numitems = {}
-    for uuid, succ in zip(uuids, succs):
-      numitems[uuid] = lens[uuid] - self.length + 1 + lens.get(succ, 0)
-    numitems = {k: np.clip(v, 0, lens[k]) for k, v in numitems.items()}
-
+    numitems = self._numitems(names_loaded + names_ondisk)
     uuids = [embodied.uuid(x.split('-')[1]) for x in names_ondisk]
     total = 0
     numchunks = 0
@@ -210,27 +267,74 @@ class Replay:
 
     load = bind(chunklib.Chunk.load, error='none')
     filenames = [directory / x for x in names_ondisk[:numchunks]]
-    chunks = [x for x in self.workers.map(load, filenames) if x]
-    self.chunks.update({x.uuid: x for x in chunks})
-    for chunk in reversed(chunks):
-      amount = numitems[chunk.uuid]
-      self.chunkrefs[chunk.uuid] += amount
-      for index in range(amount):
-        self.limiter.want_load()
-        self._insert(chunk.uuid, index)
 
+    with ThreadPoolExecutor(16, 'replay_loader') as pool:
+      chunks = [x for x in pool.map(load, filenames) if x]
+    # byid = {x.uuid: x for x in chunks}
+    # for chunk in chunks:
+    #   chunk.succ = byid.get(chunk.succ, embodied.uuid(0))
 
-def wait(predicate, message, sleep=0.001, notify=1.0):
-  first = True
-  start = time.time()
-  notified = False
-  while True:
-    allowed, detail = predicate()
-    duration = time.time() - start
-    if allowed:
-      return 0 if first else duration
-    if not notified and duration >= notify:
-      print(f'{message} ({detail})')
-      notified = True
-    time.sleep(sleep)
-    first = False
+    # We need to recompute the number of items per chunk now because some
+    # chunks be corrupted and thus not available.
+    # numitems = self._numitems(chunks + list(self.chunks.values()))
+    numitems = self._numitems(chunks)
+    # self.chunks.update({x.uuid: x for x in chunks})
+
+    with self.rwlock.writing:
+      with self.refs_lock:
+        for chunk in chunks:
+          self.chunks[chunk.uuid] = chunk
+          self.refs[chunk.uuid] = 0
+        for chunk in reversed(chunks):
+          amount = numitems[chunk.uuid]
+          self.refs[chunk.uuid] += amount
+          if chunk.succ in self.refs:
+            self.refs[chunk.succ] += 1
+          for index in range(amount):
+            self._insert(chunk.uuid, index)
+
+  @embodied.timer.section('complete_chunk')
+  def _complete(self, chunk, worker):
+    succ = chunklib.Chunk(self.chunksize)
+    with self.refs_lock:
+      self.refs[chunk.uuid] -= 1
+      self.refs[succ.uuid] = 2
+    self.chunks[succ.uuid] = succ
+    self.current[worker] = (succ.uuid, 0)
+    chunk.succ = succ.uuid
+    if self.directory:
+      (worker in self.promises) and self.promises.pop(worker).result()
+      self.promises[worker] = self.workers.submit(chunk.save, self.directory)
+    return succ
+
+  def _numitems(self, chunks):
+    chunks = [x.filename if hasattr(x, 'filename') else x for x in chunks]
+    chunks = list(reversed(sorted([embodied.Path(x).stem for x in chunks])))
+    times, uuids, succs, lengths = zip(*[x.split('-') for x in chunks])
+    uuids = [embodied.uuid(x) for x in uuids]
+    succs = [embodied.uuid(x) for x in succs]
+    lengths = {k: int(v) for k, v in zip(uuids, lengths)}
+    future = {}
+    for uuid, succ in zip(uuids, succs):
+      future[uuid] = lengths[uuid] + future.get(succ, 0)
+    numitems = {}
+    for uuid, succ in zip(uuids, succs):
+      numitems[uuid] = lengths[uuid] + 1 - self.length + future.get(succ, 0)
+    numitems = {k: np.clip(v, 0, lengths[k]) for k, v in numitems.items()}
+    return numitems
+
+  # TODO
+  # def _wait(self, predicate, message, sleep=0.001, notify=1.0):
+  #   first = True
+  #   start = time.time()
+  #   notified = False
+  #   while True:
+  #     allowed, detail = predicate()
+  #     duration = time.time() - start
+  #     if allowed:
+  #       return 0 if first else duration
+  #     if not notified and duration >= notify:
+  #       print(f'{message} ({detail})')
+  #       notified = True
+  #     time.sleep(sleep)
+  #     first = False

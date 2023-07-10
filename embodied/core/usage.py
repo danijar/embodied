@@ -1,26 +1,87 @@
-from collections import defaultdict
+import gc
+import os
+import re
+import threading
+import time
 import tracemalloc
+from collections import defaultdict
+
+from . import agg
+from . import basics
+from . import timer
 
 
 class Usage:
 
-  def __init__(self, trace_malloc=False):
-    import psutil
-    self.trace_malloc = trace_malloc
-    if trace_malloc:
-      tracemalloc.start()
-      self._snapshot = None
-    self.groups = {'main': [psutil.Process()]}
+  def __init__(self, **kwargs):
+    available = {
+        'psutil': PsutilStats,
+        'nvsmi': NvsmiStats,
+        'gputil': GputilStats,
+        'malloc': MallocStats,
+        'gc': GcStats,
+        'gil': GilStats,
+    }
+    self.tools = {}
+    for name, enabled in kwargs.items():
+      assert isinstance(enabled, bool), (name, type(enabled))
+      if enabled:
+        self.tools[name] = available[name]()
 
-  def processes(self, name, procs):
-    import psutil
-    if not hasattr(procs, '__len__'):
-      procs = [procs]
-    procs = [int(x.pid if hasattr(x, 'pid') else x) for x in procs]
-    procs = [psutil.Process(x) for x in procs]
-    self.groups[name] = procs
+  def add_procs(self, name, procs):
+    if 'psutil' in self.tools:
+      self.tools['psutil'].add_procs(name, procs)
 
   def stats(self):
+    stats = {}
+    for name, tool in self.tools.items():
+      stats.update({f'{name}/{k}': v for k, v in tool().items()})
+    return stats
+
+
+class NvsmiStats:
+
+  PATTERNS = {
+      'compute_min': (r'GPU Utilization Samples(.|\n)+?Min.*?: (\d+) %', 1),
+      'compute_avg': (r'GPU Utilization Samples(.|\n)+?Avg.*?: (\d+) %', 1),
+      'compute_max': (r'GPU Utilization Samples(.|\n)+?Max.*?: (\d+) %', 1),
+      'memory_min': (r'Memory Utilization Samples(.|\n)+?Min.*?: (\d+) %', 1),
+      'memory_avg': (r'Memory Utilization Samples(.|\n)+?Avg.*?: (\d+) %', 1),
+      'memory_max': (r'Memory Utilization Samples(.|\n)+?Max.*?: (\d+) %', 1),
+  }
+
+  def __init__(self):
+    pass
+
+  @timer.section('nvsmi_stats')
+  def __call__(self):
+    output = os.popen('nvidia-smi --query -d UTILIZATION').read()
+    if not output:
+      print('To log GPU stats, make sure nvidia-smi is working.')
+      return {}
+    metrics = {'output': output}
+    for name, (pattern, group) in self.PATTERNS.items():
+      numbers = [x[group] for x in re.findall(pattern, output)]
+      for i, number in enumerate(numbers):
+        metrics[f'{name}/gpu{i}'] = float(numbers[i]) / 100
+    return metrics
+
+
+class PsutilStats:
+
+  def __init__(self):
+    import psutil
+    self.groups = {'main': [psutil.Process()]}
+
+  def add_procs(self, name, procs):
+    import psutil
+    procs = tuple(procs) if hasattr(procs, '__len__') else (procs,)
+    procs = tuple(int(x.pid if hasattr(x, 'pid') else x) for x in procs)
+    procs = tuple(psutil.Process(x) for x in procs)
+    self.groups[name] = procs
+
+  @timer.section('psutil_stats')
+  def __call__(self):
     import psutil
     gb = 1024 ** 3
     cpus = psutil.cpu_count()
@@ -35,20 +96,122 @@ class Usage:
     }
     for name, group in self.groups.items():
       cpu = sum([x.cpu_percent() for x in group])
-      stats[f'{name}_cpu_frac'] = cpu / cpus / 100
+      stats[f'{name}/cpu_frac'] = cpu / cpus / 100
       ram = sum([x.memory_info().rss for x in group])
-      stats[f'{name}_ram_gb'] = ram / gb
-      stats[f'{name}_ram_frac'] = ram / memory.total
-      stats[f'{name}_count'] = len(group)
-    if self.trace_malloc:
-      snapshot = tracemalloc.take_snapshot()
-      stats['malloc_full'] = self._malloc_summary(snapshot)
-      stats['malloc_diff'] = self._malloc_summary(snapshot, self._snapshot)
-      self._snapshot = snapshot
-      print(stats['malloc_full'])
+      stats[f'{name}/ram_gb'] = ram / gb
+      stats[f'{name}/ram_frac'] = ram / memory.total
+      stats[f'{name}/num_procs'] = len(group)
     return stats
 
-  def _malloc_summary(self, snapshot, relative=None, top=50, root='embodied'):
+
+class GputilStats:
+
+  def __init__(self):
+    import GPUtil
+    self.gpus = GPUtil.getGPUs()
+    print(f'GPUtil found {len(self.gpus)} GPUs')
+    self.error = None
+    self.aggs = defaultdict(agg.Agg)
+    self.once = True
+    self.worker = threading.Thread(target=self._worker, daemon=True)
+    self.worker.start()
+
+  @timer.section('gputil_stats')
+  def __call__(self):
+    if self.error:
+      raise self.error
+    stats = {}
+    for i, agg_ in self.aggs.items():
+      stats.update(agg_.result(prefix=f'gpu{i}'))
+    if self.once:
+      self.once = False
+      lines = [f'GPU {i}: {gpu.name}' for i, gpu in enumerate(self.gpus)]
+      stats['summary'] = '\n'.join(lines)
+    return stats
+
+  def _worker(self):
+    try:
+      while True:
+        for i, gpu in enumerate(self.gpus):
+          agg = self.aggs[i]
+          agg.add('load', gpu.load, 'avg')
+          agg.add('mem_free_gb', gpu.memoryFree / 1024, 'min')
+          agg.add('mem_used_gb', gpu.memoryFree / 1024, 'max')
+          agg.add('mem_total_gb', gpu.memoryTotal / 1024)
+          agg.add('memory_util', gpu.memoryUtil, ('min', 'avg', 'max'))
+          agg.add('temperature', gpu.temperature, 'max')
+        time.sleep(0.5)
+    except Exception as e:
+      print(f'Exception in Gputil worker: {e}')
+      self.error = e
+
+
+class GcStats:
+
+  def __init__(self):
+    gc.callbacks.append(self._callback)
+    self.stats = agg.Agg()
+    self.keys = set()
+    self.counts = [{}, {}, {}]
+    self.start = None
+
+  @timer.section('gc_stats')
+  def __call__(self, log=False):
+    stats = {k: 0 for k in self.keys}
+    stats.update(self.stats.result())
+    stats['objcounts'] = self._summary()
+    log and print(stats['objcounts'])
+    self.keys |= set(stats.keys())
+    return stats
+
+  def _summary(self):
+    lines = ['GC Most Common Types']
+    for gen in range(3):
+      counts = defaultdict(int)
+      for obj in gc.get_objects(gen):
+        counts[type(obj)] += 1
+      counts = {type(v).__name__: v for k, v in counts.items()}
+      deltas = {k: v - self.counts[gen].get(k, 0) for k, v in counts.items()}
+      self.counts[gen] = counts
+      counts = dict(sorted(counts.items(), key=lambda x: -x[1])[:10])
+      lines.append(f'  Generation {gen}')
+      for name, count in counts.items():
+        lines.append(f'    {name}: {count} ({deltas[name]:+d})')
+    return '\n'.join(lines)
+
+  def _callback(self, phase, info):
+    # We cannot wrap this function into a timer section, because it would get
+    # nested into an arbitrary scope that was active before the garbage
+    # collector got triggered.
+    now = time.perf_counter_ns()
+    if phase == 'start':
+      self.start = now
+    if phase == 'stop':
+      gen = info['generation']
+      agg = ('avg', 'max', 'sum')
+      self.stats.add(f'gen{gen}/calls', 1, agg='sum')
+      self.stats.add(f'gen{gen}/collected', info['collected'], agg)
+      self.stats.add(f'gen{gen}/uncollectable', info['collected'], agg)
+      self.stats.add(f'gen{gen}/duration', (now - self.start) / 1e9, agg)
+
+
+class MallocStats:
+
+  def __init__(self):
+    tracemalloc.start()
+    self.previous = None
+
+  @timer.section('malloc_stats')
+  def __call__(self, log=True):
+    stats = {}
+    snapshot = tracemalloc.take_snapshot()
+    stats['full'] = self._summary(snapshot)
+    stats['diff'] = self._summary(snapshot, self.previous)
+    self.previous = snapshot
+    log and print(stats['full'])
+    return stats
+
+  def _summary(self, snapshot, relative=None, top=50, root='embodied'):
     if relative:
       statistics = snapshot.compare_to(relative, 'traceback')
     else:
@@ -77,3 +240,44 @@ class Usage:
       size = size / (1024 ** 2)
       lines.append(f'- {size:.2f}Mb ({count}) {filename}:{lineno}')
     return '\n'.join(lines)
+
+
+class GilStats:
+
+  def __init__(self):
+    try:
+      from google3.learning.deepmind.python import gil_monitor
+      self.gil_monitor = gil_monitor.StartGilMonitor()
+    except ImportError:
+      self.gil_monitor = None
+    try:
+      import gil_load
+      self.gil_load = gil_load
+      self.gil_load.init()
+      self.gil_load.start()
+    except ImportError:
+      self.gil_load = None
+      print('For GIL statistics: pip install gil_load')
+    except RuntimeError:
+      self.gil_load = None
+      print('For GIL statistics: python -m gil_load train.py ...')
+
+  def __call__(self, log=True):
+    stats = {}
+    if self.gil_monitor:
+      stats['held_ratio'] = self.gil_monitor.GetHeldRatio()
+    if self.gil_load:
+      names = {x.ident: x.name for x in list(threading.enumerate())}
+      items = self.gil_load.get()[1].items()
+      items = [(names.get(k, str(k)), v) for k, v in items]
+      items = [(k, (v['held_1m'], v['wait_1m'])) for k, v in items]
+      items = sorted(items, key=lambda x: -x[1][0])
+      stats.update({f'held/{k}': v[0] for k, v in items})
+      stats.update({f'wait/{k}': v[1] for k, v in items})
+      if log:
+        basics.print_('-' * 79)
+        for name, (held, wait) in items:
+          line = f'{name:<25} {100*held:5.1f}% held, {100*wait:5.1f}% wait'
+          basics.print_(line)
+        basics.print_('-' * 79)
+    return stats

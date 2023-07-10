@@ -41,10 +41,9 @@ class ActionRepeat(base.Wrapper):
   def __init__(self, env, repeat):
     super().__init__(env)
     self._repeat = repeat
-    self._done = False
 
   def step(self, action):
-    if action['reset'] or self._done:
+    if action['reset']:
       return self.env.step(action)
     reward = 0.0
     for _ in range(self._repeat):
@@ -53,7 +52,6 @@ class ActionRepeat(base.Wrapper):
       if obs['is_last'] or obs['is_terminal']:
         break
     obs['reward'] = np.float32(reward)
-    self._done = obs['is_last']
     return obs
 
 
@@ -130,6 +128,7 @@ class OneHotAction(base.Wrapper):
   def __init__(self, env, key='action'):
     super().__init__(env)
     self._count = int(env.act_space[key].high)
+    self._dtype = int(env.act_space[key].dtype)
     self._key = key
 
   @functools.cached_property
@@ -145,7 +144,7 @@ class OneHotAction(base.Wrapper):
       assert action[self._key].min() == 0.0, action
       assert action[self._key].max() == 1.0, action
       assert action[self._key].sum() == 1.0, action
-    index = np.argmax(action[self._key])
+    index = np.argmax(action[self._key]).astype(self._dtype)
     return self.env.step({**action, self._key: index})
 
   @staticmethod

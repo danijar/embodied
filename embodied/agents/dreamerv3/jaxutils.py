@@ -1,5 +1,4 @@
 import re
-from functools import partial as bind
 
 import jax
 import jax.numpy as jnp
@@ -14,7 +13,8 @@ tfd = tfp.distributions
 tree_map = jax.tree_util.tree_map
 sg = lambda x: tree_map(jax.lax.stop_gradient, x)
 f32 = jnp.float32
-COMPUTE_DTYPE = jnp.float32
+i32 = jnp.int32
+COMPUTE_DTYPE = f32
 ENABLE_CHECKS = False
 
 
@@ -37,10 +37,12 @@ def parallel():
 
 def tensorstats(tensor, prefix=None):
   assert tensor.size > 0, tensor.shape
+  assert jnp.issubdtype(tensor.dtype, jnp.floating), tensor.dtype
+  tensor = tensor.astype(f32)  # To avoid overflows.
   metrics = {
       'mean': tensor.mean(),
       'std': tensor.std(),
-      'mag': jnp.abs(tensor).max(),
+      'mag': jnp.abs(tensor).mean(),
       'min': tensor.min(),
       'max': tensor.max(),
       'dist': subsample(tensor),
@@ -82,6 +84,18 @@ def scan(fn, inputs, start, unroll=True, axis=0, modify=False):
   return outs
 
 
+# TODO: Slow
+# def annotate(name):
+#   def decorator(fn):
+#     step = [0]
+#     def wrapped(*args, **kwargs):
+#       with jax.profiler.StepTraceAnnotation(name, step_num=step):
+#         step[0] += 1
+#         return fn(*args, **kwargs)
+#     return wrapped
+#   return decorator
+
+
 def symlog(x):
   return jnp.sign(x) * jnp.log1p(jnp.abs(x))
 
@@ -100,9 +114,18 @@ def switch(pred, lhs, rhs):
   return tree_map(fn, lhs, rhs)
 
 
+def reset(xs, reset):
+  def fn(x):
+    mask = reset
+    while len(mask.shape) < len(x.shape):
+      mask = mask[..., None]
+    return x * (1 - mask.astype(x.dtype))
+  return tree_map(fn, xs)
+
+
 class OneHotDist(tfd.OneHotCategorical):
 
-  def __init__(self, logits=None, probs=None, dtype=jnp.float32):
+  def __init__(self, logits=None, probs=None, dtype=f32):
     super().__init__(logits, probs, dtype)
 
   @classmethod
@@ -199,7 +222,33 @@ class TwoHotDist:
     self.event_shape = logits.shape[len(logits.shape) - dims: -1]
 
   def mean(self):
-    return self.transbwd((self.probs * self.bins).sum(-1))
+    # The naive implementation results in a non-zero result even if the bins
+    # are symmetric and the probabilities uniform, because the sum operation
+    # goes left to right, accumulating numerical errors. Instead, we use a
+    # symmetric sum to ensure that the predicted rewards and values are
+    # actually zero at initialization.
+    # return self.transbwd((self.probs * self.bins).sum(-1))
+    n = self.logits.shape[-1]
+    if n % 2 == 1:
+      m = (n - 1) // 2
+      p1 = self.probs[..., :m]
+      p2 = self.probs[..., m: m + 1]
+      p3 = self.probs[..., m + 1:]
+      b1 = self.bins[..., :m]
+      b2 = self.bins[..., m: m + 1]
+      b3 = self.bins[..., m + 1:]
+      wavg = (
+          (p1 * b1).sum(-1) +
+          (p2 * b2).sum(-1) +
+          (p3 * b3)[..., ::-1].sum(-1))
+      return self.transbwd(wavg)
+    else:
+      p1 = self.probs[..., :n // 2]
+      p2 = self.probs[..., n // 2:]
+      b1 = self.bins[..., :n // 2]
+      b2 = self.bins[..., n // 2:]
+      wavg = (p1 * b1).sum(-1) + (p2 * b2)[::-1].sum(-1)
+      return self.transbwd(wavg)
 
   def mode(self):
     return self.transbwd((self.probs * self.bins).sum(-1))
@@ -207,9 +256,9 @@ class TwoHotDist:
   def log_prob(self, x):
     assert x.dtype == f32, x.dtype
     x = self.transfwd(x)
-    below = (self.bins <= x[..., None]).astype(jnp.int32).sum(-1) - 1
+    below = (self.bins <= x[..., None]).astype(i32).sum(-1) - 1
     above = len(self.bins) - (
-        self.bins > x[..., None]).astype(jnp.int32).sum(-1)
+        self.bins > x[..., None]).astype(i32).sum(-1)
     below = jnp.clip(below, 0, len(self.bins) - 1)
     above = jnp.clip(above, 0, len(self.bins) - 1)
     equal = (below == above)
@@ -235,9 +284,9 @@ def balance_stats(dist, target, thres):
   # Values are NaN when there are no positives or negatives in the current
   # batch, which means they will be ignored when aggregating metrics via
   # np.nanmean() later, as they should.
-  pos = (target.astype(jnp.float32) > thres).astype(jnp.float32)
-  neg = (target.astype(jnp.float32) <= thres).astype(jnp.float32)
-  pred = (dist.mean().astype(jnp.float32) > thres).astype(jnp.float32)
+  pos = (target.astype(f32) > thres).astype(f32)
+  neg = (target.astype(f32) <= thres).astype(f32)
+  pred = (dist.mean().astype(f32) > thres).astype(f32)
   loss = -dist.log_prob(target)
   return dict(
       pos_loss=(loss * pos).sum() / pos.sum(),
@@ -245,8 +294,8 @@ def balance_stats(dist, target, thres):
       pos_acc=(pred * pos).sum() / pos.sum(),
       neg_acc=((1 - pred) * neg).sum() / neg.sum(),
       rate=pos.mean(),
-      avg=target.astype(jnp.float32).mean(),
-      pred=dist.mean().astype(jnp.float32).mean(),
+      avg=target.astype(f32).mean(),
+      pred=dist.mean().astype(f32).mean(),
   )
 
 
@@ -264,23 +313,23 @@ class Moments(nj.Module):
     if self.impl == 'off':
       pass
     elif self.impl == 'mean_std':
-      self.step = nj.Variable(jnp.zeros, (), jnp.int32, name='step')
-      self.mean = nj.Variable(jnp.zeros, (), jnp.float32, name='mean')
-      self.sqrs = nj.Variable(jnp.zeros, (), jnp.float32, name='sqrs')
+      self.step = nj.Variable(jnp.zeros, (), i32, name='step')
+      self.mean = nj.Variable(jnp.zeros, (), f32, name='mean')
+      self.sqrs = nj.Variable(jnp.zeros, (), f32, name='sqrs')
     elif self.impl == 'min_max':
-      self.low = nj.Variable(jnp.zeros, (), jnp.float32, name='low')
-      self.high = nj.Variable(jnp.zeros, (), jnp.float32, name='high')
+      self.low = nj.Variable(jnp.zeros, (), f32, name='low')
+      self.high = nj.Variable(jnp.zeros, (), f32, name='high')
     elif self.impl == 'perc_ema':
-      self.low = nj.Variable(jnp.zeros, (), jnp.float32, name='low')
-      self.high = nj.Variable(jnp.zeros, (), jnp.float32, name='high')
+      self.low = nj.Variable(jnp.zeros, (), f32, name='low')
+      self.high = nj.Variable(jnp.zeros, (), f32, name='high')
     elif self.impl == 'perc_ema_corr':
-      self.step = nj.Variable(jnp.zeros, (), jnp.int32, name='step')
-      self.low = nj.Variable(jnp.zeros, (), jnp.float32, name='low')
-      self.high = nj.Variable(jnp.zeros, (), jnp.float32, name='high')
+      self.step = nj.Variable(jnp.zeros, (), i32, name='step')
+      self.low = nj.Variable(jnp.zeros, (), f32, name='low')
+      self.high = nj.Variable(jnp.zeros, (), f32, name='high')
     elif self.impl == 'mean_mag':
-      self.mag = nj.Variable(jnp.zeros, (), jnp.float32, name='mag')
+      self.mag = nj.Variable(jnp.zeros, (), f32, name='mag')
     elif self.impl == 'max_mag':
-      self.mag = nj.Variable(jnp.zeros, (), jnp.float32, name='mag')
+      self.mag = nj.Variable(jnp.zeros, (), f32, name='mag')
     else:
       raise NotImplementedError(self.impl)
 
@@ -299,7 +348,7 @@ class Moments(nj.Module):
       min_ = jnp.min
       max_ = jnp.max
       per = jnp.percentile
-    x = sg(x.astype(jnp.float32))
+    x = sg(x.astype(f32))
     m = self.decay
     if self.impl == 'off':
       pass
@@ -333,7 +382,7 @@ class Moments(nj.Module):
     if self.impl == 'off':
       return 0.0, 1.0
     elif self.impl == 'mean_std':
-      corr = 1 - self.decay ** self.step.read().astype(jnp.float32)
+      corr = 1 - self.decay ** self.step.read().astype(f32)
       mean = self.mean.read() / corr
       var = (self.sqrs.read() / corr) - self.mean.read() ** 2
       std = jnp.sqrt(jnp.maximum(var, 1 / self.max ** 2) + self.eps)
@@ -347,7 +396,7 @@ class Moments(nj.Module):
       invscale = jnp.maximum(1 / self.max, self.high.read() - self.low.read())
       return sg(offset), sg(invscale)
     elif self.impl == 'perc_ema_corr':
-      corr = 1 - self.decay ** self.step.read().astype(jnp.float32)
+      corr = 1 - self.decay ** self.step.read().astype(f32)
       lo = self.low.read() / corr
       hi = self.high.read() / corr
       invscale = jnp.maximum(1 / self.max, hi - lo)
@@ -368,7 +417,7 @@ class Optimizer(nj.Module):
 
   def __init__(
       self, lr, opt='adam', eps=1e-5, clip=100.0, warmup=0, wd=0.0,
-      wd_pattern=r'/(w|kernel)$', lateclip=0.0, init_grad_scale=1e4):
+      wd_pattern=r'/(w|kernel)$', adaclip=0.0, init_grad_scale=1e4):
     assert wd_pattern[0] not in ('0', '1')
     wd_pattern = re.compile(wd_pattern)
     chain = []
@@ -380,32 +429,29 @@ class Optimizer(nj.Module):
       chain.append(optax.scale_by_lion())
     else:
       raise NotImplementedError(opt)
-    if lateclip:
-      chain.append(late_grad_clip(lateclip))
+    if adaclip:
+      chain.append(ada_clip(adaclip))
     if wd:
       chain.append(optax.additive_weight_decay(wd, lambda params: (
           tree_map(lambda k: bool(wd_pattern.search(k)), tree_keys(params)))))
-    if warmup:
-      schedule = optax.linear_schedule(0.0, -lr, warmup)
-      chain.append(optax.inject_hyperparams(optax.scale)(schedule))
-    else:
-      chain.append(optax.scale(-lr))
+    chain.append(optax.scale(-lr))
     self.opt = optax.chain(*chain)
-    self.step = nj.Variable(jnp.array, 0, jnp.int32, name='step')
+    self.warmup = warmup
+    self.step = nj.Variable(jnp.array, 0, i32, name='step')
     self.scaling = (COMPUTE_DTYPE == jnp.float16)
     if self.scaling:
       self.opt = optax.apply_if_finite(self.opt, max_consecutive_errors=1000)
       self.grad_scale = nj.Variable(
-          jnp.array, init_grad_scale, jnp.float32, name='grad_scale')
+          jnp.array, init_grad_scale, f32, name='grad_scale')
       self.good_steps = nj.Variable(
-          jnp.array, 0, jnp.int32, name='good_steps')
+          jnp.array, 0, i32, name='good_steps')
     self.once = True
 
   def __call__(self, modules, lossfn, *args, has_aux=False, **kwargs):
     def wrapped(*args, **kwargs):
       outs = lossfn(*args, **kwargs)
       loss, aux = outs if has_aux else (outs, None)
-      assert loss.dtype == jnp.float32, (self.name, loss.dtype)
+      assert loss.dtype == f32, (self.name, loss.dtype)
       assert loss.shape == (), (self.name, loss.shape)
       if self.scaling:
         loss *= sg(self.grad_scale.read())
@@ -430,8 +476,10 @@ class Optimizer(nj.Module):
     optstate = self.get('state', self.opt.init, params)
     updates, optstate = self.opt.update(grads, optstate, params)
     self.put('state', optstate)
+    if self.warmup > 0:
+      scale = jnp.clip(self.step.read().astype(f32) / self.warmup, 0, 1)
+      updates = tree_map(lambda x: x * scale, updates)
     nj.context().update(optax.apply_updates(params, updates))
-
     grad_norm = optax.global_norm(grads)
     update_norm = optax.global_norm(updates)
     param_norm = optax.global_norm([x.getm() for x in modules])
@@ -439,9 +487,9 @@ class Optimizer(nj.Module):
     if self.scaling:
       self._update_scale(grads, jnp.isfinite(grad_norm))
       metrics['grad_scale'] = self.grad_scale.read()
-      metrics['grad_overflow'] = (~jnp.isfinite(grad_norm)).astype(jnp.float32)
+      metrics['grad_overflow'] = (~jnp.isfinite(grad_norm)).astype(f32)
       grad_norm = jnp.where(jnp.isfinite(grad_norm), grad_norm, jnp.nan)
-      self.step.write(self.step.read() + isfin(grad_norm).astype(jnp.int32))
+      self.step.write(self.step.read() + isfin(grad_norm).astype(i32))
     else:
       check(isfin(grad_norm), f'{self.path} grad norm: {{x}}', x=grad_norm)
       self.step.write(self.step.read() + 1)
@@ -462,22 +510,50 @@ class Optimizer(nj.Module):
     incr = (finite & (self.good_steps.read() >= 1000))
     decr = ~finite
     self.good_steps.write(
-        keep.astype(jnp.int32) * (self.good_steps.read() + 1))
+        keep.astype(i32) * (self.good_steps.read() + 1))
     self.grad_scale.write(jnp.clip(
-        keep.astype(jnp.float32) * self.grad_scale.read() +
-        incr.astype(jnp.float32) * self.grad_scale.read() * 2 +
-        decr.astype(jnp.float32) * self.grad_scale.read() / 2,
+        keep.astype(f32) * self.grad_scale.read() +
+        incr.astype(f32) * self.grad_scale.read() * 2 +
+        decr.astype(f32) * self.grad_scale.read() / 2,
         1e-4, 1e4))
     return finite
 
 
-def late_grad_clip(value=1.0):
+def ada_clip(clip=0.1, b1=0.9, b2=0.999, eps=1e-6):
+
   def init_fn(params):
-    return ()
+    m = jnp.zeros((), f32)
+    v = jnp.zeros((), f32)
+    s = jnp.ones((), i32)
+    return m, v, s
+
   def update_fn(updates, state, params):
-    updates = tree_map(lambda x: jnp.clip(x, -value, value), updates)
-    return updates, ()
+    m, v, s = state
+    x = optax.global_norm(updates)
+    m_corr = m / (1 - b1 ** s.astype(f32))
+    v_corr = v / (1 - b2 ** s.astype(f32))
+    up = m_corr + clip * jnp.sqrt(v_corr + eps)
+    up = jax.lax.select(s <= 1, jnp.inf, up)
+    trigger = jnp.squeeze(x < up)
+    updates = jax.tree_util.tree_map(
+        lambda t: jax.lax.select(trigger, t, (t / x.astype(t.dtype)) * up),
+        updates)
+    x = jnp.minimum(x, up)
+    m = b1 * m + (1 - b1) * x
+    v = b2 * v + (1 - b2) * x * x
+    s = s + 1
+    return updates, (m, v, s)
+
   return optax.GradientTransformation(init_fn, update_fn)
+
+
+# def late_grad_clip(value=1.0):
+#   def init_fn(params):
+#     return ()
+#   def update_fn(updates, state, params):
+#     updates = tree_map(lambda x: jnp.clip(x, -value, value), updates)
+#     return updates, ()
+#   return optax.GradientTransformation(init_fn, update_fn)
 
 
 def concat_dict(mapping, batch_shape=None):
@@ -500,37 +576,20 @@ def tree_keys(params, prefix=''):
     raise TypeError(type(params))
 
 
-def transform_with_static(transform, argname):
-  def new_transform(fn, *args, **kwargs):
-    cache = {}
-    def new_function(*args2, **kwargs2):
-      value = kwargs2.pop(argname, '_default')
-      if value not in cache:
-        if value == '_default':
-          specialized = fn
-        else:
-          specialized = bind(fn, **{argname: value})
-          specialized.__name__ = fn.__name__
-        cache[value] = transform(specialized, *args, **kwargs)
-      return cache[value](*args2, **kwargs2)
-    return new_function
-  return new_transform
-
-
-class SlowUpdater:
+class SlowUpdater(nj.Module):
 
   def __init__(self, src, dst, fraction=1.0, period=1):
     self.src = src
     self.dst = dst
     self.fraction = fraction
     self.period = period
-    self.updates = nj.Variable(jnp.zeros, (), jnp.int32, name='updates')
+    self.updates = nj.Variable(jnp.zeros, (), i32, name='updates')
 
   def __call__(self):
     assert self.src.getm()
     updates = self.updates.read()
-    need_init = (updates == 0).astype(jnp.float32)
-    need_update = (updates % self.period == 0).astype(jnp.float32)
+    need_init = (updates == 0).astype(f32)
+    need_update = (updates % self.period == 0).astype(f32)
     mix = jnp.clip(1.0 * need_init + self.fraction * need_update, 0, 1)
     source = {
         k.replace(f'/{self.src.name}/', f'/{self.dst.name}/'): v

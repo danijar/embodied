@@ -18,7 +18,7 @@ class RSSM(nj.Module):
 
   def __init__(
       self, deter=1024, stoch=32, classes=32, unroll=False,
-      unimix=0.01, action_clip=1.0, bottleneck=-1, **kw):
+      unimix=0.01, action_clip=1.0, bottleneck=-1, initial='sampled', **kw):
     self._deter = deter
     self._stoch = stoch
     self._classes = classes
@@ -26,6 +26,7 @@ class RSSM(nj.Module):
     self._unimix = unimix
     self._action_clip = action_clip
     self._bottleneck = bottleneck
+    self._initial = initial
     self._kw = kw
 
   def initial(self, batch_size):
@@ -33,10 +34,17 @@ class RSSM(nj.Module):
         deter=jnp.zeros([batch_size, self._deter], f32),
         stoch=jnp.zeros([batch_size, self._stoch, self._classes], f32),
         logit=jnp.zeros([batch_size, self._stoch, self._classes], f32))
-    deter = self.get('initial', jnp.zeros, state['deter'][0].shape, f32)
-    state['deter'] = jnp.repeat(jnp.tanh(deter)[None], batch_size, 0)
-    state['stoch'] = self._dist(self._prior(
-        cast(state['deter']))).sample(seed=nj.rng())
+    if self._initial == 'zeros':
+      pass
+    elif self._initial == 'learned':
+      deter = self.get('initial', jnp.zeros, state['deter'][0].shape, f32)
+    elif self._initial == 'sampled':
+      deter = self.get('initial', jnp.zeros, state['deter'][0].shape, f32)
+      state['deter'] = jnp.repeat(jnp.tanh(deter)[None], batch_size, 0)
+      state['stoch'] = self._dist(self._prior(
+          cast(state['deter']))).sample(seed=nj.rng())
+    else:
+      raise NotImplementedError(self._initial)
     return cast(state)
 
   def observe(self, state, action, embed, reset):
@@ -51,8 +59,12 @@ class RSSM(nj.Module):
 
   def obs_step(self, state, action, embed, reset):
     action = cast(jaxutils.concat_dict(action))
-    state = jaxutils.switch(reset, self.initial(len(reset)), state)
-    action = jaxutils.switch(reset, jnp.zeros_like(action), action)
+    if self._initial == 'zeros':
+      state = jaxutils.reset(state, reset)
+      action = jaxutils.reset(action, reset)
+    else:
+      state = jaxutils.switch(reset, self.initial(len(reset)), state)
+      action = jaxutils.switch(reset, jnp.zeros_like(action), action)
     deter = self._gru(state, action)
     x = jnp.concatenate([deter, embed], -1)
     x = self.get('obs_out', Linear, **self._kw)(x)
@@ -559,6 +571,16 @@ class Dist(nj.Module):
           out, bins, len(self._shape), jaxutils.symlog, jaxutils.symexp)
     if self._dist == 'symexp_twohot':
       bins = jaxutils.symexp(jnp.linspace(-20, 20, out.shape[-1], dtype=f32))
+      return jaxutils.TwoHotDist(out, bins, len(self._shape))
+    if self._dist == 'symexp_twohot_stable':
+      if out.shape[-1] % 2 == 1:
+        half = jnp.linspace(-20, 0, (out.shape[-1] - 1) // 2 + 1, dtype=f32)
+        half = jaxutils.symexp(half)
+        bins = jnp.concatenate([half, -half[:-1][::-1]], 0)
+      else:
+        half = jnp.linspace(-20, 0, out.shape[-1] // 2, dtype=f32)
+        half = jaxutils.symexp(half)
+        bins = jnp.concatenate([half, -half[::-1]], 0)
       return jaxutils.TwoHotDist(out, bins, len(self._shape))
     if self._dist == 'parab_twohot':
       eps = 0.001
