@@ -2,6 +2,8 @@ import time
 import concurrent.futures
 from collections import deque, namedtuple
 
+import numpy as np
+
 from ..core import basics
 from . import sockets
 from . import parallel
@@ -52,9 +54,13 @@ class Server:
     self.loop.join()
 
   def run(self):
-    while True:
-      self.check()
-      time.sleep(1)
+    try:
+      self.start()
+      while True:
+        self.check()
+        time.sleep(1)
+    finally:
+      self.close()
 
   def __enter__(self):
     self.start()
@@ -82,14 +88,22 @@ class Server:
           if method.batch:
             method.queue.append((addr, rid, payload, now))
             if len(method.queue) == method.batch:
+
+              addrs, rids, payloads, recvds = zip(*method.queue)
               future = method.pool.submit(
-                  self._work_batch, method, method.queue.copy())
+                  self._work_batch, method, addrs, rids, payloads, recvds)
+              future.method = method
+              future.addrs = addrs
+              future.rids = rids
               self.result_set.add(future)
               self.log_queue.append(future)
               method.queue.clear()
           else:
             future = method.pool.submit(
                 self._work, method, addr, rid, payload, now)
+            future.method = method
+            future.addr = addr
+            future.rid = rid
             self.result_set.add(future)
             self.log_queue.append(future)
 
@@ -113,7 +127,11 @@ class Server:
             socket.send_result(addr, rid, payload)
 
         except Exception as e:
-          socket.send_error(addr, rid, repr(e))
+          if future.method.batch:
+            for addr, rid in zip(future.addrs, future.rids):
+              socket.send_error(addr, rid, repr(e))
+          else:
+            socket.send_error(future.addr, future.rid, repr(e))
           if self.errors:
             raise
 
@@ -143,9 +161,7 @@ class Server:
     payload = sockets.pack(result)
     return method, addr, rid, payload, logs, recvd
 
-  def _work_batch(self, method, queue):
-    import numpy as np
-    addrs, rids, payloads, recvds = zip(*queue)
+  def _work_batch(self, method, addrs, rids, payloads, recvds):
     datas = [sockets.unpack(x) for x in payloads]
     data = {
         k: np.stack([datas[i][k] for i in range(method.batch)])

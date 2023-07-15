@@ -6,6 +6,8 @@ import time
 import numpy as np
 import zmq
 
+# DEBUG = False
+DEBUG = True
 
 class Type(enum.Enum):
   PING   = int(1).to_bytes(1, 'big')  # rid
@@ -14,7 +16,7 @@ class Type(enum.Enum):
   RESULT = int(4).to_bytes(1, 'big')  # rid, payload
   ERROR  = int(5).to_bytes(1, 'big')  # rid, text
 
-
+class ConnectError(RuntimeError): pass
 class NotAliveError(RuntimeError): pass
 class RemoteError(RuntimeError): pass
 class ProtocolError(RuntimeError): pass
@@ -33,11 +35,13 @@ class ClientSocket:
     self.pings = pings
     self.maxage = maxage
     self.connected = False
-    self.last_response = 0
-    self.last_pinged = 0
+    self.last_call = float('-inf')
+    self.last_response = float('-inf')
+    self.last_pinged = float('-inf')
     self.addr = None
     self.rid = iter(itertools.count(0))
     self.running = True
+    self._abandoned = []
 
   def connect(self, addr, timeout=10.0):
     self.disconnect()
@@ -49,7 +53,6 @@ class ClientSocket:
     while True:
       try:
         parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
-        self.last_response = time.time()
         typ, rid2, *args = [x.buffer for x in parts]
         if typ == Type.PONG.value and rid == rid2:
           self.connected = True
@@ -59,7 +62,7 @@ class ClientSocket:
       except zmq.Again:
         pass
       if timeout and time.time() - start >= timeout:
-        raise NotAliveError()
+        raise ConnectError()
       time.sleep(0.01)
 
   def disconnect(self):
@@ -74,24 +77,52 @@ class ClientSocket:
     # if not self.poller.poll():
     #   return None
     try:
-      self.last_listen = now
       parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
       self.last_response = now
     except zmq.Again:
-      last_response_or_ping = max(self.last_response, self.last_pinged)
-      if self.pings and now - last_response_or_ping >= self.pings:
+      parts = None
+    if parts is None:
+
+      # This is the time since the last response or if the server is not
+      # responding, since the last ping so that we can try again.
+      last_ping_or_resp = max(self.last_response, self.last_pinged)
+      if self.pings and now - last_ping_or_resp >= self.pings:
         self.last_pinged = now
         self.send_ping()
-      if self.maxage and self.last_listen - self.last_response >= self.maxage:
+
+      # This is the time since the last call, unless the server sent back
+      # anything in the meantime to keep the connection alive.
+      last_call_or_resp = max(self.last_call, self.last_response)
+      if self.maxage and now - last_call_or_resp >= self.maxage:
+        # TODO
         raise NotAliveError(
-            f'\nnow - last_response: {now - self.last_response:.3f}'
-            f'\nnow - last_pinged:   {now - self.last_pinged:.3f}'
-            f'\nnow - last_listen:   {now - self.last_listen:.3f}'
+            f'\nlast call:     {now - self.last_call:.3f}s ago'
+            f'\nlast response: {now - self.last_response:.3f}s ago'
+            f'\nlast pinged:   {now - self.last_pinged:.3f}s ago'
         )
       return None
 
-    typ, rid, *args = [x.buffer for x in parts]
+    try:
+      # TODO: Why does this sometimes receive only a single part?
+      typ, rid, *args = [x.buffer for x in parts]
+    except ValueError:
+      print('-' * 79)
+      print(len(parts))
+      print(Type(parts[0].bytes).name)
+      print(self._abandoned)
+      print('-' * 79)
+      # Sometimes this is just a type (e.g. PONG or RESULT)
+      # Sometimes this is just an rid (e.g. ... 00 00 00 00 02)
+
+      # raise ValueError(Type(parts[0].bytes).name, len(parts))
+      self._abandoned.append(parts[0])
+      return None
+
     rid = bytes(rid)
+
+    DEBUG and print(
+        f'Client received {Type(bytes(typ)).name} ' +
+        f'with rid {int.from_bytes(rid, "big")}')
     if typ == Type.PING.value:
       assert not args
       self.socket.send_multipart([Type.PONG.value, rid])
@@ -106,18 +137,23 @@ class ClientSocket:
       msgs = [str(x, 'utf-8') for x in args]
       raise RemoteError(rid, *msgs)
     else:
-      raise ProtocolError(Type(typ).name)
+      raise ProtocolError(Type(bytes(typ)).name)
 
   def send_call(self, name, payload):
     assert self.connected
-    rid = next(self.rid).to_bytes(8, 'big')
+    rid = next(self.rid)
+    DEBUG and print(f"Client calling '{name}' with rid {rid}")
+    rid = rid.to_bytes(8, 'big')
     name = name.encode('utf-8')
     self.socket.send_multipart([Type.CALL.value, rid, name, *payload])
+    self.last_call = time.time()
     return rid
 
   def send_ping(self):
     assert self.connected
-    rid = next(self.rid).to_bytes(8, 'big')
+    rid = next(self.rid)
+    DEBUG and print(f'Client ping with rid {rid}')
+    rid = rid.to_bytes(8, 'big')
     self.socket.send_multipart([Type.PING.value, rid])
     return rid
 
@@ -161,7 +197,8 @@ class ServerSocket:
     self.alive[addr] = now
     if typ == Type.PING.value:
       assert not args
-      self.socket.send_multipart([addr, Type.PONG.value, rid])
+      # self.socket.send_multipart([addr, Type.PONG.value, rid])
+      self.socket.send_multipart([addr, Type.PONG.value, bytes(rid)])
       return None
     elif typ == Type.PONG.value:
       assert not args

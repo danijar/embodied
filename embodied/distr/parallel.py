@@ -74,8 +74,7 @@ class Thread:
     except SystemExit:
       return
     except Exception as e:
-      # TODO
-      # _summarize(e, self.name, PRINT_LOCK)
+      _summarize(e, self.name, PRINT_LOCK)
       self._exception = e
       self._exitcode = 1
 

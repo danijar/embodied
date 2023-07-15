@@ -45,15 +45,17 @@ class Client:
         return
       except sockets.ProtocolError as e:
         self._print(f'Ignoring unexpected message: {e}')
-      except sockets.NotAliveError:
+      except sockets.ConnectError:
         pass
       if retry:
         continue
       else:
-        raise sockets.NotAliveError
+        # raise sockets.NotAliveError
+        raise sockets.ConnectError
 
   @timer.section('client_call')
   def call(self, method, data):
+    assert isinstance(data, dict)
     data = {k: np.asarray(v) for k, v in data.items()}
     data = sockets.pack(data)
     rid = self.socket.send_call(method, data)
@@ -71,10 +73,11 @@ class Client:
           if other in self.futures:
             self.futures[other].set_result(sockets.unpack(payload))
       except sockets.NotAliveError:
-        self._print('Server stopped responding.')
+        self._print('Server is not responding.')
         raise
       except sockets.RemoteError as e:
-        self._print('Received error response.')
+        # self._print('Received error response.')
+        self._print(f'Received error response: {e.args[1]}')
         other = e.args[0]
         if other in self.futures:
           self.futures[other].set_error(sockets.RemoteError(e.args[1]))

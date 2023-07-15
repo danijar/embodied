@@ -22,16 +22,17 @@ def parallel(agent, logger, make_replay, make_env, num_envs, args):
   else:
     for i in range(num_envs):
       workers.append(embodied.distr.Thread(parallel_env, i, make_env, args))
-  workers.append(embodied.distr.Process(
-      parallel_replay, make_replay, args))
+  replay = make_replay()
+  # workers.append(embodied.distr.Process(
+  #     parallel_replay, make_replay, args))
   workers.append(embodied.distr.Thread(
-      parallel_actor, step, agent, logger, barrier, args))
+      parallel_actor, step, agent, replay, logger, barrier, args))
   workers.append(embodied.distr.Thread(
-      parallel_learner, step, agent, logger, usage, barrier, args))
+      parallel_learner, step, agent, replay, logger, usage, barrier, args))
   embodied.distr.run(workers)
 
 
-def parallel_actor(step, agent, logger, barrier, args):
+def parallel_actor(step, agent, replay, logger, barrier, args):
 
   # _, initial = agent.policy(dummy_data(agent.obs_space, (args.actor_batch,)))
   initial = agent.init_policy(args.actor_batch)
@@ -61,9 +62,9 @@ def parallel_actor(step, agent, logger, barrier, args):
   dones = defaultdict(lambda: True)
   nonzeros = set()
 
-  replay = embodied.distr.Client('ipc:///tmp/replay', name='Inserter')
-  replay.connect()
-  replay_promises = deque()
+  # replay = embodied.distr.Client('ipc:///tmp/replay', name='Inserter')
+  # replay.connect()
+  # replay_promises = deque()
 
   keys = set(agent.obs_space.keys()) | set(agent.act_space.keys())
   log_keys_max = [k for k in keys if re.match(args.log_keys_max, k)]
@@ -82,17 +83,17 @@ def parallel_actor(step, agent, logger, barrier, args):
     parallel.add('ep_starts', trans['is_first'].sum(), agg='sum')
     parallel.add('ep_ends', trans['is_last'].sum(), agg='sum')
 
-    with embodied.timer.section('inserts'):
-      while len(replay_promises) > args.actor_threads:
-        replay_promises.popleft()()  # Blocks when rate limited.
-      request = {'method': 'add', 'worker': addrs, **trans}
-      replay_promises.append(replay(request))
+    # with embodied.timer.section('inserts'):
+    #   while len(replay_promises) > args.actor_threads:
+    #     replay_promises.popleft()()  # Blocks when rate limited.
+    #   request = {'method': 'add', 'worker': addrs, **trans}
+    #   replay_promises.append(replay(request))
 
     for i, addr in enumerate(addrs):
       tran = {k: v[i] for k, v in trans.items()}
 
-      # with embodied.timer.section('inserts'):
-      #   replay.add(tran, worker=addr)  # Blocks when rate limited.
+      with embodied.timer.section('inserts'):
+        replay.add(tran, worker=addr)  # Blocks when rate limited.
 
       with embodied.timer.section('logs1'):
         updated[addr] = now
@@ -155,15 +156,12 @@ def parallel_actor(step, agent, logger, barrier, args):
         logger.add(server.stats(), prefix='server')
 
   addr = f'tcp://*:{args.actor_port}'
-  with embodied.distr.BatchServer(
-      addr, workfn, donefn, args.actor_batch, args.actor_threads,
-      args.ipv6) as server:
-    while True:
-      server.check()
-      time.sleep(1)
+  server = embodied.distr.Server2(addr, ipv6=args.ipv6)
+  server.bind('act', workfn, donefn, args.actor_threads, args.actor_batch)
+  server.run()
 
 
-def parallel_learner(step, agent, logger, usage, barrier, args):
+def parallel_learner(step, agent, replay, logger, usage, barrier, args):
 
   logdir = embodied.Path(args.logdir)
   agg = embodied.Agg()
@@ -173,24 +171,23 @@ def parallel_learner(step, agent, logger, usage, barrier, args):
   checkpoint = embodied.Checkpoint(logdir / 'checkpoint.ckpt')
   checkpoint.step = step
   checkpoint.agent = agent
-  # checkpoint.replay = replay
+  checkpoint.replay = replay  # TODO
   if args.from_checkpoint:
     checkpoint.load(args.from_checkpoint)
   checkpoint.load_or_save()
   barrier.wait()
   should_save(step)  # Register that we just saved.
 
-  replay = embodied.distr.Client('ipc:///tmp/replay', name='Sampler')
-  replay.connect()
-  def parallel_dataset(prefetch=1):
-    request = {'method': 'sample'}  # , 'batch': args.batch_size}
-    promises = deque([replay(request) for _ in range(prefetch)])
-    while True:
-      promises.append(replay(request))
-      yield promises.popleft()()
+  # replay = embodied.distr.Client('ipc:///tmp/replay', name='Sampler')
+  # replay.connect()
+  # def parallel_dataset(prefetch=1):
+  #   promises = deque([replay.sample({}) for _ in range(prefetch)])
+  #   while True:
+  #     promises.append(replay.sample({}))
+  #     yield promises.popleft()()
 
-  # dataset = agent.dataset(replay.dataset)
-  dataset = agent.dataset(parallel_dataset)
+  dataset = agent.dataset(replay.dataset)
+  # dataset = agent.dataset(parallel_dataset)
 
   state = None
   # TODO
@@ -230,32 +227,22 @@ def parallel_learner(step, agent, logger, usage, barrier, args):
       checkpoint.save()
 
 
-def parallel_replay(make_replay, args):
-  replay = make_replay()
-  dataset = iter(replay.dataset())
-  def workfn(data, _):
-    method = data.pop('method')
-    print('REPLAY METHOD', method)
-    if method == 'add':
-      for i, worker in enumerate(data.pop('worker')):
-        replay.add({k: v[i] for k, v in data.items()}, worker)
-      return {}
-    # TODO
-    # elif method == 'sample':
-    #   batch = data['batch']
-    #   [next(dataset) for _ in range(data['batch'])]
-    elif method == 'sample':
-      return next(dataset)
-    elif method == 'stats':
-      return replay.stats()
-    else:
-      raise NotImplementedError(f'Unknown method {method}')
-  # TODO: How to make sure we serve inserts when samples are blocked and vice
-  # versa? Need two server instances?
-  with embodied.distr.Server('ipc:///tmp/replay', workfn, workers=64) as server:
-    while True:
-      server.check()
-      time.sleep(1)
+# def parallel_replay(make_replay, args):
+#   # TODO: checkpointing into replay subdir
+#   replay = make_replay()
+#   dataset = iter(replay.dataset())
+#
+#   def add_batch(data):
+#     for i, worker in enumerate(data.pop('worker')):
+#       replay.add({k: v[i] for k, v in data.items()}, worker)
+#     return {}
+#
+#   addr = 'ipc:///tmp/replay'
+#   server = embodied.distr.Server2(addr)
+#   server.bind('add_batch', add_batch, workers=4)
+#   server.bind('sample', lambda _: next(dataset), workers=4)
+#   server.bind('stats', lambda _: replay.stats())
+#   server.run()
 
 
 def parallel_env(replica_id, make_env, args):
@@ -266,14 +253,15 @@ def parallel_env(replica_id, make_env, args):
 
   step = embodied.Counter()
   logger = embodied.Logger(step, [embodied.logger.TerminalOutput(name=name)])
-  usage = embodied.Usage(psutil=True)
-  should_log = embodied.when.Clock(args.log_every)
+  # usage = embodied.Usage(psutil=True)
+  # should_log = embodied.when.Clock(args.log_every)
 
   _print('Make env')
   env = make_env()
-  # addr = f'{args.actor_host}:{args.actor_port}'
   addr = f'tcp://{args.actor_host}:{args.actor_port}'
-  actor = embodied.distr.Client(addr, rid, name, args.ipv6)
+  actor = embodied.distr.Client(
+      addr, rid, name, args.ipv6, pings=10, maxage=60)
+  actor.connect()
 
   done = True
   while True:
@@ -292,10 +280,10 @@ def parallel_env(replica_id, make_env, args):
       logger.scalar('score', score)
       logger.scalar('length', length)
     with embodied.timer.section('env_request'):
-      promise = actor(obs)
+      future = actor.act(obs)
     try:
       with embodied.timer.section('env_response'):
-        act = promise()
+        act = future()
       act = {k: v for k, v in act.items() if not k.startswith('log_')}
     except embodied.distr.NotAliveError:
       # Wait until we are connected again, so we don't unnecessarily reset the
@@ -324,3 +312,30 @@ def dummy_data(spaces, batch_dims):
   for dim in reversed(batch_dims):
     data = {k: np.repeat(v[None], dim, axis=0) for k, v in data.items()}
   return data
+
+
+# def replay_server(make_replay, args):
+#   replay = make_replay()
+#   cp = embodied.Checkpoint(args.logdir / 'replay.ckpt')
+#   cp.replay = replay
+#   cp.load_or_save()
+#   server = embodied.distr.Server2(args.replay_addr, ipv6=args.ipv6)
+#   # server.bind('add', lambda data: replay.add(data, data.pop('worker')))
+#   # server.bind('sample', replay._sample)
+#   server.bind('add_batch', ...)
+#   server.bind('sample_batch', ...)
+#   server.bind('checkpoint', cp.save)
+#   server.run()
+
+
+# def metrics_server(args):
+#   logger = ...
+#   agg = ...
+#   epstats = ...
+#   server = embodied.distr.Server2(args.metrics_addr, ipv6=args.ipv6)
+#   # server.bind('add', lambda data: replay.add(data, data.pop('worker')))
+#   # server.bind('sample', replay._sample)
+#   server.bind('add', ...)
+#   server.bind('log', ...)
+#   server.run()
+

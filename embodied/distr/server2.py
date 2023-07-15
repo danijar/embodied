@@ -15,7 +15,7 @@ class Server2:
   def __init__(
       self, address, workers=1, name='Server', errors=True, ipv6=False):
     self.address = address
-    self.inner = f'ipc:///tmp/{name}-inner'
+    self.inner = f'ipc:///tmp/inner{np.random.randint(2 ** 32)}'
     self.name = name
     self.ipv6 = ipv6
     self.server = server.Server(self.inner, workers, name, errors, ipv6)
@@ -44,9 +44,13 @@ class Server2:
     self.batcher.join()
 
   def run(self):
-    while True:
-      self.check()
-      time.sleep(1)
+    try:
+      self.start()
+      while True:
+        self.check()
+        time.sleep(1)
+    finally:
+      self.close()
 
   def stats(self):
     # TODO
@@ -68,7 +72,7 @@ class Server2:
     queues = collections.defaultdict(list)
     buffers = collections.defaultdict(dict)
     pending = {}
-    basics.print_(f'[{name} Listening at {address}')
+    basics.print_(f'[{name}] Listening at {address}')
 
     while running.is_set():
 
