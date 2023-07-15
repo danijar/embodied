@@ -5,7 +5,7 @@ import numpy as np
 
 from ..core import basics
 
-from . import parallel
+from . import process
 from . import server
 from . import sockets
 
@@ -20,7 +20,6 @@ class Server2:
     self.ipv6 = ipv6
     self.server = server.Server(self.inner, workers, name, errors, ipv6)
     self.batches = {}
-    self.running = parallel.mp.Event()
     self.batcher = None
 
   def bind(self, name, workfn, logfn=None, workers=0, batch=0):
@@ -28,9 +27,8 @@ class Server2:
     self.server.bind(name, workfn, logfn, workers, batch=0)
 
   def start(self):
-    self.running.set()
-    self.batcher = parallel.Process(
-        self._batcher, self.running, self.address, self.inner,
+    self.batcher = process.StoppableProcess(
+        self._batcher, self.address, self.inner,
         self.batches, self.name, self.ipv6, name='batcher', start=True)
     self.server.start()
 
@@ -40,8 +38,7 @@ class Server2:
 
   def close(self):
     self.server.close()
-    self.running.clear()
-    self.batcher.join()
+    self.batcher.stop()
 
   def run(self):
     try:
@@ -64,7 +61,7 @@ class Server2:
     self.close()
 
   @staticmethod
-  def _batcher(running, address, inner, batches, name, ipv6):
+  def _batcher(is_running, address, inner, batches, name, ipv6):
 
     socket = sockets.ServerSocket(address)
     inbound = sockets.ClientSocket(identity=0, pings=0, maxage=0)
@@ -74,7 +71,7 @@ class Server2:
     pending = {}
     basics.print_(f'[{name}] Listening at {address}')
 
-    while running.is_set():
+    while is_running():
 
       result = socket.receive()
       if result:

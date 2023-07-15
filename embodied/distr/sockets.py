@@ -1,13 +1,14 @@
 import enum
 import itertools
 import pickle  # TODO: use msgpack instead
+import threading
 import time
 
 import numpy as np
 import zmq
 
-# DEBUG = False
-DEBUG = True
+DEBUG = False
+# DEBUG = True
 
 class Type(enum.Enum):
   PING   = int(1).to_bytes(1, 'big')  # rid
@@ -41,34 +42,37 @@ class ClientSocket:
     self.addr = None
     self.rid = iter(itertools.count(0))
     self.running = True
+    self.lock = threading.RLock()
     self._abandoned = []
 
   def connect(self, addr, timeout=10.0):
     self.disconnect()
-    self.socket.connect(addr)
-    self.addr = addr
-    rid = next(self.rid).to_bytes(8, 'big')
-    self.socket.send_multipart([Type.PING.value, rid])
-    start = time.time()
-    while True:
-      try:
-        parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
-        typ, rid2, *args = [x.buffer for x in parts]
-        if typ == Type.PONG.value and rid == rid2:
-          self.connected = True
-          return
-        else:
-          raise ProtocolError(Type(typ).name)
-      except zmq.Again:
-        pass
-      if timeout and time.time() - start >= timeout:
-        raise ConnectError()
-      time.sleep(0.01)
+    with self.lock:
+      self.socket.connect(addr)
+      self.addr = addr
+      rid = next(self.rid).to_bytes(8, 'big')
+      self.socket.send_multipart([Type.PING.value, rid])
+      start = time.time()
+      while True:
+        try:
+          parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
+          typ, rid2, *args = [x.buffer for x in parts]
+          if typ == Type.PONG.value and rid == rid2:
+            self.connected = True
+            return
+          else:
+            raise ProtocolError(Type(typ).name)
+        except zmq.Again:
+          pass
+        if timeout and time.time() - start >= timeout:
+          raise ConnectError()
+        time.sleep(0.01)
 
   def disconnect(self):
     if self.addr:
-      self.socket.disconnect(self.addr)
-      self.connected = False
+      with self.lock:
+        self.socket.disconnect(self.addr)
+        self.connected = False
 
   def receive(self):
     assert self.connected
@@ -77,7 +81,8 @@ class ClientSocket:
     # if not self.poller.poll():
     #   return None
     try:
-      parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
+      with self.lock:
+        parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
       self.last_response = now
     except zmq.Again:
       parts = None
@@ -125,7 +130,8 @@ class ClientSocket:
         f'with rid {int.from_bytes(rid, "big")}')
     if typ == Type.PING.value:
       assert not args
-      self.socket.send_multipart([Type.PONG.value, rid])
+      with self.lock:
+        self.socket.send_multipart([Type.PONG.value, rid])
       return None
     elif typ == Type.PONG.value:
       assert not args
@@ -145,7 +151,8 @@ class ClientSocket:
     DEBUG and print(f"Client calling '{name}' with rid {rid}")
     rid = rid.to_bytes(8, 'big')
     name = name.encode('utf-8')
-    self.socket.send_multipart([Type.CALL.value, rid, name, *payload])
+    with self.lock:
+      self.socket.send_multipart([Type.CALL.value, rid, name, *payload])
     self.last_call = time.time()
     return rid
 
@@ -154,11 +161,13 @@ class ClientSocket:
     rid = next(self.rid)
     DEBUG and print(f'Client ping with rid {rid}')
     rid = rid.to_bytes(8, 'big')
-    self.socket.send_multipart([Type.PING.value, rid])
+    with self.lock:
+      self.socket.send_multipart([Type.PING.value, rid])
     return rid
 
   def close(self):
-    self.socket.close()
+    with self.lock:
+      self.socket.close()
 
 
 class ServerSocket:
@@ -177,10 +186,12 @@ class ServerSocket:
     # self.poller.register(self.socket, zmq.POLLIN)
     self.alive = {}
     self.rid = iter(itertools.count(0))
+    self.lock = threading.RLock()
 
   def clients(self, maxage=float('inf')):
     now = time.time()
-    return tuple(k for k, v in self.alive.items() if now - v <= maxage)
+    with self.lock:
+      return tuple(k for k, v in self.alive.items() if now - v <= maxage)
 
   def receive(self):
     # TODO
@@ -189,7 +200,8 @@ class ServerSocket:
     #   return None
     now = time.time()
     try:
-      parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
+      with self.lock:
+        parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
     except zmq.Again:
       return None
     addr, typ, rid, *args = [x.buffer for x in parts]
@@ -197,8 +209,8 @@ class ServerSocket:
     self.alive[addr] = now
     if typ == Type.PING.value:
       assert not args
-      # self.socket.send_multipart([addr, Type.PONG.value, rid])
-      self.socket.send_multipart([addr, Type.PONG.value, bytes(rid)])
+      with self.lock:
+        self.socket.send_multipart([addr, Type.PONG.value, bytes(rid)])
       return None
     elif typ == Type.PONG.value:
       assert not args
@@ -214,18 +226,22 @@ class ServerSocket:
 
   def send_ping(self, addr):
     rid = next(self.rid).to_bytes(8, 'big')
-    self.socket.send_multipart([addr, Type.PING.value, rid])
+    with self.lock:
+      self.socket.send_multipart([addr, Type.PING.value, rid])
     return rid
 
   def send_result(self, addr, rid, payload):
-    self.socket.send_multipart([addr, Type.RESULT.value, rid, *payload])
+    with self.lock:
+      self.socket.send_multipart([addr, Type.RESULT.value, rid, *payload])
 
   def send_error(self, addr, rid, text):
     text = text.encode('utf-8')
-    self.socket.send_multipart([addr, Type.ERROR.value, rid, text])
+    with self.lock:
+      self.socket.send_multipart([addr, Type.ERROR.value, rid, text])
 
   def close(self):
-    self.socket.close()
+    with self.lock:
+      self.socket.close()
 
 
 def pack(data):

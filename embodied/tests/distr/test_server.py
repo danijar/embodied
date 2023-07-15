@@ -19,7 +19,8 @@ PORTS = iter(range(5555, 6000))
 
 def addresses(tcp=True, ipc=True):
   results = []
-  tcp and results.append('tcp://localhost:{port}')
+  # TODO
+  # tcp and results.append('tcp://localhost:{port}')
   ipc and results.append('ipc:///tmp/test-{port}')
   return results
 
@@ -313,11 +314,12 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('inner_addr', addresses())
   @pytest.mark.parametrize('outer_addr', addresses())
-  def test_proxy(self, Server, inner_addr, outer_addr):
+  @pytest.mark.parametrize('workers', (1, 10))
+  def test_proxy(self, Server, inner_addr, outer_addr, workers):
     inner_addr = inner_addr.format(port=next(PORTS))
     outer_addr = outer_addr.format(port=next(PORTS))
     proxy_client = embodied.distr.Client(inner_addr)
-    proxy_server = Server(outer_addr)
+    proxy_server = Server(outer_addr, workers=workers)
     proxy_server.bind('function', lambda x: proxy_client.function(x).result())
     server = Server(inner_addr)
     server.bind('function', lambda data: {'foo': 2 * data['foo']})
@@ -333,11 +335,12 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('inner_addr', addresses())
   @pytest.mark.parametrize('outer_addr', addresses())
-  def test_proxy_batched(self, Server, inner_addr, outer_addr):
+  @pytest.mark.parametrize('workers', (2, 3, 10))
+  def test_proxy_batched(self, Server, inner_addr, outer_addr, workers):
     inner_addr = inner_addr.format(port=next(PORTS))
     outer_addr = outer_addr.format(port=next(PORTS))
     proxy_client = embodied.distr.Client(inner_addr)
-    proxy_server = Server(outer_addr, workers=2)
+    proxy_server = Server(outer_addr, workers=workers)
     proxy_server.bind('function', lambda x: proxy_client.function(x).result())
     server = Server(inner_addr)
     server.bind('function', lambda data: {'foo': 2 * data['foo']}, batch=2)
@@ -440,50 +443,6 @@ def repro3():
   thread.terminate()
 
 
-def repro5():
-  # Server = embodied.distr.Server2  # reproduces with either
-  Server = embodied.distr.Server  # reproduces with either
-  inner_addr = 'tcp://localhost:5555'
-  outer_addr = 'tcp://localhost:5556'
-  inner_addr = inner_addr.format(port=next(PORTS))
-  outer_addr = outer_addr.format(port=next(PORTS))
-  # inner_addr = 'ipc:///tmp/test-inner'
-  # outer_addr = 'ipc:///tmp/test-outer'
-
-  def proxy(outer_addr, inner_addr):
-    proxy_client = embodied.distr.Client(
-        inner_addr, pings=1, maxage=2, name='ProxyInner')
-    proxy_client.connect(retry=False, timeout=1)
-    proxy_server = Server(outer_addr, workers=3, name='ProxyOuter')
-    # proxy_server.bind('function', lambda x: proxy_client.function(x).result())
-    def fwd(x):
-      print('PROXY RECEIVED CALL')
-      return proxy_client.function(x).result()
-    proxy_server.bind('function', fwd)
-    proxy_server.run()
-
-  # thread = embodied.distr.Thread(proxy, start=True)
-  thread = embodied.distr.Process(
-      proxy, outer_addr, inner_addr,
-      start=True)
-
-  server = Server(inner_addr)
-  def work(data):
-    print('SERVER RECEIVED CALL')
-    return {'foo': 2 * data['foo']}
-  server.bind('function', work, batch=1)
-
-  with server:
-    client = embodied.distr.Client(outer_addr, pings=1, maxage=3)
-    client.connect(retry=False, timeout=1)
-    # futures = [client.function({'foo': 13}) for _ in range(10)]
-    futures = [client.function({'foo': 13}) for _ in range(6)]
-    results = [future.result()['foo'] for future in futures]
-    print(results)
-    assert all(result == 26 for result in results)
-
-  thread.terminate()
-
 def repro4():
   # Server = embodied.distr.Server2  # reproduces with either
   Server = embodied.distr.Server  # reproduces with either
@@ -529,6 +488,149 @@ def repro4():
   # thread.terminate()
 
 
+def repro5():
+  # Server = embodied.distr.Server2  # reproduces with either
+  Server = embodied.distr.Server  # reproduces with either
+  inner_addr = 'tcp://localhost:5555'
+  outer_addr = 'tcp://localhost:5556'
+  inner_addr = inner_addr.format(port=next(PORTS))
+  outer_addr = outer_addr.format(port=next(PORTS))
+  # inner_addr = 'ipc:///tmp/test-inner'
+  # outer_addr = 'ipc:///tmp/test-outer'
+
+  def proxy(outer_addr, inner_addr):
+    proxy_client = embodied.distr.Client(
+        inner_addr, pings=1, maxage=2, name='ProxyInner')
+    proxy_client.connect(retry=False, timeout=1)
+    proxy_server = Server(outer_addr, workers=3, name='ProxyOuter')
+    # proxy_server.bind('function', lambda x: proxy_client.function(x).result())
+    def fwd(x):
+      print('PROXY RECEIVED CALL')
+      return proxy_client.function(x).result()
+    proxy_server.bind('function', fwd)
+    proxy_server.run()
+
+  # thread = embodied.distr.Thread(proxy, start=True)
+  thread = embodied.distr.Process(
+      proxy, outer_addr, inner_addr,
+      start=True)
+
+  server = Server(inner_addr)
+  def work(data):
+    print('SERVER RECEIVED CALL')
+    return {'foo': 2 * data['foo']}
+  server.bind('function', work, batch=1)
+
+  with server:
+    client = embodied.distr.Client(outer_addr, pings=1, maxage=3)
+    client.connect(retry=False, timeout=1)
+    # futures = [client.function({'foo': 13}) for _ in range(10)]
+    futures = [client.function({'foo': 13}) for _ in range(6)]
+    results = [future.result()['foo'] for future in futures]
+    print(results)
+    assert all(result == 26 for result in results)
+
+  thread.terminate()
+
+
+def repro6():
+  # Server = embodied.distr.Server2  # reproduces with either
+  Server = embodied.distr.Server  # reproduces with either
+  inner_addr = 'tcp://localhost:5555'
+  outer_addr = 'tcp://localhost:5556'
+  inner_addr = inner_addr.format(port=next(PORTS))
+  outer_addr = outer_addr.format(port=next(PORTS))
+  # inner_addr = 'ipc:///tmp/test-inner'
+  # outer_addr = 'ipc:///tmp/test-outer'
+
+  def proxy(outer_addr, inner_addr):
+    proxy_client = embodied.distr.Client(
+        inner_addr, pings=1, maxage=2, name='ProxyInner')
+    proxy_client.connect(retry=False, timeout=1)
+
+    # proxy_server = Server(outer_addr, workers=3, name='ProxyOuter')
+    proxy_server = Server(outer_addr, workers=1, name='ProxyOuter')
+
+    # proxy_server.bind('function', lambda x: proxy_client.function(x).result())
+    def fwd(x):
+      print('PROXY RECEIVED CALL')
+      return proxy_client.function(x).result()
+    proxy_server.bind('function', fwd)
+    proxy_server.run()
+
+  # thread = embodied.distr.Thread(proxy, start=True)
+  thread = embodied.distr.Process(
+      proxy, outer_addr, inner_addr,
+      start=True)
+
+  server = Server(inner_addr)
+  def work(data):
+    print('SERVER RECEIVED CALL')
+    return {'foo': 2 * data['foo']}
+  server.bind('function', work, batch=1)
+
+  with server:
+    client = embodied.distr.Client(outer_addr, pings=1, maxage=3)
+    client.connect(retry=False, timeout=1)
+    # futures = [client.function({'foo': 13}) for _ in range(10)]
+    futures = [client.function({'foo': 13}) for _ in range(6)]
+    results = [future.result()['foo'] for future in futures]
+    print(results)
+    assert all(result == 26 for result in results)
+
+  thread.terminate()
+
+
+def repro7():
+  # Server = embodied.distr.Server2  # reproduces with either
+  Server = embodied.distr.Server  # reproduces with either
+
+  # inner_addr = 'tcp://localhost:5555'
+  # outer_addr = 'tcp://localhost:5556'
+  # inner_addr = inner_addr.format(port=next(PORTS))
+  # outer_addr = outer_addr.format(port=next(PORTS))
+  inner_addr = 'ipc:///tmp/test-inner'
+  outer_addr = 'ipc:///tmp/test-outer'
+
+  def proxy(is_running, outer_addr, inner_addr):
+    proxy_client = embodied.distr.Client(
+        inner_addr, pings=1, maxage=2, name='ProxyInner')
+    proxy_client.connect(retry=False, timeout=1)
+
+    # proxy_server = Server(outer_addr, workers=3, name='ProxyOuter')
+    proxy_server = Server(outer_addr, workers=2, name='ProxyOuter')
+
+    # proxy_server.bind('function', lambda x: proxy_client.function(x).result())
+    def fwd(x):
+      print('PROXY RECEIVED CALL')
+      return proxy_client.function(x).result()
+    proxy_server.bind('function', fwd)
+    proxy_server.start()
+    while is_running():
+      proxy_server.check()
+      time.sleep(0.1)
+
+  worker = embodied.distr.StoppableProcess(proxy, outer_addr, inner_addr)
+  worker.start()
+
+  server = Server(inner_addr)
+  def work(data):
+    print('SERVER RECEIVED CALL')
+    return {'foo': 2 * data['foo']}
+  server.bind('function', work, batch=1)
+
+  with server:
+    client = embodied.distr.Client(outer_addr, pings=1, maxage=3)
+    client.connect(retry=False, timeout=1)
+    # futures = [client.function({'foo': 13}) for _ in range(10)]
+    futures = [client.function({'foo': 13}) for _ in range(6)]
+    results = [future.result()['foo'] for future in futures]
+    print(results)
+    assert all(result == 26 for result in results)
+
+  worker.stop()
+
+
 if __name__ == '__main__':
   # let's "hope" this all might be a mac-specific zmq bug that happens when
   # connecting too many servers/clients together?
@@ -536,4 +638,6 @@ if __name__ == '__main__':
   # repro2()  # stochastic: sometimes hangs
   # repro3()  # stochastic: not enough values to unpack
   # repro4()
-  repro5()
+  # repro5()  # stochastic: b0000001 is not a valid type
+  # repro6()    # it works if the proxy has only one thread!
+  repro7()

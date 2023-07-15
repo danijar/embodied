@@ -6,7 +6,7 @@ import numpy as np
 
 from ..core import basics
 from . import sockets
-from . import parallel
+from . import thread
 
 
 Method = namedtuple('Method', 'name,workfn,logfn,pool,batch,queue')
@@ -23,35 +23,39 @@ class Server:
     self.ipv6 = ipv6
     self.methods = {}
     self.default_pool = concurrent.futures.ThreadPoolExecutor(workers, 'work')
+    self.other_pools = []
     self.log_pool = concurrent.futures.ThreadPoolExecutor(1, 'log')
     self.result_set = set()
     self.log_queue = deque()
     self.log_proms = deque()
-    self.running = None
-    self.loop = parallel.Thread(self._loop, name='loop')
+    self.loop = thread.StoppableThread(self._loop, name=f'{name}_loop')
 
   def bind(self, name, workfn, logfn=None, workers=0, batch=0):
     if workers:
       pool = concurrent.futures.ThreadPoolExecutor(workers, name)
+      self.other_pools.append(pool)
     else:
       pool = self.default_pool
     self.methods[name] = Method(name, workfn, logfn, pool, batch, [])
 
   def start(self):
-    self.running = True
     self.loop.start()
 
   def check(self):
+    self.loop.check()
+    for pool in [self.default_pool] + self.other_pools:
+      assert not pool._broken
     [not x.done() or x.result() for x in self.result_set.copy()]
     [not x.done() or x.result() for x in self.log_proms.copy()]
-    self.loop.check()
 
   def close(self):
     self._print('Shutting down')
-    self.running = False
     concurrent.futures.wait(self.result_set)
     concurrent.futures.wait(self.log_proms)
-    self.loop.join()
+    self.loop.stop()
+    self.default_pool.shutdown()
+    for pool in self.other_pools:
+      pool.shutdown()
 
   def run(self):
     try:
@@ -72,11 +76,11 @@ class Server:
   def stats(self):
     return {}  # TODO
 
-  def _loop(self):
+  def _loop(self, is_running):
     socket = sockets.ServerSocket(self.address, self.ipv6)
     self._print(f'Listening at {self.address}')
 
-    while self.running:
+    while is_running():
       now = time.time()
 
       result = socket.receive()
@@ -99,8 +103,13 @@ class Server:
               self.log_queue.append(future)
               method.queue.clear()
           else:
-            future = method.pool.submit(
-                self._work, method, addr, rid, payload, now)
+            try:
+              future = method.pool.submit(
+                  self._work, method, addr, rid, payload, now)
+            except RuntimeError:
+              print(self.name, method)
+              print('AAAAAAHHHH', self.loop.ident)  # TODO
+              raise
             future.method = method
             future.addr = addr
             future.rid = rid
