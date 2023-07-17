@@ -20,7 +20,7 @@ class TestDistr:
     stats = defaultdict(int)
     barrier = embodied.distr.mp.Barrier(1 + clients)
 
-    def client(is_running, addr, barrier):
+    def client(context, addr, barrier):
       data = {
           'foo': np.zeros((64, 64, 3,), np.uint8),
           'bar': np.zeros((1024,), np.float32),
@@ -34,9 +34,8 @@ class TestDistr:
       client = embodied.distr.Client(addr)
       client.connect()
       barrier.wait()
-      while is_running():
+      while context.running:
         client.function(data).result()
-        print('client result')
 
     def workfn(data):
       time.sleep(0.002)
@@ -80,7 +79,11 @@ class TestDistr:
 
   def test_proxy_throughput(self, clients=16, batch=16, workers=4):
 
-    def client(is_running, outer_addr, barrier):
+    # TODO:
+    # - make sure ctrl+c properly kills all processes
+    # - also make sure ports are free at the beginning of the unittest
+
+    def client(context, outer_addr, barrier):
       data = {
           'foo': np.zeros((64, 64, 3,), np.uint8),
           'bar': np.zeros((1024,), np.float32),
@@ -89,11 +92,11 @@ class TestDistr:
       client = embodied.distr.Client(outer_addr)
       client.connect()
       barrier.wait()
-      # while is_running:  # TODO: improve the API
-      while is_running():
+      # while context:  # TODO: improve the API
+      while context.running:
         client.function(data).result()
 
-    def proxy(is_running, outer_addr, inner_addr, barrier):
+    def proxy(context, outer_addr, inner_addr, barrier):
       client = embodied.distr.Client(
           inner_addr, pings=0, maxage=0, name='ProxyInner')
       client.connect()
@@ -103,17 +106,12 @@ class TestDistr:
         return client.function(data).result()
       server.bind('function', function, workers=2 * batch)
       with server:
-        print('-' * 79)
-        print('PROXY LOOPER', server.loop.ident)
-        print('-' * 79)
         barrier.wait()
-        while is_running():
+        while context.running:
           server.check()
-          # print('proxy is healthy')
           time.sleep(0.1)
-      print('proxy shutting down')
 
-    def backend(is_running, inner_addr, barrier):
+    def backend(context, inner_addr, barrier):
       stats = defaultdict(int)
       def workfn(data):
         time.sleep(0.002)
@@ -126,32 +124,19 @@ class TestDistr:
           inner_addr, errors=True, name='Backend')
       server.bind('function', workfn, donefn, batch=batch, workers=4)
       with server:
-        print('-' * 79)
-        print('BACKEND LOOPER', server.loop.ident)
-        print('-' * 79)
         barrier.wait()
         start = time.time()
-        while is_running():
-          print('backend step')
-          try:
-            server.check()
-          except Exception:
-            print('-' * 79)
-            raise
-          print('backend is healthy')
+        while context.running:
+          server.check()
           now = time.time()
           dur = now - start
-          # print(
-          #     f'{stats["batches"]/dur:.2f} bat/s ' +
-          #     f'{stats["frames"]/dur:.2f} frm/s ' +
-          #     f'{stats["nbytes"]/dur/(1024**3):.2f} gib/s')
-          # stats.clear()
-          # start = now
-          # time.sleep(1)
+          print(
+              f'{stats["batches"]/dur:.2f} bat/s ' +
+              f'{stats["frames"]/dur:.2f} frm/s ' +
+              f'{stats["nbytes"]/dur/(1024**3):.2f} gib/s')
           stats.clear()
           start = now
-          time.sleep(0.1)
-      print('backend shutting down')
+          time.sleep(1)
 
     inner_addr = 'ipc:///tmp/test-inner'
     outer_addr = 'ipc:///tmp/test-outer'

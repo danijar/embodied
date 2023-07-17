@@ -592,7 +592,7 @@ def repro7():
   inner_addr = 'ipc:///tmp/test-inner'
   outer_addr = 'ipc:///tmp/test-outer'
 
-  def proxy(is_running, outer_addr, inner_addr):
+  def proxy(context, outer_addr, inner_addr):
     proxy_client = embodied.distr.Client(
         inner_addr, pings=1, maxage=2, name='ProxyInner')
     proxy_client.connect(retry=False, timeout=1)
@@ -606,7 +606,7 @@ def repro7():
       return proxy_client.function(x).result()
     proxy_server.bind('function', fwd)
     proxy_server.start()
-    while is_running():
+    while context.running:
       proxy_server.check()
       time.sleep(0.1)
 

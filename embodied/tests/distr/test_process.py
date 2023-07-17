@@ -20,9 +20,9 @@ class TestProcess:
     worker.join()
 
   def test_stop(self):
-    def fn(is_running, q):
+    def fn(context, q):
       q.put('start')
-      while is_running():
+      while context.running:
         time.sleep(0.01)
       q.put('stop')
     q = embodied.distr.mp.SimpleQueue()

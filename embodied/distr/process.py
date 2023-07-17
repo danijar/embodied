@@ -14,7 +14,7 @@ class Process:
     inits = cloudpickle.dumps(self.initializers)
     self.errqueue = utils.mp.SimpleQueue()
     self.process = utils.mp.Process(target=self._wrapper, name=name, args=(
-        fn, name, args, utils.PRINT_LOCK, self.errqueue, inits))
+        fn, name, args, utils.PRINT_LOCK, self.errqueue, inits), daemon=True)
     self.started = False
     start and self.start()
 
@@ -53,6 +53,11 @@ class Process:
       return
     self.process.terminate()
 
+  def __repr__(self):
+    attrs = ('name', 'pid', 'started', 'exitcode')
+    attrs = [f'{k}={getattr(self, k)}' for k in attrs]
+    return f'{type(self).__name__}(' + ', '.join(attrs) + ')'
+
   @staticmethod
   def _wrapper(fn, name, args, lock, errqueue, inits):
     try:
@@ -75,8 +80,8 @@ class StoppableProcess(Process):
     self.runflag = utils.mp.Event()
     def fn2(runflag, *args):
       assert runflag is not None
-      is_running = runflag.is_set
-      fn(is_running, *args)
+      context = utils.Context(runflag.is_set)
+      fn(context, *args)
     super().__init__(fn2, self.runflag, *args, name=name, start=start)
 
   def start(self):
@@ -84,6 +89,9 @@ class StoppableProcess(Process):
     super().start()
 
   def stop(self, wait=True):
+    self.check()
+    if not self.alive:
+      return
     self.runflag.clear()
     if wait is True:
       self.join()

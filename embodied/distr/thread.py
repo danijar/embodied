@@ -11,9 +11,7 @@ class Thread:
     self._exitcode = None
     self.exception = None
     name = name or fn.__name__
-    print('=' * 79)
-    print('CREATING THREAD', name)
-    print('=' * 79)
+    self.old_name = name[:]
     self.thread = threading.Thread(
         target=self._wrapper, args=args, name=name, daemon=True)
     self.started = False
@@ -39,14 +37,9 @@ class Thread:
     assert not self.started
     self.started = True
     self.thread.start()
-    print('=' * 79)
-    print('STARTED THREAD', self.name, self.ident)
-    print('=' * 79)
-    self.oldid = int(self.ident)  # TODO
 
   def check(self):
     assert self.started
-    print('thread check', self.exception, self.ident)
     if self.exception:
       e = self.exception
       self.exception = None
@@ -70,13 +63,13 @@ class Thread:
       ctypes.pythonapi.PyThreadState_SetAsyncExc(
           ctypes.c_long(thread_id), None)
 
+  def __repr__(self):
+    attrs = ('name', 'pid', 'started', 'exitcode')
+    attrs = [f'{k}={getattr(self, k)}' for k in attrs]
+    return f'{type(self).__name__}(' + ', '.join(attrs) + ')'
+
   def _wrapper(self, *args):
     try:
-      import time
-      time.sleep(0.1)
-      print(
-          'WRAPPER STARTED FOR THREAD',
-          self.ident, int(self.ident), self.oldid)
       self.fn(*args)
       self._exitcode = 0
     except SystemExit:
@@ -85,7 +78,6 @@ class Thread:
       self.exception = e
       self._exitcode = 1
       utils.warn_remote_error(e, self.name)
-      print('thread exception', self.name, self.ident, self.oldid)
 
 
 class StoppableThread(Thread):
@@ -94,8 +86,8 @@ class StoppableThread(Thread):
     self.runflag = None
     def fn2(*args):
       assert self.runflag is not None
-      is_running = lambda: self.runflag
-      fn(is_running, *args)
+      context = utils.Context(lambda: self.runflag)
+      fn(context, *args)
     super().__init__(fn2, *args, name=name, start=start)
 
   def start(self):
@@ -104,6 +96,9 @@ class StoppableThread(Thread):
 
   def stop(self, wait=True):
     self.runflag = False
+    self.check()
+    if not self.alive:
+      return
     if wait is True:
       self.join()
     elif wait:

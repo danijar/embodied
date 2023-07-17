@@ -61,7 +61,7 @@ class Server2:
     self.close()
 
   @staticmethod
-  def _batcher(is_running, address, inner, batches, name, ipv6):
+  def _batcher(context, address, inner, batches, name, ipv6):
 
     socket = sockets.ServerSocket(address)
     inbound = sockets.ClientSocket(identity=0, pings=0, maxage=0)
@@ -71,7 +71,7 @@ class Server2:
     pending = {}
     basics.print_(f'[{name}] Listening at {address}')
 
-    while is_running():
+    while context.running:
 
       result = socket.receive()
       if result:

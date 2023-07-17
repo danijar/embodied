@@ -76,11 +76,11 @@ class Server:
   def stats(self):
     return {}  # TODO
 
-  def _loop(self, is_running):
+  def _loop(self, context):
     socket = sockets.ServerSocket(self.address, self.ipv6)
     self._print(f'Listening at {self.address}')
 
-    while is_running():
+    while context.running:
       now = time.time()
 
       result = socket.receive()
@@ -103,13 +103,8 @@ class Server:
               self.log_queue.append(future)
               method.queue.clear()
           else:
-            try:
-              future = method.pool.submit(
-                  self._work, method, addr, rid, payload, now)
-            except RuntimeError:
-              print(self.name, method)
-              print('AAAAAAHHHH', self.loop.ident)  # TODO
-              raise
+            future = method.pool.submit(
+                self._work, method, addr, rid, payload, now)
             future.method = method
             future.addr = addr
             future.rid = rid
