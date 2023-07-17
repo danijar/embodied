@@ -1,3 +1,4 @@
+import os
 import pathlib
 import sys
 import time
@@ -13,9 +14,9 @@ PORTS = iter(range(5555, 6000))
 
 class TestDistr:
 
-  # def test_client_server_throughput(self, clients=64, batch=16, workers=4):
-  # def test_client_server_throughput(self, clients=32, batch=16, workers=4):
-  def test_batched_throughput(self, clients=16, batch=16, workers=4):
+  def test_batched_throughput(self, clients=32, batch=16, workers=4):
+    assert int(os.popen('ulimit -n').read()) > 1024
+
     addr = f'tcp://localhost:{next(PORTS)}'
     stats = defaultdict(int)
     barrier = embodied.distr.mp.Barrier(1 + clients)
@@ -26,11 +27,6 @@ class TestDistr:
           'bar': np.zeros((1024,), np.float32),
           'baz': np.zeros((), bool),
       }
-      # data = {
-      #     'foo': np.zeros((64, 64, 64, 3,), np.uint8),
-      #     'bar': np.zeros((64, 1024,), np.float32),
-      #     'baz': np.zeros((64,), bool),
-      # }
       client = embodied.distr.Client(addr)
       client.connect()
       barrier.wait()
@@ -50,15 +46,10 @@ class TestDistr:
         embodied.distr.StoppableProcess(client, addr, barrier, start=True)
         for _ in range(clients)]
 
-    # clients=32, batch=16, workers=4
-    # server = embodied.distr.Server(addr)  # 160bat / 2600frm / 0.04gib
-    # server = embodied.distr.Server2(addr)  # 400bat / 6400frm / 0.1gib
+    server = embodied.distr.Server(addr)
+    # server = embodied.distr.Server2(addr)
 
-    # clients=16, batch=16, workers=4
-    # server = embodied.distr.Server(addr)  # 140bat / 2200frm / 0.03gib
-    server = embodied.distr.Server2(addr)  # 150bat / 2300frm / 0.04gib
-
-    server.bind('function', workfn, donefn, batch=batch, workers=4)
+    server.bind('function', workfn, donefn, batch=batch, workers=workers)
     with server:
       barrier.wait()
       start = time.time()
@@ -77,11 +68,8 @@ class TestDistr:
 
   #############################################################################
 
-  def test_proxy_throughput(self, clients=16, batch=16, workers=4):
-
-    # TODO:
-    # - make sure ctrl+c properly kills all processes
-    # - also make sure ports are free at the beginning of the unittest
+  def test_proxy_throughput(self, clients=32, batch=16, workers=4):
+    assert int(os.popen('ulimit -n').read()) > 1024
 
     def client(context, outer_addr, barrier):
       data = {
@@ -92,7 +80,6 @@ class TestDistr:
       client = embodied.distr.Client(outer_addr)
       client.connect()
       barrier.wait()
-      # while context:  # TODO: improve the API
       while context.running:
         client.function(data).result()
 
@@ -104,7 +91,7 @@ class TestDistr:
           outer_addr, errors=True, name='ProxyOuter')
       def function(data):
         return client.function(data).result()
-      server.bind('function', function, workers=2 * batch)
+      server.bind('function', function, batch=batch, workers=workers)
       with server:
         barrier.wait()
         while context.running:
@@ -122,7 +109,7 @@ class TestDistr:
         stats['nbytes'] += sum(x.nbytes for x in data.values())
       server = embodied.distr.Server(
           inner_addr, errors=True, name='Backend')
-      server.bind('function', workfn, donefn, batch=batch, workers=4)
+      server.bind('function', workfn, donefn, workers=workers)
       with server:
         barrier.wait()
         start = time.time()
@@ -152,5 +139,6 @@ class TestDistr:
 
 
 if __name__ == '__main__':
-  # TestDistr().test_batched_throughput()
-  TestDistr().test_proxy_throughput()
+  TestDistr().test_batched_throughput()  # 4100 frm/s Server
+  # TestDistr().test_batched_throughput()  # 4200 frm/s Server2
+  TestDistr().test_proxy_throughput()  # 3000 frm/s

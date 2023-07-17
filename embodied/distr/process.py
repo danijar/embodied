@@ -14,7 +14,7 @@ class Process:
     inits = cloudpickle.dumps(self.initializers)
     self.errqueue = utils.mp.SimpleQueue()
     self.process = utils.mp.Process(target=self._wrapper, name=name, args=(
-        fn, name, args, utils.PRINT_LOCK, self.errqueue, inits), daemon=True)
+        fn, name, args, utils.PRINT_LOCK, self.errqueue, inits))
     self.started = False
     start and self.start()
 
