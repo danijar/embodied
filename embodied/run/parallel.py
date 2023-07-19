@@ -2,7 +2,7 @@ import re
 import sys
 import threading
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 
 import embodied
 import numpy as np
@@ -23,8 +23,6 @@ def parallel(agent, logger, make_replay, make_env, num_envs, args):
     for i in range(num_envs):
       workers.append(embodied.distr.Thread(parallel_env, i, make_env, args))
   replay = make_replay()
-  # workers.append(embodied.distr.Process(
-  #     parallel_replay, make_replay, args))
   workers.append(embodied.distr.Thread(
       parallel_actor, step, agent, replay, logger, barrier, args))
   workers.append(embodied.distr.Thread(
@@ -34,24 +32,24 @@ def parallel(agent, logger, make_replay, make_env, num_envs, args):
 
 def parallel_actor(step, agent, replay, logger, barrier, args):
 
-  # _, initial = agent.policy(dummy_data(agent.obs_space, (args.actor_batch,)))
   initial = agent.init_policy(args.actor_batch)
   initial = embodied.treemap(lambda x: x[0], initial)
   allstates = defaultdict(lambda: initial)
   barrier.wait()  # Do not collect data before learner restored checkpoint.
 
   @embodied.timer.section('actor_workfn')
-  def workfn(obs, addrs):
+  def workfn(obs):
+    envids = obs.pop('env_id')
     with embodied.timer.section('get_states'):
-      states = [allstates[a] for a in addrs]
+      states = [allstates[a] for a in envids]
       states = embodied.treemap(lambda *xs: list(xs), *states)
     act, states = agent.policy(obs, states)
     act['reset'] = obs['is_last'].copy()
     with embodied.timer.section('put_states'):
-      for i, a in enumerate(addrs):
+      for i, a in enumerate(envids):
         allstates[a] = embodied.treemap(lambda x: x[i], states)
     step.increment(args.actor_batch)
-    logs = (obs, act, addrs)
+    logs = (obs, act, envids)
     return act, logs
 
   should_log = embodied.when.Clock(args.log_every)
@@ -75,7 +73,7 @@ def parallel_actor(step, agent, replay, logger, barrier, args):
   @embodied.timer.section('actor_donefn')
   def donefn(logs):
     now = time.time()
-    obs, act, addrs = logs
+    obs, act, envids = logs
     trans = {**obs, **act}
     [x.setflags(write=False) for x in trans.values()]
 
@@ -86,10 +84,10 @@ def parallel_actor(step, agent, replay, logger, barrier, args):
     # with embodied.timer.section('inserts'):
     #   while len(replay_promises) > args.actor_threads:
     #     replay_promises.popleft()()  # Blocks when rate limited.
-    #   request = {'method': 'add', 'worker': addrs, **trans}
+    #   request = {'method': 'add', 'worker': envids, **trans}
     #   replay_promises.append(replay(request))
 
-    for i, addr in enumerate(addrs):
+    for i, addr in enumerate(envids):
       tran = {k: v[i] for k, v in trans.items()}
 
       with embodied.timer.section('inserts'):
@@ -115,7 +113,7 @@ def parallel_actor(step, agent, replay, logger, barrier, args):
             if key in tran:
               episode.add(f'policy_{key}', tran[key], agg='stack')
 
-      # TODO: This is really expensive in terms of GIL usage.
+      # TODO: This can be really expensive in terms of GIL usage.
       with embodied.timer.section('logs4'):
         if not args.log_zeros:
           for key in log_keys:
@@ -155,8 +153,7 @@ def parallel_actor(step, agent, replay, logger, barrier, args):
         logger.add(epstats.result(), prefix='epstats')
         logger.add(server.stats(), prefix='server')
 
-  addr = f'tcp://*:{args.actor_port}'
-  server = embodied.distr.Server2(addr, ipv6=args.ipv6)
+  server = embodied.distr.Server2(f'tcp://*:{args.actor_port}', ipv6=args.ipv6)
   server.bind('act', workfn, donefn, args.actor_threads, args.actor_batch)
   server.run()
 
@@ -185,9 +182,9 @@ def parallel_learner(step, agent, replay, logger, usage, barrier, args):
   #   while True:
   #     promises.append(replay.sample({}))
   #     yield promises.popleft()()
+  # dataset = agent.dataset(parallel_dataset)
 
   dataset = agent.dataset(replay.dataset)
-  # dataset = agent.dataset(parallel_dataset)
 
   state = None
   # TODO
@@ -207,8 +204,8 @@ def parallel_learner(step, agent, replay, logger, usage, barrier, args):
         logger.add(agg.result(), prefix='train')
         logger.add(agent.report(batch), prefix='report')
         logger.add(embodied.timer.stats(), prefix='timer')
-        # logger.add(replay.stats(), prefix='replay')
-        logger.add(replay({'method': 'stats'})(), prefix='replay')
+        logger.add(replay.stats(), prefix='replay')
+        # logger.add(replay({'method': 'stats'})(), prefix='replay')
         logger.add(usage.stats(), prefix='usage')
         duration = time.time() - stats['last_time']
         actor_fps = (int(step) - stats['last_step']) / duration
@@ -245,10 +242,9 @@ def parallel_learner(step, agent, replay, logger, usage, barrier, args):
 #   server.run()
 
 
-def parallel_env(replica_id, make_env, args):
-  assert replica_id >= 0, replica_id
-  rid = replica_id
-  name = f'Env{rid}'
+def parallel_env(env_id, make_env, args):
+  assert env_id >= 0, env_id
+  name = f'Env{env_id}'
   _print = lambda x: embodied.print(f'[{name}] {x}')
 
   step = embodied.Counter()
@@ -260,7 +256,7 @@ def parallel_env(replica_id, make_env, args):
   env = make_env()
   addr = f'tcp://{args.actor_host}:{args.actor_port}'
   actor = embodied.distr.Client(
-      addr, rid, name, args.ipv6, pings=10, maxage=60)
+      addr, env_id, name, args.ipv6, pings=10, maxage=60)
   actor.connect()
 
   done = True
@@ -280,17 +276,16 @@ def parallel_env(replica_id, make_env, args):
       logger.scalar('score', score)
       logger.scalar('length', length)
     with embodied.timer.section('env_request'):
-      future = actor.act(obs)
+      future = actor.act({'env_id': env_id, **obs})
     try:
       with embodied.timer.section('env_response'):
-        act = future()
+        act = future.result()
       act = {k: v for k, v in act.items() if not k.startswith('log_')}
     except embodied.distr.NotAliveError:
       # Wait until we are connected again, so we don't unnecessarily reset the
       # environment hundreds of times while the server is unavailable.
       _print('Lost connection to server')
       actor.connect()
-      _print('Starting new episode')
       done = True
     except embodied.distr.RemoteError as e:
       _print(f'Shutting down env due to agent error: {e}')
@@ -301,17 +296,6 @@ def parallel_env(replica_id, make_env, args):
     #   logger.add(usage.stats(), prefix='usage')
     #   logger.add(embodied.timer.stats(), prefix='timer')
     #   logger.write(fps=True)
-
-
-def dummy_data(spaces, batch_dims):
-  # TODO: Get rid of this function by adding initial_policy_state() and
-  # initial_train_state() to the agent API. Or move this helper into
-  # core/basics?
-  spaces = list(spaces.items())
-  data = {k: np.zeros(v.shape, v.dtype) for k, v in spaces}
-  for dim in reversed(batch_dims):
-    data = {k: np.repeat(v[None], dim, axis=0) for k, v in data.items()}
-  return data
 
 
 # def replay_server(make_replay, args):
@@ -338,4 +322,3 @@ def dummy_data(spaces, batch_dims):
 #   server.bind('add', ...)
 #   server.bind('log', ...)
 #   server.run()
-

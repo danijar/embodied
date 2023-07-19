@@ -107,31 +107,16 @@ def main(argv=None):
     elif args.script == 'parallel':
       assert config.run.actor_batch <= config.envs.amount, (
           config.run.actor_batch, config.envs.amount)
-      ctor = bind(wrapped_env, config, batch=False)
+      make_env2 = bind(wrapped_env, config, batch=False)
       step = embodied.Counter()
-      env = ctor()
-
-      agent = agt.Agent(env.obs_space, env.act_space, step, config)
-
-      # # TODO
-      # from embodied import random
-      # agent = random.RandomAgent(env.obs_space, env.act_space)
-
+      env = make_env2()
+      obs_space, act_space = env.obs_space, env.act_space
       env.close()
-
-      # replay = make_replay(config, logdir / 'replay', rate_limit=True)
-      # embodied.run.parallel(
-      #     agent, replay, logger, ctor, config.envs.amount, args)
-
-      # embodied.run.parallel(
-      #     agent, logger,
-      #     make_replay(config, logdir / 'replay', rate_limit=True),
-      #     ctor, config.envs.amount, args)
-
+      agent = agt.Agent(obs_space, act_space, step, config)
+      make_replay2 = bind(
+          make_replay, config, logdir / 'replay', rate_limit=True)
       embodied.run.parallel(
-          agent, logger,
-          bind(make_replay, config, logdir / 'replay', rate_limit=True),
-          ctor, config.envs.amount, args)
+          agent, logger, make_replay2, make_env2, config.envs.amount, args)
 
     elif args.script == 'parallel_agent':
       ctor = bind(wrapped_env, config, batch=False)

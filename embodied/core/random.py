@@ -7,6 +7,12 @@ class RandomAgent:
     self.obs_space = obs_space
     self.act_space = act_space
 
+  def init_policy(self, batch_size):
+    return ()
+
+  def init_train(self, batch_size):
+    return ()
+
   def policy(self, obs, carry=(), mode='train'):
     batch_size = len(obs['is_first'])
     act = {
