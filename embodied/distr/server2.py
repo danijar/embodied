@@ -63,7 +63,7 @@ class Server2:
   @staticmethod
   def _batcher(context, address, inner, batches, name, ipv6):
 
-    socket = sockets.ServerSocket(address)
+    socket = sockets.ServerSocket(address, ipv6)
     inbound = sockets.ClientSocket(identity=0, pings=0, maxage=0)
     inbound.connect(inner)
     queues = collections.defaultdict(list)
