@@ -118,6 +118,20 @@ def main(argv=None):
       embodied.run.parallel(
           agent, logger, make_replay2, make_env2, config.envs.amount, args)
 
+    elif args.script == 'parallel2':
+      assert config.run.actor_batch <= config.envs.amount, (
+          config.run.actor_batch, config.envs.amount)
+      make_env2 = bind(wrapped_env, config, batch=False)
+      step = embodied.Counter()
+      env = make_env2()
+      obs_space, act_space = env.obs_space, env.act_space
+      env.close()
+      agent = agt.Agent(obs_space, act_space, step, config)
+      make_replay2 = bind(
+          make_replay, config, logdir / 'replay', rate_limit=True)
+      embodied.run.parallel(
+          agent, logger, make_replay2, make_env2, config.envs.amount, args)
+
     elif args.script == 'parallel_agent':
       ctor = bind(wrapped_env, config, batch=False)
       step = embodied.Counter()
