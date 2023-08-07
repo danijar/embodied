@@ -18,6 +18,7 @@ class MinecraftBase(embodied.Env):
       sticky_attack=30,
       sticky_jump=10,
       pitch_limit=(-60, 60),
+      log_inv_keys=('diamond',),
       logs=False,
   ):
     if logs:
@@ -40,6 +41,9 @@ class MinecraftBase(embodied.Env):
     self._inv_keys = [
         k for k in self._env.obs_space if k.startswith('inventory/')
         if k != 'inventory/log2']
+    self._inv_log_keys = [f'inventory/{k}' for k in log_inv_keys]
+    assert all(k in self._inv_keys for k in self._inv_log_keys), (
+        self._inv_keys, self._inv_log_keys)
     self._step = 0
     self._max_inventory = None
     self._equip_enum = self._gymenv.observation_space[
@@ -74,7 +78,7 @@ class MinecraftBase(embodied.Env):
         'is_first': embodied.Space(bool),
         'is_last': embodied.Space(bool),
         'is_terminal': embodied.Space(bool),
-        **{f'log_{k}': embodied.Space(np.int64) for k in self._inv_keys},
+        **{f'log_{k}': embodied.Space(np.int64) for k in self._inv_log_keys},
         'log_player_pos': embodied.Space(np.float32, 3),
     }
 
@@ -145,11 +149,11 @@ class MinecraftBase(embodied.Env):
         'health': np.float32(obs['life_stats/life'] / 20),
         'hunger': np.float32(obs['life_stats/food'] / 20),
         'breath': np.float32(obs['life_stats/air'] / 300),
-        'reward': 0.0,
+        'reward': np.float32(0.0),
         'is_first': obs['is_first'],
         'is_last': obs['is_last'],
         'is_terminal': obs['is_terminal'],
-        **{f'log_{k}': np.int64(obs[k]) for k in self._inv_keys},
+        **{f'log_{k}': np.int64(obs[k]) for k in self._inv_log_keys},
         'log_player_pos': np.array([player_x, player_y, player_z], np.float32),
     }
     for key, value in obs.items():

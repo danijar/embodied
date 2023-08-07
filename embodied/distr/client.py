@@ -1,10 +1,12 @@
 import time
 import weakref
 from functools import partial as bind
+from collections import deque
 
 import numpy as np
 
 from ..core import basics
+from ..core import fps
 from ..core import timer
 from . import sockets
 
@@ -13,15 +15,22 @@ class Client:
 
   def __init__(
       self, address, identity=None, name='Client', ipv6=False, pings=10,
-      maxage=60):
+      maxage=120, maxinflight=None, errors=True, connect=False):
     if identity is None:
       identity = int(np.random.randint(2 ** 32))
     self.address = address
     self.identity = identity
     self.name = name
+    self.maxinflight = maxinflight
+    self.errors = errors
     self.resolved = None
     self.socket = sockets.ClientSocket(identity, ipv6, pings, maxage)
     self.futures = weakref.WeakValueDictionary()
+    self.queue = deque()
+    self.conn_per_sec = fps.FPS()
+    self.send_per_sec = fps.FPS()
+    self.recv_per_sec = fps.FPS()
+    connect and self.connect()
 
   def __getattr__(self, name):
     if name.startswith('__'):
@@ -31,8 +40,14 @@ class Client:
     except AttributeError:
       raise ValueError(name)
 
-  def close(self):
-    return self.socket.close()
+  def stats(self):
+    return {
+        'futures': len(self.futures),
+        'inflight': len(self.queue),
+        'conn_per_sec': self.conn_per_sec.result(),
+        'send_per_sec': self.send_per_sec.result(),
+        'recv_per_sec': self.recv_per_sec.result(),
+    }
 
   @timer.section('client_connect')
   def connect(self, retry=True, timeout=10):
@@ -42,6 +57,7 @@ class Client:
       try:
         self.socket.connect(self.resolved, timeout)
         self._print('Connection established')
+        self.conn_per_sec.step(1)
         return
       except sockets.ProtocolError as e:
         self._print(f'Ignoring unexpected message: {e}')
@@ -55,52 +71,67 @@ class Client:
 
   @timer.section('client_call')
   def call(self, method, data):
+    assert len(self.futures) < 1000, (
+        self.name, len(self.futures),
+        sum([x.done() for x in self.futures.values()]))
+    # print(self.name, len(self.futures))  # TODO
+    if self.maxinflight:
+      with timer.section('inflight_wait'):
+        while sum(not x.done() for x in self.queue) >= self.maxinflight:
+          self.queue[0].check()
+          time.sleep(0.001)
+    if self.errors:
+      try:
+        while self.queue[0].done():
+          self.queue.popleft().result()
+      except IndexError:
+        pass
     assert isinstance(data, dict)
     data = {k: np.asarray(v) for k, v in data.items()}
     data = sockets.pack(data)
     rid = self.socket.send_call(method, data)
+    self.send_per_sec.step(1)
     future = Future(self._receive, rid)
     self.futures[rid] = future
+    if self.errors or self.maxinflight:
+      self.queue.append(future)
     return future
 
+  def close(self):
+    return self.socket.close()
+
   @timer.section('client_receive')
-  def _receive(self, rid):
+  def _receive(self, rid, retry):
     while rid in self.futures and not self.futures[rid].done():
-      try:
-        result = self.socket.receive()
-        if result is not None:
-          other, payload = result
-          if other in self.futures:
-            self.futures[other].set_result(sockets.unpack(payload))
-      except sockets.NotAliveError:
-        self._print('Server is not responding.')
-        raise
-      except sockets.RemoteError as e:
-        # self._print('Received error response.')
-        self._print(f'Received error response: {e.args[1]}')
-        other = e.args[0]
+      result = self._listen()
+      if result is None and not retry:
+        return
+      time.sleep(0.001)  # TODO
+
+  @timer.section('client_listen')
+  def _listen(self):
+    try:
+      result = self.socket.receive()
+      if result is not None:
+        other, payload = result
         if other in self.futures:
-          self.futures[other].set_error(sockets.RemoteError(e.args[1]))
-      except sockets.ProtocolError as e:
-        self._print(f'Ignoring unexpected message: {e}')
-      time.sleep(0.001)
+          self.futures[other].set_result(sockets.unpack(payload))
+        self.recv_per_sec.step(1)
+      return result
+    except sockets.NotAliveError:
+      self._print('Server is not responding')
+      raise
+    except sockets.RemoteError as e:
+      self._print(f'Received error response: {e.args[1]}')
+      other = e.args[0]
+      if other in self.futures:
+        self.futures[other].set_error(sockets.RemoteError(e.args[1]))
+    except sockets.ProtocolError as e:
+      self._print(f'Ignoring unexpected message: {e}')
 
   @timer.section('client_resolve')
   def _resolve(self, address):
     protocol, address = address.split('://', 1)
-    if address.startswith('/bns/'):
-      assert self.ipv6, (address, self.ipv6)
-      self._print(f'BNS address detected: {address}')
-      from google3.chubby.python.public import pychubbyutil
-      while True:
-        try:
-          address, port = pychubbyutil.ResolveBNSName(address)
-          break
-        except pychubbyutil.NoResultsError:
-          self._print('BNS address not found, retrying')
-          time.sleep(10)
-      address = f'[{address}]:{port}'
-      self._print(f'BNS address resolved to: {address}')
     return f'{protocol}://{address}'
 
   def _print(self, text):
@@ -116,18 +147,22 @@ class Future:
     self._result = None
     self._error = None
 
+  def check(self):
+    if self._status == 0:
+      self._waitfn(*self._args, retry=False)
+
+  def done(self):
+    return self._status > 0
+
   def result(self):
     if self._status == 0:
-      self._waitfn(*self._args)
+      self._waitfn(*self._args, retry=True)
     if self._status == 1:
       return self._result
     elif self._status == 2:
       raise self._error
     else:
       assert False
-
-  def done(self):
-    return self._status > 0
 
   def set_result(self, result):
     self._status = 1

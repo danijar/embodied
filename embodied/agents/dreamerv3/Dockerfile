@@ -36,15 +36,17 @@ WORKDIR /embodied
 
 # Python
 RUN add-apt-repository ppa:deadsnakes/ppa
-RUN apt-get update && apt-get install -y python3.11 python3.11-venv && apt-get clean
+RUN apt-get update && apt-get install -y python3.11-dev python3.11-venv && apt-get clean
 RUN python3.11 -m venv ./venv --upgrade-deps
 ENV PATH="/embodied/venv/bin:$PATH"
+RUN pip install --upgrade pip setuptools
 
 # Envs
 COPY scripts scripts
-RUN sh scripts/install-atari.sh
-RUN sh scripts/install-dmlab.sh
+# RUN sh scripts/install-atari.sh
+# RUN sh scripts/install-dmlab.sh
 RUN sh scripts/install-minecraft.sh
+
 RUN pip install dm_control
 RUN pip install robodesk
 RUN pip install bsuite
@@ -74,4 +76,5 @@ ENV GCS_REQUEST_CONNECTION_TIMEOUT_SECS=300
 ENV GCS_METADATA_REQUEST_TIMEOUT_SECS=300
 ENV GCS_READ_REQUEST_TIMEOUT_SECS=300
 ENV GCS_WRITE_REQUEST_TIMEOUT_SECS=600
-# RUN chown -R 1000:root . && chmod -R 775 .
+# RUN chown -R 1000:root /embodied && chmod -R 775 /embodied
+RUN chown 1000:root . && chmod 775 .

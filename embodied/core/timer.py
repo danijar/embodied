@@ -19,11 +19,6 @@ class Timer:
     # self.threads = defaultdict(set)
     self.start = time.perf_counter_ns()
     self.writing = False
-    try:
-      from google3.learning.deepmind import endoscope
-      self.endoscope = endoscope
-    except ImportError:
-      self.endoscope = None
 
   @contextlib.contextmanager
   def section(self, name):
@@ -39,8 +34,7 @@ class Timer:
     path = '/'.join(stack)
     start = time.perf_counter_ns()
     try:
-      with self._maybe_use_endo(path):
-        yield
+      yield
     finally:
       dur = time.perf_counter_ns() - start
       stack.pop()
@@ -97,17 +91,6 @@ class Timer:
     # self.threads.clear()
     self.start = time.perf_counter_ns()
     self.writing = False
-
-  @contextlib.contextmanager
-  def _maybe_use_endo(self, path):
-    if not self.endoscope:
-      yield
-    elif '/' in path:
-      with self.endoscope.Scope(path):
-        yield
-    else:
-      with self.endoscope.Profile(path):
-        yield
 
 
 global_timer = Timer()

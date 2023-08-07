@@ -82,7 +82,7 @@ class JAXAgent(embodied.Agent):
     self.mets_promise = None
     self.sync_promise = None
 
-    self.policy_lock = threading.Lock()
+    self.policy_lock = threading.Lock()  # TODO?
 
     self.should_sync = embodied.when.Every(self.jaxcfg.sync_every)
     if not self.single_device:
@@ -218,16 +218,22 @@ class JAXAgent(embodied.Agent):
     mets = self._convert_mets(mets, self.train_devices)
     return mets
 
-  def dataset(self, generator):
-    batcher = embodied.Batcher(
-        sources=[generator] * self.config.batch_size,
-        workers=self.config.data_loaders,
-        postprocess=lambda x: {
-            **self._convert_inps(x, self.train_devices),
-            'rng': self._next_rngs(self.train_devices)},
-        prefetch_source=4,
-        prefetch_batch=1)
-    return batcher()
+  def dataset(self, generator, todo_is_batched=False):
+    if todo_is_batched:
+      return embodied.Prefetch(
+          generator, lambda x: {
+              **self._convert_inps(x, self.train_devices),
+              'rng': self._next_rngs(self.train_devices)})
+    else:
+      batcher = embodied.Batcher(
+          sources=[generator] * self.config.run.batch_size,
+          workers=self.config.data_loaders,
+          postprocess=lambda x: {
+              **self._convert_inps(x, self.train_devices),
+              'rng': self._next_rngs(self.train_devices)},
+          prefetch_source=4,
+          prefetch_batch=1)
+      return batcher()
 
   @embodied.timer.section('jaxagent_save')
   def save(self):
@@ -410,7 +416,7 @@ class JAXAgent(embodied.Agent):
   def _init_varibs(self, obs_space, act_space):
     varibs = {}
     rng = self._next_rngs(self.train_devices, mirror=True)
-    dims = (self.config.batch_size, self.config.batch_length)
+    dims = (self.config.run.batch_size, self.config.batch_length)
     data = self._dummy_batch({**obs_space, **act_space}, dims)
     data = self._convert_inps(data, self.train_devices)
     state, varibs = self._init_train(varibs, rng, data['is_first'])

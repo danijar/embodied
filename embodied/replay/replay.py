@@ -45,7 +45,9 @@ class Replay:
 
     if self.directory:
       self.directory.mkdirs()
-      self.workers = ThreadPoolExecutor(4, 'replay_saver')
+      # TODO
+      # self.workers = ThreadPoolExecutor(4, 'replay_saver')
+      self.workers = ThreadPoolExecutor(8, 'replay_saver')
       self.promises = {}
 
     self.metrics = {
@@ -71,6 +73,7 @@ class Replay:
         'ram_gb': chunk_nbytes / (1024 ** 3),
         'inserts': m['inserts'],
         'samples': m['samples'],
+        'replay_ratio': ratio(self.length * m['samples'], m['inserts']),
         'insert_wait_avg': ratio(m['insert_wait_dur'], m['inserts']),
         'insert_wait_frac': ratio(m['insert_wait_count'], m['inserts']),
         'sample_wait_avg': ratio(m['sample_wait_dur'], m['samples']),
@@ -223,10 +226,19 @@ class Replay:
       # except KeyError:
       #   pass  # There is a bug that I will never find.
 
-  def dataset(self):
-    while True:
-      yield self._sample()
-      # time.sleep(0.0001)
+  def dataset(self, batch=None):
+    if batch:
+      while True:
+        seqs = []
+        for _ in range(batch):
+          seqs.append(self._sample())
+        stacked = {
+            k: np.stack([seq[k] for seq in seqs])
+            for k in seqs[0].keys()}
+        yield stacked
+    else:
+      while True:
+        yield self._sample()
 
   @embodied.timer.section('replay_save')
   def save(self, wait=False):

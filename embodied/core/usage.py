@@ -1,4 +1,5 @@
 import gc
+import inspect
 import os
 import re
 import threading
@@ -15,12 +16,12 @@ class Usage:
 
   def __init__(self, **kwargs):
     available = {
-        'psutil': PsutilStats,
-        'nvsmi': NvsmiStats,
-        'gputil': GputilStats,
-        'malloc': MallocStats,
-        'gc': GcStats,
-        'gil': GilStats,
+        'psutil': PsutilStats,  # per process and global
+        'nvsmi': NvsmiStats,    # gloal
+        'gputil': GputilStats,  # per process
+        'malloc': MallocStats,  # per process
+        'gc': GcStats,          # per process
+        'gil': GilStats,        # per process
     }
     self.tools = {}
     for name, enabled in kwargs.items():
@@ -28,9 +29,9 @@ class Usage:
       if enabled:
         self.tools[name] = available[name]()
 
-  def add_procs(self, name, procs):
-    if 'psutil' in self.tools:
-      self.tools['psutil'].add_procs(name, procs)
+  # def add_procs(self, name, procs):
+  #   if 'psutil' in self.tools:
+  #     self.tools['psutil'].add_procs(name, procs)
 
   def stats(self):
     stats = {}
@@ -71,14 +72,15 @@ class PsutilStats:
 
   def __init__(self):
     import psutil
-    self.groups = {'main': [psutil.Process()]}
+    # self.groups = {'main': [psutil.Process()]}
+    self.proc = psutil.Process()
 
-  def add_procs(self, name, procs):
-    import psutil
-    procs = tuple(procs) if hasattr(procs, '__len__') else (procs,)
-    procs = tuple(int(x.pid if hasattr(x, 'pid') else x) for x in procs)
-    procs = tuple(psutil.Process(x) for x in procs)
-    self.groups[name] = procs
+  # def add_procs(self, name, procs):
+  #   import psutil
+  #   procs = tuple(procs) if hasattr(procs, '__len__') else (procs,)
+  #   procs = tuple(int(x.pid if hasattr(x, 'pid') else x) for x in procs)
+  #   procs = tuple(psutil.Process(x) for x in procs)
+  #   self.groups[name] = procs
 
   @timer.section('psutil_stats')
   def __call__(self):
@@ -87,20 +89,23 @@ class PsutilStats:
     cpus = psutil.cpu_count()
     memory = psutil.virtual_memory()
     stats = {
-        'cpu_count': cpus,
-        'cpu_frac': psutil.cpu_percent() / 100,
-        'ram_total_gb': memory.total / gb,
-        'ram_used_gb': memory.used / gb,
-        'ram_avail_gb': memory.available / gb,
-        'ram_frac': memory.percent / 100,
+        'proc_cpu_frac': self.proc.cpu_percent() / 100,
+        'proc_ram_frac': self.proc.memory_info().rss / memory.total,
+        'proc_ram_gb': self.proc.memory_info().rss / gb,
+        'total_cpu_count': cpus,
+        'total_cpu_frac': psutil.cpu_percent() / 100,
+        'total_ram_frac': memory.percent / 100,
+        'total_ram_total_gb': memory.total / gb,
+        'total_ram_used_gb': memory.used / gb,
+        'total_ram_avail_gb': memory.available / gb,
     }
-    for name, group in self.groups.items():
-      cpu = sum([x.cpu_percent() for x in group])
-      stats[f'{name}/cpu_frac'] = cpu / cpus / 100
-      ram = sum([x.memory_info().rss for x in group])
-      stats[f'{name}/ram_gb'] = ram / gb
-      stats[f'{name}/ram_frac'] = ram / memory.total
-      stats[f'{name}/num_procs'] = len(group)
+    # for name, group in self.groups.items():
+    #   cpu = sum([x.cpu_percent() for x in group])
+    #   stats[f'{name}/cpu_frac'] = cpu / cpus / 100
+    #   ram = sum([x.memory_info().rss for x in group])
+    #   stats[f'{name}/ram_gb'] = ram / gb
+    #   stats[f'{name}/ram_frac'] = ram / memory.total
+    #   stats[f'{name}/num_procs'] = len(group)
     return stats
 
 
@@ -156,7 +161,8 @@ class GcStats:
     self.start = None
 
   @timer.section('gc_stats')
-  def __call__(self, log=False):
+  # def __call__(self, log=False):
+  def __call__(self, log=True):
     stats = {k: 0 for k in self.keys}
     stats.update(self.stats.result())
     stats['objcounts'] = self._summary()
@@ -167,16 +173,43 @@ class GcStats:
   def _summary(self):
     lines = ['GC Most Common Types']
     for gen in range(3):
+
+      objs = {
+          id(obj): obj for obj in gc.get_objects(gen)
+          if not inspect.isframe(obj)}
+      for obj in list(objs.values()):
+        for obj in gc.get_referents(obj):
+          if not gc.is_tracked(obj):
+            objs[id(obj)] = obj
+
       counts = defaultdict(int)
-      for obj in gc.get_objects(gen):
-        counts[type(obj)] += 1
-      counts = {type(v).__name__: v for k, v in counts.items()}
+      for obj in objs.values():
+        counts[type(obj).__name__] += 1
+
+      # lengths = []
+      # for obj in objs.values():
+      #   if isinstance(obj, (list, tuple)) and obj:
+      #     name = f'{type(obj).__name__}({type(obj[0]).__name__})'
+      #     lengths.append((name, len(obj)))
+      #   elif isinstance(obj, set) and obj:
+      #     val = next(iter(obj))
+      #     name = f'{type(obj).__name__}({type(val).__name__})'
+      #     lengths.append((name, len(obj)))
+      #   elif isinstance(obj, dict) and obj:
+      #     val = next(iter(obj.values()))
+      #     name = f'{type(obj).__name__}({type(val).__name__})'
+      #     lengths.append((name, len(obj)))
+      # lengths = sorted(lengths, key=lambda x: -x[1])[:10]
+      # print(lengths)
+
       deltas = {k: v - self.counts[gen].get(k, 0) for k, v in counts.items()}
       self.counts[gen] = counts
-      counts = dict(sorted(counts.items(), key=lambda x: -x[1])[:10])
-      lines.append(f'  Generation {gen}')
-      for name, count in counts.items():
-        lines.append(f'    {name}: {count} ({deltas[name]:+d})')
+
+      deltas = dict(sorted(deltas.items(), key=lambda x: -abs(x[1]))[:10])
+      lines.append(f'\nGeneration {gen}\n')
+      for name, delta in deltas.items():
+        lines.append(f'- {name}: {delta:+d} ({counts[name]})')
+
     return '\n'.join(lines)
 
   def _callback(self, phase, info):
@@ -186,7 +219,7 @@ class GcStats:
     now = time.perf_counter_ns()
     if phase == 'start':
       self.start = now
-    if phase == 'stop':
+    if phase == 'stop' and self.start:
       gen = info['generation']
       agg = ('avg', 'max', 'sum')
       self.stats.add(f'gen{gen}/calls', 1, agg='sum')
@@ -246,11 +279,6 @@ class GilStats:
 
   def __init__(self):
     try:
-      from google3.learning.deepmind.python import gil_monitor
-      self.gil_monitor = gil_monitor.StartGilMonitor()
-    except ImportError:
-      self.gil_monitor = None
-    try:
       import gil_load
       self.gil_load = gil_load
       self.gil_load.init()
@@ -264,8 +292,6 @@ class GilStats:
 
   def __call__(self, log=True):
     stats = {}
-    if self.gil_monitor:
-      stats['held_ratio'] = self.gil_monitor.GetHeldRatio()
     if self.gil_load:
       names = {x.ident: x.name for x in list(threading.enumerate())}
       items = self.gil_load.get()[1].items()

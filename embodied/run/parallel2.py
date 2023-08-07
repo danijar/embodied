@@ -8,7 +8,7 @@ import embodied
 import numpy as np
 
 
-def parallel(agent, logger, make_replay, make_env, num_envs, args):
+def parallel2(agent, logger, make_replay, make_env, num_envs, args):
   step = logger.step
   usage = embodied.Usage(**args.usage)
   workers = []
@@ -154,7 +154,7 @@ def parallel_actor(step, agent, logger, barrier, args):
   server.run()
 
 
-def parallel_learner(step, agent, replay, logger, usage, barrier, args):
+def parallel_learner(step, agent, logger, usage, barrier, args):
 
   logdir = embodied.Path(args.logdir)
   agg = embodied.Agg()
@@ -164,34 +164,34 @@ def parallel_learner(step, agent, replay, logger, usage, barrier, args):
   checkpoint = embodied.Checkpoint(logdir / 'checkpoint.ckpt')
   checkpoint.step = step
   checkpoint.agent = agent
-  checkpoint.replay = replay  # TODO
   if args.from_checkpoint:
     checkpoint.load(args.from_checkpoint)
   checkpoint.load_or_save()
   barrier.wait()
   should_save(step)  # Register that we just saved.
 
-  replay = embodied.distr.Client('ipc:///tmp/replay', name='Sampler')
-  replay.connect()
-  def parallel_dataset(prefetch=1):
-    promises = deque([replay.sample({}) for _ in range(prefetch)])
+  def parallel_dataset(prefetch=10):  # TODO: prefetch number?
+    replay = embodied.distr.Client('ipc:///tmp/replay', name='Sampler')
+    replay.connect()
+    promises = deque([replay.sample_batch({}) for _ in range(prefetch)])
     while True:
-      promises.append(replay.sample({}))
-      yield promises.popleft()()
-  dataset = agent.dataset(parallel_dataset)
-
-  dataset = agent.dataset(replay.dataset)
+      promises.append(replay.sample_batch({}))
+      yield promises.popleft().result()
+  dataset = agent.dataset(parallel_dataset, todo_is_batched=True)
 
   state = None
   # TODO
   # state = agent.init_train(len(next(dataset)['is_first']))
   stats = dict(last_time=time.time(), last_step=int(step), batch_entries=0)
+  replay = embodied.distr.Client('ipc:///tmp/replay', name='Sampler')
+  replay.connect()
   while True:
 
     with embodied.timer.section('learner_batch_next'):
       batch = next(dataset)
     with embodied.timer.section('learner_train_step'):
       outs, state, mets = agent.train(batch, state)
+    time.sleep(0.001)  # TODO
     agg.add(mets)
     stats['batch_entries'] += batch['is_first'].size
 
@@ -222,38 +222,39 @@ def parallel_learner(step, agent, replay, logger, usage, barrier, args):
 def parallel_replay(make_replay, args):
 
   replay = make_replay()
-  dataset = iter(replay.dataset())
+  # dataset = iter(replay.dataset())
+  dataset = iter(replay.dataset(args.batch_size))
 
   should_save = embodied.when.Clock(args.save_every)
-  cp = embodied.Checkpoint(args.logdir / 'replay.ckpt')
+  cp = embodied.Checkpoint(embodied.Path(args.logdir) / 'replay.ckpt')
   cp.replay = replay
   cp.load_or_save()
 
   def add_batch(data):
-    print('ADD BATCH')
     for i, worker in enumerate(data.pop('worker')):
       replay.add({k: v[i] for k, v in data.items()}, worker)
     return {}
 
-  def sample_batch(data):
-    print('SAMPLE BATCH')
-    seqs = []
-    for _ in range(data['batch_size']):
-      seqs.append(next(dataset))
-    batch = {
-        k: np.stach([seq[k] for seq in seqs])
-        for k in seqs[0].keys()}
-    return batch
+  # def sample_batch(data):
+  #   seqs = []
+  #   for _ in range(data['batch_size']):
+  #     seqs.append(next(dataset))
+  #   batch = {
+  #       k: np.stack([seq[k] for seq in seqs])
+  #       for k in seqs[0].keys()}
+  #   return batch
 
-  server = embodied.distr.Server('ipc:///tmp/replay')
-  server.bind('add_batch', add_batch, workers=4)
-  server.bind('sample_batch', sample_batch, workers=4)
+  server = embodied.distr.Server('ipc:///tmp/replay', name='Replay')
+  server.bind('add_batch', add_batch, workers=1)
+  server.bind('sample_batch', lambda _: next(dataset), workers=1)
+  # server.bind('sample_batch', sample_batch, workers=1)
   server.bind('stats', lambda _: replay.stats())
   with server:
-    server.check()
-    if should_save():
-      cp.save()
-    time.sleep(1)
+    while True:
+      server.check()
+      if should_save():
+        cp.save()
+      time.sleep(1)
 
 
 def parallel_env(env_id, make_env, args):
@@ -310,29 +311,3 @@ def parallel_env(env_id, make_env, args):
     #   logger.add(usage.stats(), prefix='usage')
     #   logger.add(embodied.timer.stats(), prefix='timer')
     #   logger.write(fps=True)
-
-
-# def replay_server(make_replay, args):
-#   replay = make_replay()
-#   cp = embodied.Checkpoint(args.logdir / 'replay.ckpt')
-#   cp.replay = replay
-#   cp.load_or_save()
-#   server = embodied.distr.Server2(args.replay_addr, ipv6=args.ipv6)
-#   # server.bind('add', lambda data: replay.add(data, data.pop('worker')))
-#   # server.bind('sample', replay._sample)
-#   server.bind('add_batch', ...)
-#   server.bind('sample_batch', ...)
-#   server.bind('checkpoint', cp.save)
-#   server.run()
-
-
-# def metrics_server(args):
-#   logger = ...
-#   agg = ...
-#   epstats = ...
-#   server = embodied.distr.Server2(args.metrics_addr, ipv6=args.ipv6)
-#   # server.bind('add', lambda data: replay.add(data, data.pop('worker')))
-#   # server.bind('sample', replay._sample)
-#   server.bind('add', ...)
-#   server.bind('log', ...)
-#   server.run()

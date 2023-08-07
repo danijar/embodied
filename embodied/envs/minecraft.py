@@ -29,7 +29,8 @@ class MinecraftWood(embodied.Wrapper):
 
   def step(self, action):
     obs = self.env.step(action)
-    obs['reward'] = sum([fn(obs, self.env.inventory) for fn in self.rewards])
+    reward = sum([fn(obs, self.env.inventory) for fn in self.rewards])
+    obs['reward'] = np.float32(reward)
     return obs
 
 
@@ -50,8 +51,8 @@ class MinecraftClimb(embodied.Wrapper):
     height = np.float32(y)
     if obs['is_first']:
       self._previous = height
-    obs['reward'] = height - self._previous
-    obs['reward'] += self._health_reward(obs)
+    reward = (height - self._previous) + self._health_reward(obs)
+    obs['reward'] = np.float32(reward)
     self._previous = height
     return obs
 

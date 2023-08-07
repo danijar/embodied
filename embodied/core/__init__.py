@@ -16,10 +16,12 @@ from .parallel import Parallel
 from .timer import Timer
 from .worker import Worker
 from .batcher import Batcher
+from .prefetch import Prefetch
 from .agg import Agg
 from .uuid import uuid
 from .usage import Usage
 from .rwlock import RWLock
+from .fps import FPS
 
 from .batch_env import BatchEnv
 from .random import RandomAgent

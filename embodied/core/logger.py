@@ -29,13 +29,13 @@ class Logger:
     # print('logger add:', len(mapping))
     assert len(mapping) <= 1000, list(mapping.keys())
     for key in mapping.keys():
-      assert len(key) <= 200, key
+      assert len(key) <= 200, (len(key), key[:200] + '...')
     step = int(self.step) * self.multiplier
     for name, value in mapping.items():
       name = f'{prefix}/{name}' if prefix else name
-      if isinstance(value, str):
-        pass
-      else:
+      if isinstance(value, np.ndarray) and np.issubdtype(value.dtype, str):
+        value = str(value)
+      if not isinstance(value, str):
         value = np.asarray(value)
         if len(value.shape) not in (0, 1, 2, 3, 4):
           raise ValueError(
@@ -353,23 +353,6 @@ class MLFlowOutput:
     else:
       tags = {'resume_id': resume_id or ''}
       self._mlflow.start_run(run_name=run_name, tags=tags)
-
-
-class XDataOutput:
-
-  def __init__(self, dataframe='results'):
-    from google3.learning.deepmind.xdata import xdata
-    self._writer = xdata.bt.writer(
-        xdata.get_auto_data_id(), dataframe, stateless=True)
-
-  def __call__(self, summaries):
-    bystep = collections.defaultdict(dict)
-    for step, name, value in summaries:
-      if len(value.shape) == 4:
-        continue  # Videos are not supported.
-      bystep[step][name] = value
-    for step, metrics in bystep.items():
-      self._writer.write({'step': step, **metrics})
 
 
 @timer.section('gif')

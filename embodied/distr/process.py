@@ -68,7 +68,6 @@ class Process:
       fn(*args)
       sys.exit(0)
     except Exception as e:
-      print('exception in process')  # TODO
       utils.warn_remote_error(e, name, lock)
       errqueue.put(e)
       sys.exit(1)

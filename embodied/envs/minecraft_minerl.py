@@ -4,6 +4,12 @@ from minerl.herobraine.hero import handlers
 from minerl.herobraine.hero import mc
 from minerl.herobraine.hero.mc import INVERSE_KEYMAP
 
+import numpy as np
+
+np.float = float
+np.int = int
+np.bool = bool
+
 
 # def edit_options(**kwargs):
 #   import os, pathlib, re

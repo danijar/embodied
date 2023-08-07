@@ -29,7 +29,7 @@ class ClientSocket:
     self.socket = zmq.Context.instance().socket(zmq.DEALER)
     self.socket.setsockopt(zmq.IDENTITY, identity.to_bytes(16, 'big'))
     self.socket.setsockopt(zmq.IPV6, int(ipv6))
-    self.socket.set_hwm(0)
+    self.socket.set_hwm(0)  # TODO?
     # TODO
     # self.poller = zmq.Poller()
     # self.poller.register(self.socket, zmq.POLLIN)
@@ -43,7 +43,6 @@ class ClientSocket:
     self.rid = iter(itertools.count(0))
     self.running = True
     self.lock = threading.RLock()
-    self._abandoned = []
 
   def connect(self, addr, timeout=10.0):
     self.disconnect()
@@ -107,24 +106,8 @@ class ClientSocket:
         )
       return None
 
-    try:
-      # TODO: Why does this sometimes receive only a single part?
-      typ, rid, *args = [x.buffer for x in parts]
-    except ValueError:
-      print('-' * 79)
-      print(len(parts))
-      print(Type(parts[0].bytes).name)
-      print(self._abandoned)
-      print('-' * 79)
-      # Sometimes this is just a type (e.g. PONG or RESULT)
-      # Sometimes this is just an rid (e.g. ... 00 00 00 00 02)
-
-      # raise ValueError(Type(parts[0].bytes).name, len(parts))
-      self._abandoned.append(parts[0])
-      return None
-
+    typ, rid, *args = [x.buffer for x in parts]
     rid = bytes(rid)
-
     DEBUG and print(
         f'Client received {Type(bytes(typ)).name} ' +
         f'with rid {int.from_bytes(rid, "big")}')
@@ -178,8 +161,8 @@ class ServerSocket:
       port = addr.split(':')[-1]
       addr = f'tcp://*:{port}'
     self.socket = zmq.Context.instance().socket(zmq.ROUTER)
-    self.socket.setsockopt(zmq.IPV6, int(ipv6))
-    self.socket.set_hwm(0)
+    self.socket.setsockopt(zmq.IPV6, ipv6)
+    self.socket.set_hwm(0)  # TODO?
     self.socket.bind(addr)
     # TODO
     # self.poller = zmq.Poller()
@@ -248,7 +231,7 @@ def pack(data):
   data = {k: np.asarray(v) for k, v in data.items()}
   dtypes, shapes, buffers = [], [], []
   items = sorted(data.items(), key=lambda x: x[0])
-  keys, vals = zip(*items)
+  keys, vals = zip(*items) if items else ((), ())
   dtypes = [v.dtype.str for v in vals]
   shapes = [v.shape for v in vals]
   buffers = [v.tobytes() for v in vals]
@@ -260,7 +243,7 @@ def pack(data):
 def unpack(payload):
   meta, *buffers = payload
   keys, dtypes, shapes = pickle.loads(meta)
-  vals = [
+  vals = [  # TODO: Why does this allocate new memory? Reshape is bad?
       np.frombuffer(b, d).reshape(s)
       for i, (d, s, b) in enumerate(zip(dtypes, shapes, buffers))]
   data = dict(zip(keys, vals))

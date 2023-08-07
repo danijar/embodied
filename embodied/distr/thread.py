@@ -64,7 +64,7 @@ class Thread:
           ctypes.c_long(thread_id), None)
 
   def __repr__(self):
-    attrs = ('name', 'pid', 'started', 'exitcode')
+    attrs = ('name', 'ident', 'started', 'exitcode')
     attrs = [f'{k}={getattr(self, k)}' for k in attrs]
     return f'{type(self).__name__}(' + ', '.join(attrs) + ')'
 

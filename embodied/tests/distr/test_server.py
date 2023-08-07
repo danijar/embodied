@@ -15,20 +15,18 @@ SERVERS = [
     embodied.distr.Server2,
 ]
 
-PORTS = iter(range(5555, 6000))
+ADDRESSES = [
+    'tcp://localhost:{port}',
+    'ipc:///tmp/test-{port}',
+]
 
-def addresses(tcp=True, ipc=True):
-  results = []
-  # TODO
-  # tcp and results.append('tcp://localhost:{port}')
-  ipc and results.append('ipc:///tmp/test-{port}')
-  return results
+PORTS = iter(range(5555, 6000))
 
 
 class TestServer:
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_single_client(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     def function(data):
@@ -44,7 +42,7 @@ class TestServer:
       assert result['foo'] == 2
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_multiple_clients(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     server = Server(addr)
@@ -61,7 +59,7 @@ class TestServer:
       assert results == list(range(10))
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_multiple_methods(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     server = Server(addr)
@@ -74,7 +72,7 @@ class TestServer:
       assert client.sub({'x': 42, 'y': 13}).result()['z'] == 29
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_connect_before_server(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     server = Server(addr)
@@ -96,7 +94,7 @@ class TestServer:
     thread.join()
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_future_order(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     server = Server(addr)
@@ -112,13 +110,13 @@ class TestServer:
       assert future3.result()['foo'] == 3
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_future_cleanup(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     server = Server(addr)
     server.bind('function', lambda data: data)
     with server:
-      client = embodied.distr.Client(addr, 0, pings=0, maxage=1)
+      client = embodied.distr.Client(addr, 0, pings=0, maxage=1, errors=False)
       client.connect(retry=False, timeout=1)
       client.function({'foo': 1})
       client.function({'foo': 2})
@@ -128,7 +126,54 @@ class TestServer:
       assert not list(client.futures.keys())
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
+  def test_maxinflight(self, Server, addr):
+    addr = addr.format(port=next(PORTS))
+    server = Server(addr)
+
+    parallel = [0]
+    lock = threading.Lock()
+    def workfn(data):
+      with lock:
+        parallel[0] += 1
+        assert parallel[0] <= 2
+      time.sleep(0.2)
+      with lock:
+        parallel[0] -= 1
+      return data
+    server.bind('function', workfn, workers=4)
+
+    with server:
+      client = embodied.distr.Client(
+          addr, 0, pings=0, maxage=1, maxinflight=2)
+      client.connect(retry=False, timeout=1)
+      futures = [client.function({'foo': i}) for i in range(4)]
+      results = [future.result()['foo'] for future in futures]
+      assert results == list(range(4))
+
+  @pytest.mark.parametrize('Server', SERVERS)
+  @pytest.mark.parametrize('addr', ADDRESSES)
+  def test_future_cleanup_errors(self, Server, addr):
+    addr = addr.format(port=next(PORTS))
+    server = Server(addr)
+    server.bind('function', lambda data: data)
+    with server:
+      client = embodied.distr.Client(addr, 0, pings=0, maxage=1, errors=True)
+      client.connect(retry=False, timeout=1)
+      client.function({'foo': 1})
+      client.function({'foo': 2})
+      client.function({'foo': 3})
+      assert len(client.futures) == 3
+      assert len(client.queue) == 3
+      time.sleep(0.1)
+      [x.check() for x in client.queue]
+      assert all(x.done() for x in client.queue)
+      client.function({'foo': 4})
+      assert len(client.futures) == 1
+      assert len(client.queue) == 1
+
+  @pytest.mark.parametrize('Server', SERVERS)
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_ping_alive(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     def slow(data):
@@ -142,7 +187,7 @@ class TestServer:
       assert client.function({'foo': 0}).result() == {'foo': 0}
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_ping_dead(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     def slow(data):
@@ -157,7 +202,7 @@ class TestServer:
         client.function({'foo': 0}).result()
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_remote_error(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     def error(data):
@@ -176,8 +221,28 @@ class TestServer:
     assert repr(info2.value) == "RuntimeError('foo')"
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
-  def test_logfn_ordered(self, Server, addr):
+  @pytest.mark.parametrize('addr', ADDRESSES)
+  def test_remote_client_errors(self, Server, addr):
+    addr = addr.format(port=next(PORTS))
+    def error(data):
+      raise RuntimeError(data['foo'])
+    server = Server(addr, errors=False)
+    server.bind('function', error)
+    with server:
+      client = embodied.distr.Client(addr, errors=True)
+      client.connect()
+      client.function({'foo': 1})
+      time.sleep(0.2)
+      assert len(client.queue) == 1
+      client.queue[0].check()
+      assert client.queue[0].done()
+      with pytest.raises(embodied.distr.RemoteError) as info:
+        client.function({'foo': 2})
+    assert repr(info.value) == "RemoteError('RuntimeError(array(1))')"
+
+  @pytest.mark.parametrize('Server', SERVERS)
+  @pytest.mark.parametrize('addr', ADDRESSES)
+  def test_donefn_ordered(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     rng = np.random.default_rng(0)
     completed = []
@@ -187,10 +252,10 @@ class TestServer:
         time.sleep(0.1)
       completed.append(data['i'])
       return data, data
-    def logfn(data):
+    def donefn(data):
       logged.append(data['i'])
     server = Server(addr, workers=2)
-    server.bind('function', sometimes_wait, logfn)
+    server.bind('function', sometimes_wait, donefn)
     with server:
       client = embodied.distr.Client(addr, pings=0, maxage=1)
       client.connect()
@@ -201,7 +266,31 @@ class TestServer:
     assert completed != list(range(10))
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
+  @pytest.mark.parametrize('workers', (1, 4))
+  def test_donefn_no_backlog(self, Server, addr, workers):
+    addr = addr.format(port=next(PORTS))
+    lock = threading.Lock()
+    work_calls = [0]
+    done_calls = [0]
+    def workfn(data):
+      with lock:
+        work_calls[0] += 1
+        assert work_calls[0] <= done_calls[0] + 2 * workers
+      return data, data
+    def donefn(data):
+      with lock:
+        done_calls[0] += 1
+      time.sleep(0.01)
+    server = Server(addr, workers)
+    server.bind('function', workfn, donefn)
+    with server:
+      client = embodied.distr.Client(addr, pings=0, maxage=1, connect=True)
+      futures = [client.function({'i': i}) for i in range(20)]
+      [future.result() for future in futures]
+
+  @pytest.mark.parametrize('Server', SERVERS)
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_connect_retry(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     results = []
@@ -223,7 +312,7 @@ class TestServer:
     assert results == [{'foo': 1}]
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_shared_pool(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     def slow_function(data):
@@ -245,7 +334,7 @@ class TestServer:
       assert slow_future.done()
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   def test_separate_pools(self, Server, addr):
     addr = addr.format(port=next(PORTS))
     def slow_function(data):
@@ -266,7 +355,7 @@ class TestServer:
       assert not slow_future.done()
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   @pytest.mark.parametrize('batch', (1, 2, 4))
   def test_batching_single(self, Server, addr, batch):
     addr = addr.format(port=next(PORTS))
@@ -287,7 +376,7 @@ class TestServer:
       assert results == list(range(batch))
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('addr', addresses())
+  @pytest.mark.parametrize('addr', ADDRESSES)
   @pytest.mark.parametrize('batch', (1, 2, 4))
   def test_batching_multiple(self, Server, addr, batch):
     addr = addr.format(port=next(PORTS))
@@ -312,8 +401,8 @@ class TestServer:
       assert refs[2] == [x.result()['foo'][0] for x in futures[2]]
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('inner_addr', addresses())
-  @pytest.mark.parametrize('outer_addr', addresses())
+  @pytest.mark.parametrize('inner_addr', ADDRESSES)
+  @pytest.mark.parametrize('outer_addr', ADDRESSES)
   @pytest.mark.parametrize('workers', (1, 10))
   def test_proxy(self, Server, inner_addr, outer_addr, workers):
     inner_addr = inner_addr.format(port=next(PORTS))
@@ -333,8 +422,8 @@ class TestServer:
         assert all(result == 26 for result in results)
 
   @pytest.mark.parametrize('Server', SERVERS)
-  @pytest.mark.parametrize('inner_addr', addresses())
-  @pytest.mark.parametrize('outer_addr', addresses())
+  @pytest.mark.parametrize('inner_addr', ADDRESSES)
+  @pytest.mark.parametrize('outer_addr', ADDRESSES)
   @pytest.mark.parametrize('workers', (2, 3, 10))
   def test_proxy_batched(self, Server, inner_addr, outer_addr, workers):
     inner_addr = inner_addr.format(port=next(PORTS))
@@ -356,3 +445,17 @@ class TestServer:
         results = [future.result()['foo'] for future in futures]
         print(results)
         assert all(result == 26 for result in results)
+
+  @pytest.mark.parametrize('Server', SERVERS)
+  @pytest.mark.parametrize('addr', ADDRESSES)
+  def test_empty_dict(self, Server, addr):
+    addr = addr.format(port=next(PORTS))
+    client = embodied.distr.Client(addr, pings=0, maxage=1)
+    server = Server(addr)
+    def workfn(data):
+      assert data == {}
+      return {}
+    server.bind('function', workfn)
+    with server:
+      client.connect(retry=False, timeout=1)
+      assert client.function({}).result() == {}

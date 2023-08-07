@@ -1,13 +1,13 @@
 import functools
 
 import embodied
+import gym
 import numpy as np
 
 
 class FromGym(embodied.Env):
 
   def __init__(self, env, obs_key='image', act_key='action', **kwargs):
-    import gym
     if isinstance(env, str):
       self._env = gym.make(env, **kwargs)
     else:

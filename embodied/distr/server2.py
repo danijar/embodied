@@ -65,7 +65,7 @@ class Server2:
 
     socket = sockets.ServerSocket(address, ipv6)
     inbound = sockets.ClientSocket(identity=0, pings=0, maxage=0)
-    inbound.connect(inner)
+    inbound.connect(inner, timeout=120)
     queues = collections.defaultdict(list)
     buffers = collections.defaultdict(dict)
     pending = {}

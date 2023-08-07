@@ -26,23 +26,23 @@ pip3 install --force-reinstall /tmp/dmlab_pkg/deepmind_lab-*.whl
 cd ..
 rm -rf lab
 
-# Dataset
-mkdir dmlab_data
-cd dmlab_data
-pip3 install Pillow
-curl https://bradylab.ucsd.edu/stimuli/ObjectsAll.zip -o ObjectsAll.zip
-unzip ObjectsAll.zip
-cd OBJECTSALL
-python3 << EOM
-import os
-from PIL import Image
-files = [f for f in os.listdir('.') if f.lower().endswith('jpg')]
-for i, file in enumerate(sorted(files)):
-  print(file)
-  im = Image.open(file)
-  im.save('../%04d.png' % (i+1))
-EOM
-cd ..
-rm -rf __MACOSX OBJECTSALL ObjectsAll.zip
+# # Dataset
+# mkdir dmlab_data
+# cd dmlab_data
+# pip3 install Pillow
+# curl https://bradylab.ucsd.edu/stimuli/ObjectsAll.zip -o ObjectsAll.zip
+# unzip ObjectsAll.zip
+# cd OBJECTSALL
+# python3 << EOM
+# import os
+# from PIL import Image
+# files = [f for f in os.listdir('.') if f.lower().endswith('jpg')]
+# for i, file in enumerate(sorted(files)):
+#   print(file)
+#   im = Image.open(file)
+#   im.save('../%04d.png' % (i+1))
+# EOM
+# cd ..
+# rm -rf __MACOSX OBJECTSALL ObjectsAll.zip
 
 apt-get clean

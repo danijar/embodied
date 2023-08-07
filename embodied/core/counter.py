@@ -40,6 +40,10 @@ class Counter:
     with self.lock:
       self.value += amount
 
+  def reset(self):
+    with self.lock:
+      self.value = 0
+
   def save(self):
     return self.value
 

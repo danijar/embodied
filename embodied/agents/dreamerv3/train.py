@@ -45,7 +45,7 @@ def main(argv=None):
   config = embodied.Flags(config).parse(other)
   args = embodied.Config(
       **config.run, logdir=config.logdir,
-      batch_steps=config.batch_size * config.batch_length)
+      batch_steps=config.run.batch_size * config.batch_length)
   print('Run script:', args.script)
 
   logdir = embodied.Path(args.logdir)
@@ -127,26 +127,48 @@ def main(argv=None):
       obs_space, act_space = env.obs_space, env.act_space
       env.close()
       agent = agt.Agent(obs_space, act_space, step, config)
-      make_replay2 = bind(
-          make_replay, config, logdir / 'replay', rate_limit=True)
-      embodied.run.parallel(
+      replay_path = str(logdir / 'replay')
+      make_replay2 = bind(make_replay, config, replay_path, rate_limit=True)
+      embodied.run.parallel2(
           agent, logger, make_replay2, make_env2, config.envs.amount, args)
 
-    elif args.script == 'parallel_agent':
-      ctor = bind(wrapped_env, config, batch=False)
+    elif args.script == 'parallel3':
+      assert config.run.actor_batch <= config.envs.amount, (
+          config.run.actor_batch, config.envs.amount)
+      make_env2 = bind(wrapped_env, config, batch=False)
       step = embodied.Counter()
-      env = ctor()
-      agent = agt.Agent(env.obs_space, env.act_space, step, config)
+      env = make_env2()
+      obs_space, act_space = env.obs_space, env.act_space
       env.close()
-      replay = make_replay(config, logdir / 'replay', rate_limit=True)
-      embodied.run.parallel(agent, replay, logger, None, num_envs=0, args=args)
+      agent = agt.Agent(obs_space, act_space, step, config)
+      replay_path = str(logdir / 'replay')
+      make_replay2 = bind(make_replay, config, replay_path, rate_limit=True)
+      logger_path = str(logdir)
+      make_logger2 = bind(make_logger, parsed, logger_path, None, config)
+      embodied.run.parallel3(
+          agent, make_logger2, make_replay2, make_env2, config.envs.amount,
+          args)
+
+    elif args.script == 'parallel_agent':
+      make_env2 = bind(wrapped_env, config, batch=False)
+      step = embodied.Counter()
+      env = make_env2()
+      obs_space, act_space = env.obs_space, env.act_space
+      env.close()
+      agent = agt.Agent(obs_space, act_space, step, config)
+      replay_path = str(logdir / 'replay')
+      make_replay2 = bind(make_replay, config, replay_path, rate_limit=True)
+      logger_path = str(logdir)
+      make_logger2 = bind(make_logger, parsed, logger_path, None, config)
+      embodied.run.parallel3(
+          agent, make_logger2, make_replay2, None, 0, args)
 
     elif args.script == 'parallel_env':
       ctor = bind(wrapped_env, config, batch=False)
-      replica_id = args.env_replica
-      if replica_id < 0:
-        replica_id = int(os.environ['JOB_COMPLETION_INDEX'])
-      embodied.run.parallel_env(replica_id, ctor, args)
+      envid = args.env_replica
+      if envid < 0:
+        envid = int(os.environ['JOB_COMPLETION_INDEX'])
+      embodied.run.parallel_env(envid, ctor, args)
 
     # elif args.script == 'train_with_text':
     #   replay = make_replay(config, logdir / 'replay')
@@ -164,6 +186,8 @@ def main(argv=None):
 
 
 def make_logger(parsed, logdir, step, config):
+  if step is None:
+    step = embodied.Counter()
   multiplier = config.env.get(config.task.split('_')[0], {}).get('repeat', 1)
   logger = embodied.Logger(step, [
       embodied.logger.TerminalOutput(config.filter, 'Agent'),
@@ -181,8 +205,8 @@ def make_replay(config, directory=None, is_eval=False, rate_limit=False):
   kwargs = {}
   if rate_limit and config.run.train_ratio > 0:
     kwargs['samples_per_insert'] = config.run.train_ratio / config.batch_length
-    kwargs['tolerance'] = 10 * config.batch_size
-    kwargs['min_size'] = config.batch_size
+    kwargs['tolerance'] = 10 * config.run.batch_size
+    kwargs['min_size'] = config.run.batch_size
   replay = embodied.replay.Replay(length, size, directory, **kwargs)
   return replay
 
