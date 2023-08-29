@@ -93,14 +93,13 @@ class Server:
     self._print(f'Listening at {self.address}')
     while context.running:
       now = time.time()
-      # while True:
       result = socket.receive()
       self._handle_request(socket, result, now)
       for method in self.methods.values():
         self._handle_input(method, now)
       self._handle_results(socket, now)
       self._handle_dones()
-      time.sleep(0.001)  # TODO: 0.0001?
+      time.sleep(0.0001)
     socket.close()
 
   def _handle_request(self, socket, result, now):

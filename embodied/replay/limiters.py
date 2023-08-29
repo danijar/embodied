@@ -9,17 +9,21 @@ class MinSize:
     self.size = 0
     self.lock = threading.Lock()
 
-  def want_insert(self):
-    # return True, 'ok'
-    return True
+  def want_insert(self, reason=False):
+    if reason:
+      return True, 'ok'
+    else:
+      return True
 
-  def want_sample(self):
-    # if self.size < self.minimum:
-    #   return False, f'too empty: {self.size} < {self.minimum}'
-    # return True, 'ok'
-    if self.size < self.minimum:
-      return False
-    return True
+  def want_sample(self, reason=False):
+    if reason:
+      if self.size < self.minimum:
+        return False, f'too empty: {self.size} < {self.minimum}'
+      return True, 'ok'
+    else:
+      if self.size < self.minimum:
+        return False
+      return True
 
   def insert(self):
     with self.lock:
@@ -45,25 +49,29 @@ class SamplesPerInsert:
     self.size = 0
     self.lock = threading.Lock()
 
-  def want_insert(self):
-    # if self.avail >= self.max_avail:
-    #   return False, f'rate limited: {self.avail:.3f} >= {self.max_avail:.3f}'
-    # return True, 'ok'
-    if self.avail >= self.max_avail:
-      return False
-    return True
+  def want_insert(self, reason=False):
+    if reason:
+      if self.avail >= self.max_avail:
+        return False, f'rate limited: {self.avail:.3f} >= {self.max_avail:.3f}'
+      return True, 'ok'
+    else:
+      if self.avail >= self.max_avail:
+        return False
+      return True
 
-  def want_sample(self):
-    # if self.size < self.minimum:
-    #   return False, f'too empty: {self.size} < {self.minimum}'
-    # if self.avail <= self.min_avail:
-    #   return False, f'rate limited: {self.avail:.3f} <= {self.min_avail:.3f}'
-    # return True, 'ok'
-    if self.size < self.minimum:
-      return False
-    if self.avail <= self.min_avail:
-      return False
-    return True
+  def want_sample(self, reason=False):
+    if reason:
+      if self.size < self.minimum:
+        return False, f'too empty: {self.size} < {self.minimum}'
+      if self.avail <= self.min_avail:
+        return False, f'rate limited: {self.avail:.3f} <= {self.min_avail:.3f}'
+      return True, 'ok'
+    else:
+      if self.size < self.minimum:
+        return False
+      if self.avail <= self.min_avail:
+        return False
+      return True
 
   def insert(self):
     with self.lock:
@@ -77,37 +85,3 @@ class SamplesPerInsert:
   def sample(self):
     with self.lock:
       self.avail -= 1
-
-
-# class Queue:
-#
-#   def __init__(self, capacity):
-#     assert 1 <= capacity
-#     self.capacity = capacity
-#     self.size = 0
-#     self.lock = threading.Lock()
-#
-#   def want_load(self):
-#     with self.lock:
-#       self.size += 1
-#     return True, 'ok'
-#
-#   def want_insert(self):
-#     with self.lock:
-#       if self.size >= self.capacity:
-#         return False, f'is full: {self.size} >= {self.capacity}'
-#       self.size += 1
-#     return True, 'ok'
-#
-#   def want_remove(self):
-#     with self.lock:
-#       if self.size < 1:
-#         return False, 'is empty'
-#       self.size -= 1
-#     return True, 'ok'
-#
-#   def want_sample(self):
-#     if self.size < 1:
-#       return False, 'is empty'
-#     else:
-#       return True, 'ok'

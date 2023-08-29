@@ -12,7 +12,7 @@ import pytest
 
 SERVERS = [
     embodied.distr.Server,
-    embodied.distr.Server2,
+    embodied.distr.ProcServer,
 ]
 
 ADDRESSES = [
@@ -20,7 +20,7 @@ ADDRESSES = [
     'ipc:///tmp/test-{port}',
 ]
 
-PORTS = iter(range(5555, 6000))
+PORTS = iter(range(5000, 6000))
 
 
 class TestServer:
@@ -116,7 +116,8 @@ class TestServer:
     server = Server(addr)
     server.bind('function', lambda data: data)
     with server:
-      client = embodied.distr.Client(addr, 0, pings=0, maxage=1, errors=False)
+      client = embodied.distr.Client(
+          addr, 0, pings=0, maxage=1, maxinflight=None, errors=False)
       client.connect(retry=False, timeout=1)
       client.function({'foo': 1})
       client.function({'foo': 2})

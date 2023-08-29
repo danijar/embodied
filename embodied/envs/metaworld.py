@@ -51,7 +51,7 @@ class MetaWorld(embodied.Env):
       obs['log_success'] = False
       self._once = True
       if self._camera == 'corner2':
-        # self._env._env.model.cam_pos[2][:] = [0.75, 0.075, 0.7]  # TODO
+        # self._env._env.model.cam_pos[2][:] = [0.75, 0.075, 0.7]
         self._env._env.model.cam_pos[2][:] = [0.4, 0.0, 0.4]
         orient = quat([0, 0, 0], 0)
         orient = mult(quat([0, 0, 1], 180), orient)  # roll

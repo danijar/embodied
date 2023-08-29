@@ -16,7 +16,6 @@ class Timer:
     self.maxs = defaultdict(lambda: 0)
     self.sums = defaultdict(lambda: 0)
     self.counts = defaultdict(lambda: 0)
-    # self.threads = defaultdict(set)
     self.start = time.perf_counter_ns()
     self.writing = False
 

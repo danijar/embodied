@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import pathlib
 import sys
 import time
@@ -25,7 +26,7 @@ class TestProcess:
       while context.running:
         time.sleep(0.01)
       q.put('stop')
-    q = embodied.distr.mp.SimpleQueue()
+    q = mp.get_context().SimpleQueue()
     worker = embodied.distr.StoppableProcess(fn, q)
     worker.start()
     worker.stop()
@@ -43,7 +44,7 @@ class TestProcess:
     def fn1234(q):
       q.put(42)
       raise KeyError('foo')
-    q = embodied.distr.mp.SimpleQueue()
+    q = mp.get_context().SimpleQueue()
     worker = embodied.distr.Process(fn1234, q, start=True)
     q.get()
     time.sleep(0.2)
@@ -53,7 +54,8 @@ class TestProcess:
       worker.check()
     assert repr(info.value) == "KeyError('foo')"
     tb = ''.join(traceback.format_exception(info.value))
-    assert 'Traceback' in tb
-    assert ' File ' in tb
-    assert 'fn1234' in tb
     assert "KeyError: 'foo'" in tb
+    if sys.version_info.minor >= 11:
+      assert 'Traceback' in tb
+      assert ' File ' in tb
+      assert 'fn1234' in tb

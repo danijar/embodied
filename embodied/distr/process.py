@@ -1,4 +1,7 @@
+import multiprocessing as mp
 import sys
+
+import cloudpickle
 
 from . import utils
 
@@ -6,15 +9,16 @@ from . import utils
 class Process:
 
   initializers = []
+  current_name = None
 
   def __init__(self, fn, *args, name=None, start=False, pass_running=False):
-    import cloudpickle
     name = name or fn.__name__
     fn = cloudpickle.dumps(fn)
     inits = cloudpickle.dumps(self.initializers)
-    self.errqueue = utils.mp.SimpleQueue()
-    self.process = utils.mp.Process(target=self._wrapper, name=name, args=(
-        fn, name, args, utils.PRINT_LOCK, self.errqueue, inits))
+    context = mp.get_context()
+    self.errqueue = context.SimpleQueue()
+    self.process = context.Process(target=self._wrapper, name=name, args=(
+        fn, name, args, utils.get_print_lock(), self.errqueue, inits))
     self.started = False
     start and self.start()
 
@@ -60,8 +64,8 @@ class Process:
 
   @staticmethod
   def _wrapper(fn, name, args, lock, errqueue, inits):
+    Process.current_name = name
     try:
-      import cloudpickle
       for init in cloudpickle.loads(inits):
         init()
       fn = cloudpickle.loads(fn)
@@ -76,7 +80,7 @@ class Process:
 class StoppableProcess(Process):
 
   def __init__(self, fn, *args, name=None, start=False):
-    self.runflag = utils.mp.Event()
+    self.runflag = mp.get_context().Event()
     def fn2(runflag, *args):
       assert runflag is not None
       context = utils.Context(runflag.is_set)
@@ -87,7 +91,7 @@ class StoppableProcess(Process):
     self.runflag.set()
     super().start()
 
-  def stop(self, wait=True):
+  def stop(self, wait=10):
     self.check()
     if not self.alive:
       return
@@ -96,3 +100,6 @@ class StoppableProcess(Process):
       self.join()
     elif wait:
       self.join(wait)
+      if self.alive:
+        print(f"Terminating process '{self.name}' that did not want to stop.")
+        self.terminate()

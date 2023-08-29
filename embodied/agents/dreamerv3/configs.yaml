@@ -12,7 +12,8 @@ defaults:
   jax:
     platform: gpu
     jit: True
-    precision: float16
+    compute_dtype: float16
+    param_dtype: float32
     prealloc: True
     checks: False
     logical_cpus: 0
@@ -23,11 +24,13 @@ defaults:
     profiler: False  # True
     transfer_guard: True
     assert_num_devices: -1
-    policy_thread: False
+    policy_keys: '/(actor|wm/enc|wm/rssm)/'
 
   run:
     script: train
     steps: 1e10
+    duration: 0
+    num_envs: 4
     expl_until: 0
     log_every: 120
     save_every: 900
@@ -38,7 +41,7 @@ defaults:
     train_ratio: 32.0
     train_fill: 0
     eval_fill: 0
-    log_zeros: False
+    log_zeros: True
     log_keys_video: [image]
     log_keys_sum: '^$'
     log_keys_avg: '^$'
@@ -47,19 +50,18 @@ defaults:
     log_video_streams: 4
     log_episode_timeout: 60
     from_checkpoint: ''
-    actor_host: 'localhost'
-    actor_port: '5551'
+    actor_addr: 'tcp://localhost:{random}'
+    replay_addr: 'ipc:///tmp/replay{random}'
+    logger_addr: 'ipc:///tmp/logger{random}'
     actor_batch: 32
-    actor_threads: 1
+    actor_threads: 4
     env_replica: -1
     ipv6: False
     usage: {psutil: True, nvsmi: True, gputil: False, malloc: False, gc: False, gil: False}
-    env_processes: True
-    inserters: 0
     timer: True  # A bit slow but useful.
-    batch_size: 16  # TODO
+    driver_parallel: True
 
-  envs: {amount: 4, parallel: process, length: 0, reset: True, restarts: False, discretize: 0}
+  envs: {length: 0, reset: True, restarts: False, discretize: 0}
   wrapper: {length: 0, reset: True, discretize: 0, checks: False}
   env:
     atari: {size: [64, 64], repeat: 4, sticky: True, gray: True, actions: all, lives: unused, noops: 0, pooling: 2, aggregate: max, resize: pillow}
@@ -69,36 +71,28 @@ defaults:
     minecraft: {size: [64, 64], break_speed: 100.0, logs: False}
     dmc: {size: [64, 64], repeat: 2, camera: -1}
     loconav: {size: [64, 64], repeat: 2, camera: -1}
-    langroom: {length: 200, vocab_size: 15}
 
   # Agent
   task_behavior: Greedy
   expl_behavior: None
-  # batch_size: 16
+  batch_size: 16
   batch_length: 64
-  data_loaders: 1  # 8
 
   # World Model
   grad_heads: [decoder, reward, cont]
   rssm_type: rssm
-  rssm: {deter: 6144, units: 1024, stoch: 32, classes: 32, act: silu, norm: layer, unimix: 0.01, unroll: False, action_clip: 1.0, bottleneck: 2048, winit: normal, fan: avg, initial: zeros}
-  early_rssm: {deter: 4096, units: 1024, stoch: 32, classes: 32, act: silu, norm: layer, unimix: 0.01, unroll: False, action_clip: 1.0, bottleneck: -1, winit: normal, fan: avg, prior_layers: 3}
-  ssm: {layers: 3, state: 512, hidden: 512, stoch: 32, classes: 32, act: silu, norm: layer, unimix: 0.01, action_clip: 1.0, winit: normal, fan: avg}
+  rssm: {deter: 6144, units: 1024, stoch: 32, classes: 32, act: silu, norm: layer, unimix: 0.01, unroll: False, bottleneck: 2048, winit: normal, fan: avg}
   encoder: {mlp_keys: '.*', cnn_keys: '.*', act: silu, norm: layer, mlp_layers: 5, mlp_units: 1024, cnn: resnet, cnn_depth: 96, cnn_blocks: 0, resize: stride, winit: normal, fan: avg, minres: 4, symlog: True}
   decoder: {mlp_keys: '.*', cnn_keys: '.*', act: silu, norm: layer, mlp_layers: 5, mlp_units: 1024, cnn: resnet, cnn_depth: 96, cnn_blocks: 0, cnn_dist: mse, mlp_dist: symlog_mse, inputs: [deter, stoch], resize: stride, winit: normal, fan: avg, outscale: 1.0, minres: 4, cnn_sigmoid: False}
-  reward_head: {layers: 5, units: 1024, act: silu, norm: layer, dist: symexp_twohot, outscale: 0.0, outnorm: False, inputs: [deter, stoch], winit: normal, fan: avg, bins: 255}
-  cont_head: {layers: 5, units: 1024, act: silu, norm: layer, dist: binary, outscale: 1.0, outnorm: False, inputs: [deter, stoch], winit: normal, fan: avg}
-  loss_scales: {dec_cnn: 1.0, dec_mlp: 1.0, reward: 1.0, cont: 1.0, dyn: 0.5, rep: 0.1, actor: 1.0, critic: 1.0, slowreg: 1.0, sparse: 0.0, repval: 0.0}
+  reward_head: {layers: 5, units: 1024, act: silu, norm: layer, dist: symexp_twohot, outscale: 0.0, inputs: [deter, stoch], winit: normal, fan: avg, bins: 255}
+  cont_head: {layers: 5, units: 1024, act: silu, norm: layer, dist: binary, outscale: 1.0, inputs: [deter, stoch], winit: normal, fan: avg}
+  loss_scales: {dec_cnn: 1.0, dec_mlp: 1.0, reward: 1.0, cont: 1.0, dyn: 0.5, rep: 0.1, actor: 1.0, critic: 1.0, slowreg: 1.0}
   rssm_loss: {free: 1.0}
   model_opt: {opt: adam, lr: 1e-4, eps: 1e-8, clip: 1000.0, wd: 0.0, warmup: 0, adaclip: 0.0}
-  repval: False
-  repval_separate: False
-  repval_lambda: 0.5
-  repval_horizon: 15
 
   # Actor Critic
-  actor: {layers: 5, units: 1024, act: silu, norm: layer, minstd: 0.1, maxstd: 1.0, outscale: 1.0, outnorm: False, unimix: 0.01, inputs: [deter, stoch], winit: normal, fan: avg}
-  critic: {layers: 5, units: 1024, act: silu, norm: layer, dist: symexp_twohot, outscale: 0.0, outnorm: False, inputs: [deter, stoch], winit: normal, fan: avg, bins: 255}
+  actor: {layers: 5, units: 1024, act: silu, norm: layer, minstd: 0.1, maxstd: 1.0, outscale: 1.0, unimix: 0.01, inputs: [deter, stoch], winit: normal, fan: avg}
+  critic: {layers: 5, units: 1024, act: silu, norm: layer, dist: symexp_twohot, outscale: 0.0, inputs: [deter, stoch], winit: normal, fan: avg, bins: 255}
   actor_opt: {opt: adam, lr: 3e-5, eps: 1e-5, clip: 100.0, wd: 0.0, warmup: 0, adaclip: 0.0}
   critic_opt: {opt: adam, lr: 3e-5, eps: 1e-5, clip: 100.0, wd: 0.0, warmup: 0, adaclip: 0.0}
   reward_scales: {extr: 1.0, disag: 100.0, expl: 100.0, goal: 1.0}
@@ -147,9 +141,9 @@ defaults:
 
 minecraft:
   task: minecraft_diamond
-  envs: {restarts: True, amount: 16}
   run:
     script: train_save
+    num_envs: 16
     eval_fill: 1e5
     train_ratio: 16
     log_keys_max: '^log_inventory.*'
@@ -158,27 +152,28 @@ minecraft:
 
 dmlab:
   task: dmlab_explore_goal_locations_small
-  envs.amount: 8
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
-  run.train_ratio: 64
+  run:
+    num_envs: 8
+    train_ratio: 64
 
 atari:
   task: atari_pong
-  envs.amount: 8
   run:
     steps: 5.5e7
     eval_eps: 10
+    num_envs: 8
     train_ratio: 64
   encoder: {mlp_keys: '$^', cnn_keys: 'image'}
   decoder: {mlp_keys: '$^', cnn_keys: 'image'}
 
 atari100k:
   task: atari_pong
-  envs: {amount: 1}
   run:
     script: train_eval
     steps: 1.5e5
+    num_envs: 1
     eval_every: 1e5
     eval_initial: False
     eval_eps: 100
@@ -194,8 +189,8 @@ atari100k:
 
 crafter:
   task: crafter_reward
-  envs.amount: 1
   run:
+    num_envs: 1
     log_keys_max: '^log_achievement_.*'
     log_keys_sum: '^log_reward$'
     log_video_fps: 10
@@ -225,8 +220,8 @@ dmc_proprio:
 
 bsuite:
   task: bsuite_mnist/0
-  envs: {amount: 1, parallel: none}
   run:
+    num_envs: 1
     script: train
     train_ratio: 1024  # 128 for cartpole
   rssm.deter: 512
@@ -243,15 +238,6 @@ loconav:
     log_keys_max: '^log_.*'
   encoder: {mlp_keys: '.*', cnn_keys: 'image'}
   decoder: {mlp_keys: '.*', cnn_keys: 'image'}
-
-langroom:
-  task: langroom_talk
-  envs.amount: 4
-  run.train_ratio: 16
-  run.log_keys_video: [image, log_image]
-  run.log_video_fps: 5
-  encoder: {mlp_keys: 'text', cnn_keys: 'image'}
-  decoder: {mlp_keys: 'text', cnn_keys: 'image'}
 
 small:
   rssm.deter: 512
@@ -287,24 +273,17 @@ multicpu:
     policy_devices: [0, 1]
     train_devices: [2, 3, 4, 5, 6, 7]
   run:
+    num_envs: 8
     actor_batch: 4
-    batch_size: 12
-  envs:
-    amount: 8
+  batch_size: 12
   batch_length: 10
 
 debug:
 
-  jax: {jit: True, prealloc: False, debug: True, platform: cpu, profiler: False, checks: False}
-  envs: {amount: 4}
+  jax: {debug: True, jit: True, prealloc: False, platform: cpu, profiler: False, checks: False}
   wrapper: {length: 100, checks: True}
-  run:
-    eval_every: 1000
-    log_every: 5
-    save_every: 15
-    train_ratio: 8
-    actor_batch: 2
-    batch_size: 8
+  run: {num_envs: 4, eval_every: 1000, log_every: 5, save_every: 15, train_ratio: 8, actor_batch: 2, driver_parallel: False}
+  batch_size: 8
   batch_length: 12
   replay_size: 1e5
   encoder.cnn_depth: 8

@@ -1,23 +1,39 @@
 import sys
 import time
 import traceback
-import multiprocessing
+import multiprocessing as mp
 
 import embodied
 
-mp = multiprocessing.get_context('spawn')
-PRINT_LOCK = mp.Lock()
+
+PRINT_LOCK = None
+def get_print_lock():
+  global PRINT_LOCK
+  if not PRINT_LOCK:
+    PRINT_LOCK = mp.get_context().Lock()
+  return PRINT_LOCK
 
 
-def run(workers):
+def run(workers, duration=None):
 
   for worker in workers:
     if not worker.started:
-      worker.start()
+      try:
+        worker.start()
+      except Exception:
+        print(f'Failed to start worker {worker.name}')
+        raise
 
+  start = time.time()
   try:
 
     while True:
+
+      if duration and time.time() - start >= duration:
+        print(f'Shutting down workers after {duration} seconds.')
+        [x.terminate() for x in workers]
+        time.sleep(0.1)
+        return
 
       if all(x.exitcode == 0 for x in workers):
         print('All workers terminated successfully.')
@@ -32,7 +48,6 @@ def run(workers):
 
           # Stop all workers that are not yet stopped.
           [x.terminate() for x in workers]
-
           msg = f'Terminated workers due to crash in {worker.name}.'
           raise RuntimeError(msg)
       time.sleep(0.1)
@@ -45,7 +60,18 @@ def run(workers):
     [x.terminate() for x in workers]
 
 
-def warn_remote_error(e, name, lock=PRINT_LOCK):
+def terminate_subprocesses():
+  import psutil
+  for proc in psutil.Process().children(recursive=True):
+    try:
+      if proc.status() in (psutil.STATUS_SLEEPING, psutil.STATUS_ZOMBIE):
+        proc.kill()
+    except psutil.NoSuchProcess:
+      pass
+
+
+def warn_remote_error(e, name, lock=get_print_lock):
+  lock = lock() if callable(lock) else lock
   summary = list(traceback.format_exception_only(e))[0].strip('\n')
   full = ''.join(traceback.format_exception(e)).strip('\n')
   msg = f"Exception in worker '{name}' ({summary}). "

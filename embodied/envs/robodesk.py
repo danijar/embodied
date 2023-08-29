@@ -7,8 +7,6 @@ class RoboDesk(embodied.Env):
 
   def __init__(self, task, mode, repeat=1, length=500, resets=True):
     assert mode in ('train', 'eval')
-    # TODO: This env variable is meant for headless GPU machines but may fail
-    # on CPU-only machines.
     if 'MUJOCO_GL' not in os.environ:
       os.environ['MUJOCO_GL'] = 'egl'
     try:

@@ -1,6 +1,6 @@
 import enum
 import itertools
-import pickle  # TODO: use msgpack instead
+import msgpack
 import threading
 import time
 
@@ -29,10 +29,7 @@ class ClientSocket:
     self.socket = zmq.Context.instance().socket(zmq.DEALER)
     self.socket.setsockopt(zmq.IDENTITY, identity.to_bytes(16, 'big'))
     self.socket.setsockopt(zmq.IPV6, int(ipv6))
-    self.socket.set_hwm(0)  # TODO?
-    # TODO
-    # self.poller = zmq.Poller()
-    # self.poller.register(self.socket, zmq.POLLIN)
+    self.socket.set_hwm(0)
     self.pings = pings
     self.maxage = maxage
     self.connected = False
@@ -76,9 +73,6 @@ class ClientSocket:
   def receive(self):
     assert self.connected
     now = time.time()
-    # TODO
-    # if not self.poller.poll():
-    #   return None
     try:
       with self.lock:
         parts = self.socket.recv_multipart(zmq.NOBLOCK, copy=False)
@@ -98,7 +92,6 @@ class ClientSocket:
       # anything in the meantime to keep the connection alive.
       last_call_or_resp = max(self.last_call, self.last_response)
       if self.maxage and now - last_call_or_resp >= self.maxage:
-        # TODO
         raise NotAliveError(
             f'\nlast call:     {now - self.last_call:.3f}s ago'
             f'\nlast response: {now - self.last_response:.3f}s ago'
@@ -162,11 +155,8 @@ class ServerSocket:
       addr = f'tcp://*:{port}'
     self.socket = zmq.Context.instance().socket(zmq.ROUTER)
     self.socket.setsockopt(zmq.IPV6, ipv6)
-    self.socket.set_hwm(0)  # TODO?
+    self.socket.set_hwm(0)
     self.socket.bind(addr)
-    # TODO
-    # self.poller = zmq.Poller()
-    # self.poller.register(self.socket, zmq.POLLIN)
     self.alive = {}
     self.rid = iter(itertools.count(0))
     self.lock = threading.RLock()
@@ -177,10 +167,6 @@ class ServerSocket:
       return tuple(k for k, v in self.alive.items() if now - v <= maxage)
 
   def receive(self):
-    # TODO
-    # if not self.poller.poll():
-    #   print('nope')
-    #   return None
     now = time.time()
     try:
       with self.lock:
@@ -236,14 +222,14 @@ def pack(data):
   shapes = [v.shape for v in vals]
   buffers = [v.tobytes() for v in vals]
   meta = (keys, dtypes, shapes)
-  payload = [pickle.dumps(meta), *buffers]
+  payload = [msgpack.packb(meta), *buffers]
   return payload
 
 
 def unpack(payload):
   meta, *buffers = payload
-  keys, dtypes, shapes = pickle.loads(meta)
-  vals = [  # TODO: Why does this allocate new memory? Reshape is bad?
+  keys, dtypes, shapes = msgpack.unpackb(meta)
+  vals = [
       np.frombuffer(b, d).reshape(s)
       for i, (d, s, b) in enumerate(zip(dtypes, shapes, buffers))]
   data = dict(zip(keys, vals))

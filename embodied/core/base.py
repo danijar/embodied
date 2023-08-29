@@ -2,7 +2,7 @@ class Agent:
 
   configs = {}  # Dict of dicts, must contain 'defaults' key.
 
-  def __init__(self, obs_space, act_space, step, config):
+  def __init__(self, obs_space, act_space, config):
     pass
 
   def init_policy(self, batch_size):

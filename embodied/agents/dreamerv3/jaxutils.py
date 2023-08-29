@@ -15,11 +15,16 @@ sg = lambda x: tree_map(jax.lax.stop_gradient, x)
 f32 = jnp.float32
 i32 = jnp.int32
 COMPUTE_DTYPE = f32
+PARAM_DTYPE = f32
 ENABLE_CHECKS = False
 
 
 def cast_to_compute(values):
   return tree_map(lambda x: x.astype(COMPUTE_DTYPE), values)
+
+
+def get_param_dtype():
+  return PARAM_DTYPE
 
 
 def check(predicate, message, **kwargs):
@@ -82,18 +87,6 @@ def scan(fn, inputs, start, unroll=True, axis=0, modify=False):
   if axis:
     outs = tree_map(lambda x: x.swapaxes(0, axis), outs)
   return outs
-
-
-# TODO: Slow
-# def annotate(name):
-#   def decorator(fn):
-#     step = [0]
-#     def wrapped(*args, **kwargs):
-#       with jax.profiler.StepTraceAnnotation(name, step_num=step):
-#         step[0] += 1
-#         return fn(*args, **kwargs)
-#     return wrapped
-#   return decorator
 
 
 def symlog(x):
@@ -591,10 +584,14 @@ class SlowUpdater(nj.Module):
     need_init = (updates == 0).astype(f32)
     need_update = (updates % self.period == 0).astype(f32)
     mix = jnp.clip(1.0 * need_init + self.fraction * need_update, 0, 1)
-    source = {
+    params = {
         k.replace(f'/{self.src.name}/', f'/{self.dst.name}/'): v
         for k, v in self.src.getm().items()}
-    self.dst.putm(tree_map(
+    ema = tree_map(
         lambda s, d: mix * s + (1 - mix) * d,
-        source, self.dst.getm()))
+        params, self.dst.getm())
+    for name, param in ema.items():
+      assert param.dtype == jnp.float32, (
+          f'EMA of {name} should be float32 not {param.dtype}')
+    self.dst.putm(ema)
     self.updates.write(updates + 1)

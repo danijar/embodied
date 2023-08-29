@@ -94,7 +94,7 @@ class StoppableThread(Thread):
     self.runflag = True
     super().start()
 
-  def stop(self, wait=True):
+  def stop(self, wait=10):
     self.runflag = False
     self.check()
     if not self.alive:
@@ -103,3 +103,6 @@ class StoppableThread(Thread):
       self.join()
     elif wait:
       self.join(wait)
+      if self.alive:
+        print(f"Terminating thread '{self.name}' that did not want to stop.")
+        self.terminate()

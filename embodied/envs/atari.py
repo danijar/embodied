@@ -120,7 +120,7 @@ class Atari(embodied.Env):
       self.ale.act(ale_py.Action.NOOP)
       if self.ale.game_over():
         self.ale.reset_game()
-    self.lives = self.ale.lives()
+    self.prevlives = self.ale.lives()
     self.buffers.clear()
     self.buffers.append(self.ale.getScreenRGB())
 

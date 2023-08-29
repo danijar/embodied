@@ -24,7 +24,7 @@ LAYOUT = """
 """.strip('\n')
 
 
-class LangRoom(embodied.Env):
+class LangRoom(embodied.Env):  # TODO
 
   def __init__(
       self, task='talk', view=2, length=200, resolution=64, vocab_size=15,
