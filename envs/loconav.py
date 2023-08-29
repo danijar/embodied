@@ -16,8 +16,6 @@ class LocoNav(embodied.Env):
   def __init__(
       self, name, repeat=1, size=(64, 64), camera=-1, again=False,
       termination=False, weaker=1.0):
-    # TODO: This env variable is meant for headless GPU machines but may fail
-    # on CPU-only machines.
     if name.endswith('hz'):
       name, freq = name.rsplit('_', 1)
       freq = int(freq.strip('hz'))

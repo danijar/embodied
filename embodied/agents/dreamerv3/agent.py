@@ -9,9 +9,6 @@ f32 = jnp.float32
 tree_map = jax.tree_util.tree_map
 sg = lambda x: tree_map(jax.lax.stop_gradient, x)
 is_list = lambda x: isinstance(x, list)
-# TODO
-is_inner_list = lambda x: (
-    isinstance(x, list) and (not x or hasattr(x[0], 'shape')))
 
 import logging
 logger = logging.getLogger()
@@ -25,7 +22,7 @@ from . import jaxagent
 from . import jaxutils
 from . import nets
 from . import ninjax as nj
-from . import ssm
+# from . import ssm
 
 
 @jaxagent.Wrapper
@@ -34,18 +31,15 @@ class Agent(nj.Module):
   configs = yaml.YAML(typ='safe').load(
       (embodied.Path(__file__).parent / 'configs.yaml').read())
 
-  def __init__(self, obs_space, act_space, step, config):
+  def __init__(self, obs_space, act_space, config):
     self.obs_space = {
         k: v for k, v in obs_space.items() if not k.startswith('log_')}
     self.act_space = {
         k: v for k, v in act_space.items() if k != 'reset'}
     self.config = config
-    self.step = step
     self.wm = WorldModel(self.obs_space, self.act_space, config, name='wm')
     self.task_behavior = getattr(behaviors, config.task_behavior)(
         self.wm, self.act_space, self.config, name='task_behavior')
-    if self.config.repval:
-      self.wm.repval_behav = self.task_behavior
     if config.expl_behavior == 'None':
       self.expl_behavior = self.task_behavior
     else:
@@ -62,12 +56,9 @@ class Agent(nj.Module):
     return self.wm.initial(batch_size)
 
   def policy(self, obs, carry, mode='train'):
-
-    # TODO
     carry = tree_map(
         lambda x: jnp.stack(x, 0) if isinstance(x, list) else x, carry,
         is_leaf=is_list)
-
     self.config.jax.jit and embodied.print('Tracing policy function', 'yellow')
     obs = self.preprocess(obs)
     (prev_state, prev_action), task_state, expl_state = carry
@@ -126,16 +117,10 @@ class Agent(nj.Module):
       space = spaces[key]
       if key in self.act_space and space.discrete:
         value = jax.nn.one_hot(value, int(space.high))
-      if len(space.shape) >= 3 and space.dtype == np.uint8:
+      if len(space.shape) >= 3 and space.dtype == jnp.uint8:
         value = jaxutils.cast_to_compute(value) / 255.0
-      # elif jnp.issubdtype(value.dtype, jnp.unsignedinteger):
-      #   value = value.astype(jnp.uint32)
-      # elif jnp.issubdtype(value.dtype, jnp.floating):
-      #   value = value.astype(jnp.flaot32)
-      # else:
-      #   raise NotImplementedError(value.dtype)
       result[key] = value
-    result['cont'] = 1.0 - result['is_terminal'].astype(jnp.float32)
+    result['cont'] = 1.0 - result['is_terminal'].astype(f32)
     return result
 
 
@@ -146,24 +131,14 @@ class WorldModel(nj.Module):
     self.act_space = act_space
     self.config = config
     self.encoder = nets.MultiEncoder(obs_space, **config.encoder, name='enc')
-    match config.rssm_type:
-      case 'rssm':
-        self.rssm = nets.RSSM(**config.rssm, name='rssm')
-      case 'early':
-        self.rssm = nets.EarlyRSSM(**config.early_rssm, name='rssm')
-      case 's5rssm':
-        self.rssm = ssm.S5RSSM(**config.ssm, name='rssm')
-      case 's5double':
-        self.rssm = ssm.S5DoubleRSSM(**config.ssm, name='rssm')
-      case _:
-        raise NotImplementedError(config.rssm_type)
+    if config.rssm_type == 'rssm':
+      self.rssm = nets.RSSM(**config.rssm, name='rssm')
+    else:
+      raise NotImplementedError(config.rssm_type)
     self.heads = {
         'decoder': nets.MultiDecoder(obs_space, **config.decoder, name='dec'),
         'reward': nets.MLP((), **config.reward_head, name='rew'),
         'cont': nets.MLP((), **config.cont_head, name='cont')}
-
-    if self.config.repval and self.config.repval_separate:
-      self.heads['repval'] = nets.MLP((), name='repval', **self.config.critic)
 
     self.opt = jaxutils.Optimizer(name='model_opt', **config.model_opt)
     scales = self.config.loss_scales.copy()
@@ -172,7 +147,6 @@ class WorldModel(nj.Module):
     scales.update({k: cnn for k in self.heads['decoder'].cnn_keys})
     scales.update({k: mlp for k in self.heads['decoder'].mlp_keys})
     self.scales = scales
-    self.repval_behav = None
 
   def initial(self, batch_size):
     bs = batch_size
@@ -185,9 +159,6 @@ class WorldModel(nj.Module):
 
   def train(self, data, carry, ignore_inputs=()):
     modules = [self.encoder, self.rssm, *self.heads.values()]
-    if self.config.repval and not self.config.repval_separate:
-      critic = self.repval_behav.ac.critics['extr'].net
-      modules.append(critic)
     mets, (outs, carry, metrics) = self.opt(
         modules, self.loss, data, carry, ignore_inputs, has_aux=True)
     metrics.update(mets)
@@ -205,42 +176,9 @@ class WorldModel(nj.Module):
     dists = {k: v for k, v in dists.items() if k not in ignore_inputs}
     losses, stats = self.rssm.loss(states, **self.config.rssm_loss)
 
-    if self.repval_behav:
-      critic = self.repval_behav.ac.critics['extr']
-      context = {**data, **states}
-      rew = data['reward'].swapaxes(0, 1)
-      disc = (1 - data['is_terminal'].astype(jnp.float32)).swapaxes(0, 1)
-      disc *= 1 - 1 / self.config.horizon
-
-      start = tree_map(lambda x: x.reshape((-1, *x.shape[2:])), context)
-      horizon = self.config.repval_horizon
-      traj = self.imagine(self.repval_behav.policy, start, horizon)
-      val = critic.score(traj, slow=True)[0][0]
-      val = val.reshape(data['reward'].shape).swapaxes(0, 1)
-
-      lam = self.config.repval_lambda
-      vals = [val[-1]]
-      interm = rew[1:] + disc[1:] * val[1:] * (1 - lam)
-      for t in reversed(range(len(disc) - 1)):
-        vals.append(interm[t] + disc[1 + t] * lam * vals[-1])
-      target = sg(jnp.stack(list(reversed(vals)), 0).swapaxes(0, 1))
-
-      if self.config.repval_separate:
-        data['repval'] = target
-        dist = dists['repval']
-      else:
-        inp = context if 'repval' in self.config.grad_heads else sg(context)
-        dist = critic.net(inp)
-        loss = -dist.log_prob(target)
-        losses['repval'] = loss
-
-      metrics['repval_target'] = target.mean()
-      metrics['repval_imag'] = val.mean()
-      metrics['repval_pred'] = dist.mean().mean()
-
     for key, dist in dists.items():
       try:
-        loss = -dist.log_prob(data[key].astype(jnp.float32))
+        loss = -dist.log_prob(data[key].astype(f32))
       except Exception as e:
         raise Exception(f'Error in {name} loss:\n\n{e}.') from e
       assert loss.shape == feats['embed'].shape[:2], (key, loss.shape)
@@ -252,11 +190,6 @@ class WorldModel(nj.Module):
       if isinstance(dist, tfd.Categorical):
         accuracy = (dist.mode() == data[key]).astype(f32)
         metrics[f'{key}_head_accuracy'] = accuracy.mean()
-
-    # if self.scales['sparse']:
-    #   lhs = states['deter'][:, :-1]
-    #   rhs = states['deter'][:, 1:]
-    #   losses['sparse'] = jnp.abs(lhs - rhs)
 
     scaled = {k: v.mean() * self.scales[k] for k, v in losses.items()}
     model_loss = sum(scaled.values())
@@ -307,7 +240,7 @@ class WorldModel(nj.Module):
       cont = self.heads['cont'](traj).mean()
     else:
       raise NotImplementedError(self.config.imag_cont)
-    first_cont = (1.0 - start['is_terminal']).astype(jnp.float32)
+    first_cont = (1.0 - start['is_terminal']).astype(f32)
     traj['cont'] = jnp.concatenate([first_cont[None], cont[1:]], 0)
     discount = 1 - 1 / self.config.horizon
     traj['weight'] = jnp.cumprod(discount * traj['cont'], 0) / discount
@@ -325,7 +258,7 @@ class WorldModel(nj.Module):
     prev_acts = {k: data[k][:6, 5 - 1: -1] for k in self.act_space}
     openl = self.heads['decoder'](self.rssm.imagine(start, prev_acts))
     for key in self.heads['decoder'].cnn_keys:
-      truth = data[key][:6].astype(jnp.float32)
+      truth = data[key][:6].astype(f32)
       model = jnp.concatenate([recon[key].mode()[:, :5], openl[key].mode()], 1)
       error = (model - truth + 1) / 2
       video = jnp.concatenate([truth, model, error], 2)
@@ -336,20 +269,6 @@ class WorldModel(nj.Module):
     metrics = {}
     metrics.update(jaxutils.tensorstats(stats['prior_ent'], 'prior_ent'))
     metrics.update(jaxutils.tensorstats(stats['post_ent'], 'post_ent'))
-    if 'deter' in states:
-      x = states['deter']
-      x = x.real if hasattr(x, 'real') else x
-      metrics.update(jaxutils.tensorstats(x, 'deter'))
-      metrics.update(jaxutils.tensorstats(
-          jnp.linalg.norm(x, 1, -1) / x.shape[-1], 'deter_l1'))
-      metrics.update(jaxutils.tensorstats(
-          jnp.linalg.norm(x, 2, -1) / np.sqrt(x.shape[-1]), 'deter_l2'))
-      metrics.update(jaxutils.tensorstats(
-          jnp.linalg.norm(x[:, :-1] - x[:, 1:], 1, -1) / x.shape[-1],
-          'deter_diff_l1'))
-      metrics.update(jaxutils.tensorstats(
-          jnp.linalg.norm(x[:, :-1] - x[:, 1:], 2, -1) / np.sqrt(x.shape[-1]),
-          'deter_diff_l2'))
     metrics.update({f'{k}_loss_mean': v.mean() for k, v in losses.items()})
     metrics.update({f'{k}_loss_std': v.std() for k, v in losses.items()})
     metrics['model_loss'] = model_loss
@@ -402,10 +321,6 @@ class ImagActorCritic(nj.Module):
       action = {k: v.sample(seed=nj.rng()) for k, v in dist.items()}
     else:
       action = {k: v.mode() for k, v in dist.items()}
-
-    # import time
-    # jax.debug.callback(lambda: time.sleep(2.0))
-
     return action, carry
 
   def train(self, imagine, start, context):
@@ -474,7 +389,8 @@ class VFunction(nj.Module):
     self.rewfn = rewfn
     self.config = config
     self.net = nets.MLP((), name='net', **self.config.critic)
-    self.slow = nets.MLP((), name='slow', **self.config.critic)
+    self.slow = nets.MLP(
+        (), name='slow', **self.config.critic, dtype='float32')
     self.updater = jaxutils.SlowUpdater(
         self.net, self.slow,
         self.config.slow_critic_fraction,
@@ -511,9 +427,8 @@ class VFunction(nj.Module):
 
   def score(self, traj, actor=None, slow=False):
     rew = self.rewfn(traj)
-    # TODO
-    # assert len(rew) == len(traj['deter']) - 1, (
-    #     'should provide rewards for all but last action')
+    assert len(rew) == len(list(traj.values())[0]) - 1, (
+        'should provide rewards for all but last action')
     discount = 1 - 1 / self.config.horizon
     disc = traj['cont'][1:] * discount
     if slow:

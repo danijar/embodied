@@ -1,6 +1,7 @@
 cloudpickle
 colored
 gputil
+msgpack
 numpy
 psutil
 ruamel.yaml

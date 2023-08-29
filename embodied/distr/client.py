@@ -15,7 +15,7 @@ class Client:
 
   def __init__(
       self, address, identity=None, name='Client', ipv6=False, pings=10,
-      maxage=120, maxinflight=None, errors=True, connect=False):
+      maxage=120, maxinflight=16, errors=True, connect=False):
     if identity is None:
       identity = int(np.random.randint(2 ** 32))
     self.address = address
@@ -66,15 +66,14 @@ class Client:
       if retry:
         continue
       else:
-        # raise sockets.NotAliveError
         raise sockets.ConnectError
 
   @timer.section('client_call')
   def call(self, method, data):
     assert len(self.futures) < 1000, (
-        self.name, len(self.futures),
-        sum([x.done() for x in self.futures.values()]))
-    # print(self.name, len(self.futures))  # TODO
+        f'Too many unresolved requests in client {self.name}.\n' +
+        f'Futures: {len(self.futures)}\n' +
+        f'Resolved: {sum([x.done() for x in self.futures.values()])}')
     if self.maxinflight:
       with timer.section('inflight_wait'):
         while sum(not x.done() for x in self.queue) >= self.maxinflight:
@@ -106,7 +105,7 @@ class Client:
       result = self._listen()
       if result is None and not retry:
         return
-      time.sleep(0.001)  # TODO
+      time.sleep(0.0001)
 
   @timer.section('client_listen')
   def _listen(self):

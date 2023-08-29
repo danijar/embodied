@@ -13,8 +13,6 @@ class DMC(embodied.Env):
   )
 
   def __init__(self, env, repeat=1, render=True, size=(64, 64), camera=-1):
-    # TODO: This env variable is meant for headless GPU machines but may fail
-    # on CPU-only machines.
     if 'MUJOCO_GL' not in os.environ:
       os.environ['MUJOCO_GL'] = 'egl'
     if isinstance(env, str):

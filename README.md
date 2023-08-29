@@ -28,12 +28,13 @@ embodied/
 
 ```python
 class Agent:
-  @configs -> dict of configs
-  __init__(obs_space, act_space, step, config)
-  dataset(generator) -> generator
+  __init__(obs_space, act_space, config)
   policy(obs, state=None, mode='train') -> act, state
   train(data, state=None) -> state, metrics
   report(data) -> metrics
+  dataset(generator) -> generator
+  init_policy(batch_size) -> state
+  init_train(batch_size) -> state
 ```
 
 ## Env API

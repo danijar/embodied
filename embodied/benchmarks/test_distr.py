@@ -9,15 +9,13 @@ sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 import embodied
 import numpy as np
 
-PORTS = iter(range(5555, 6000))
-
 
 class TestDistr:
 
   def test_batched_throughput(self, clients=32, batch=16, workers=4):
     assert int(os.popen('ulimit -n').read()) > 1024
 
-    addr = f'tcp://localhost:{next(PORTS)}'
+    addr = f'tcp://localhost:{embodied.distr.get_free_port()}'
     stats = defaultdict(int)
     barrier = embodied.distr.mp.Barrier(1 + clients)
 

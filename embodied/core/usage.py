@@ -29,10 +29,6 @@ class Usage:
       if enabled:
         self.tools[name] = available[name]()
 
-  # def add_procs(self, name, procs):
-  #   if 'psutil' in self.tools:
-  #     self.tools['psutil'].add_procs(name, procs)
-
   def stats(self):
     stats = {}
     for name, tool in self.tools.items():
@@ -72,15 +68,7 @@ class PsutilStats:
 
   def __init__(self):
     import psutil
-    # self.groups = {'main': [psutil.Process()]}
     self.proc = psutil.Process()
-
-  # def add_procs(self, name, procs):
-  #   import psutil
-  #   procs = tuple(procs) if hasattr(procs, '__len__') else (procs,)
-  #   procs = tuple(int(x.pid if hasattr(x, 'pid') else x) for x in procs)
-  #   procs = tuple(psutil.Process(x) for x in procs)
-  #   self.groups[name] = procs
 
   @timer.section('psutil_stats')
   def __call__(self):
@@ -89,7 +77,7 @@ class PsutilStats:
     cpus = psutil.cpu_count()
     memory = psutil.virtual_memory()
     stats = {
-        'proc_cpu_frac': self.proc.cpu_percent() / 100,
+        'proc_cpu_usage': self.proc.cpu_percent() / 100,
         'proc_ram_frac': self.proc.memory_info().rss / memory.total,
         'proc_ram_gb': self.proc.memory_info().rss / gb,
         'total_cpu_count': cpus,
@@ -99,13 +87,6 @@ class PsutilStats:
         'total_ram_used_gb': memory.used / gb,
         'total_ram_avail_gb': memory.available / gb,
     }
-    # for name, group in self.groups.items():
-    #   cpu = sum([x.cpu_percent() for x in group])
-    #   stats[f'{name}/cpu_frac'] = cpu / cpus / 100
-    #   ram = sum([x.memory_info().rss for x in group])
-    #   stats[f'{name}/ram_gb'] = ram / gb
-    #   stats[f'{name}/ram_frac'] = ram / memory.total
-    #   stats[f'{name}/num_procs'] = len(group)
     return stats
 
 
@@ -185,22 +166,6 @@ class GcStats:
       counts = defaultdict(int)
       for obj in objs.values():
         counts[type(obj).__name__] += 1
-
-      # lengths = []
-      # for obj in objs.values():
-      #   if isinstance(obj, (list, tuple)) and obj:
-      #     name = f'{type(obj).__name__}({type(obj[0]).__name__})'
-      #     lengths.append((name, len(obj)))
-      #   elif isinstance(obj, set) and obj:
-      #     val = next(iter(obj))
-      #     name = f'{type(obj).__name__}({type(val).__name__})'
-      #     lengths.append((name, len(obj)))
-      #   elif isinstance(obj, dict) and obj:
-      #     val = next(iter(obj.values()))
-      #     name = f'{type(obj).__name__}({type(val).__name__})'
-      #     lengths.append((name, len(obj)))
-      # lengths = sorted(lengths, key=lambda x: -x[1])[:10]
-      # print(lengths)
 
       deltas = {k: v - self.counts[gen].get(k, 0) for k, v in counts.items()}
       self.counts[gen] = counts

@@ -56,8 +56,6 @@ COLORS = {
         '#46327e', '#440154'),
 }
 
-COLORS['group4'] = np.repeat(COLORS['contrast'], 4).tolist()  # TODO
-
 
 def main():
   console = rich.console.Console()

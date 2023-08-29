@@ -26,8 +26,11 @@ class Thread:
     return self.thread.ident
 
   @property
-  def alive(self):
-    return self.thread.is_alive()
+  def running(self):
+    running = self.thread.is_alive()
+    if running:
+      assert self.exitcode is None, self.exitcode
+    return running
 
   @property
   def exitcode(self):
@@ -40,17 +43,15 @@ class Thread:
 
   def check(self):
     assert self.started
-    if self.exception:
-      e = self.exception
-      self.exception = None
-      raise e
+    if self.exception is not None:
+      raise self.exception
 
   def join(self, timeout=None):
     self.check()
     self.thread.join(timeout)
 
-  def terminate(self):
-    if not self.alive:
+  def kill(self):
+    if not self.running:
       return
     thread = self.thread
     if hasattr(thread, '_thread_id'):
@@ -62,22 +63,25 @@ class Thread:
     if result > 1:
       ctypes.pythonapi.PyThreadState_SetAsyncExc(
           ctypes.c_long(thread_id), None)
+    self.thread.join(0.1)
 
   def __repr__(self):
-    attrs = ('name', 'ident', 'started', 'exitcode')
+    attrs = ('name', 'ident', 'running', 'exitcode')
     attrs = [f'{k}={getattr(self, k)}' for k in attrs]
     return f'{type(self).__name__}(' + ', '.join(attrs) + ')'
 
   def _wrapper(self, *args):
     try:
       self.fn(*args)
-      self._exitcode = 0
     except SystemExit:
       return
     except Exception as e:
-      self.exception = e
-      self._exitcode = 1
       utils.warn_remote_error(e, self.name)
+      self._exitcode = 1
+      self.exception = e
+    finally:
+      if self._exitcode is None:
+        self._exitcode = 0
 
 
 class StoppableThread(Thread):
@@ -94,12 +98,13 @@ class StoppableThread(Thread):
     self.runflag = True
     super().start()
 
-  def stop(self, wait=True):
+  def stop(self, wait=1):
     self.runflag = False
     self.check()
-    if not self.alive:
+    if not self.running:
       return
     if wait is True:
       self.join()
     elif wait:
       self.join(wait)
+      self.kill()

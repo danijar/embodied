@@ -79,6 +79,15 @@ class Logger:
       output(tuple(self._metrics))
     self._metrics.clear()
 
+  def close(self):
+    self.write()
+    for output in self.outputs:
+      if hasattr(output, 'wait'):
+        try:
+          output.wait()
+        except Exception as e:
+          print(f'Error waiting on output: {e}')
+
   def _compute_fps(self):
     step = int(self.step) * self.multiplier
     if self._last_step is None:
@@ -100,6 +109,10 @@ class AsyncOutput:
     if parallel:
       self._worker = concurrent.futures.ThreadPoolExecutor(1, 'logger_async')
       self._future = None
+
+  def wait(self):
+    if self._parallel and self._future:
+      concurrent.futures.wait([self._future])
 
   def __call__(self, summaries):
     if self._parallel:
@@ -197,7 +210,7 @@ class JSONLOutput(AsyncOutput):
 class TensorBoardOutput(AsyncOutput):
 
   def __init__(
-      self, logdir, fps=20, maxsize=1e9, videos=True, parallel=True):
+      self, logdir, fps=20, videos=True, maxsize=1e9, parallel=True):
     super().__init__(self._write, parallel)
     self._logdir = str(logdir)
     if self._logdir.startswith('/gcs/'):

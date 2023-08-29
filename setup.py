@@ -1,22 +1,14 @@
 import setuptools
 import pathlib
 
-import embodied
+requirements = pathlib.Path('embodied/requirements.txt')
+requirements = requirements.read_text().split('\n')
+requirements = [x for x in requirements if x.strip()]
 
-
-extras = {}
-extras['tests'] = ['pytest', 'parameterized', 'cloudpickle']
-extras['optional'] = ['rich', 'pillow', 'tensorflow', 'cloudpickle']
-extras['envs'] = [
-    'gym==0.19.0', 'atari_py', 'crafter', 'dm_control', 'robodesk', 'procgen',
-    'bsuite',
-]
-extras['dreamerv2'] = ['tensorflow', 'tensorflow_probability', 'ruamel.yaml']
-extras['all'] = sorted(set(sum([v for v in extras.values()], [])))
 
 setuptools.setup(
     name='embodied',
-    version=embodied.__version__,
+    version='1.0.1',
     author='Danijar Hafner',
     author_email='mail@danijar.com',
     description='Fast reinforcement learning research',
@@ -25,8 +17,7 @@ setuptools.setup(
     long_description_content_type='text/markdown',
     packages=setuptools.find_packages(),
     include_package_data=True,
-    install_requires=['numpy'],
-    extras_require=extras,
+    install_requires=requirements,
     classifiers=[
         'Intended Audience :: Science/Research',
         'License :: OSI Approved :: MIT License',

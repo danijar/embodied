@@ -32,6 +32,7 @@ class Server:
     self.done_proms = deque()
     self.agg = agg.Agg()
     self.loop = thread.StoppableThread(self._loop, name=f'{name}_loop')
+    self.exception = None
 
   def bind(self, name, workfn, donefn=None, workers=0, batch=0):
     if workers:
@@ -54,6 +55,10 @@ class Server:
       assert not pool._broken
     [not x.done() or x.result() for x in self.result_set.copy()]
     [not x.done() or x.result() for x in self.done_proms.copy()]
+    if self.exception:
+      exception = self.exception
+      self.exception = None
+      raise exception
 
   def close(self):
     self._print('Shutting down')
@@ -93,14 +98,13 @@ class Server:
     self._print(f'Listening at {self.address}')
     while context.running:
       now = time.time()
-      # while True:
       result = socket.receive()
       self._handle_request(socket, result, now)
       for method in self.methods.values():
         self._handle_input(method, now)
       self._handle_results(socket, now)
       self._handle_dones()
-      time.sleep(0.001)  # TODO: 0.0001?
+      time.sleep(0.0001)
     socket.close()
 
   def _handle_request(self, socket, result, now):
@@ -156,7 +160,7 @@ class Server:
         else:
           socket.send_error(future.addr, future.rid, repr(e))
         if self.errors:
-          raise
+          self.exception = e
       finally:
         if not method.donefn:
           method.inprog[0] -= 1

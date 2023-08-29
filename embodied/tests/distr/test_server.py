@@ -12,7 +12,7 @@ import pytest
 
 SERVERS = [
     embodied.distr.Server,
-    embodied.distr.Server2,
+    embodied.distr.ProcServer,
 ]
 
 ADDRESSES = [
@@ -20,15 +20,13 @@ ADDRESSES = [
     'ipc:///tmp/test-{port}',
 ]
 
-PORTS = iter(range(5555, 6000))
-
 
 class TestServer:
 
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_single_client(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     def function(data):
       assert data == {'foo': np.array(1)}
       return {'foo': 2 * data['foo']}
@@ -44,7 +42,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_multiple_clients(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     server = Server(addr)
     server.bind('function', lambda data: data)
     with server:
@@ -61,7 +59,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_multiple_methods(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     server = Server(addr)
     server.bind('add', lambda data: {'z': data['x'] + data['y']})
     server.bind('sub', lambda data: {'z': data['x'] - data['y']})
@@ -74,7 +72,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_connect_before_server(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     server = Server(addr)
     server.bind('function', lambda data: {'foo': 2 * data['foo']})
     barrier = threading.Barrier(2)
@@ -96,7 +94,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_future_order(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     server = Server(addr)
     server.bind('function', lambda data: data)
     with server:
@@ -112,11 +110,12 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_future_cleanup(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     server = Server(addr)
     server.bind('function', lambda data: data)
     with server:
-      client = embodied.distr.Client(addr, 0, pings=0, maxage=1, errors=False)
+      client = embodied.distr.Client(
+          addr, 0, pings=0, maxage=1, maxinflight=None, errors=False)
       client.connect(retry=False, timeout=1)
       client.function({'foo': 1})
       client.function({'foo': 2})
@@ -128,7 +127,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_maxinflight(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     server = Server(addr)
 
     parallel = [0]
@@ -154,7 +153,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_future_cleanup_errors(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     server = Server(addr)
     server.bind('function', lambda data: data)
     with server:
@@ -175,7 +174,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_ping_alive(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     def slow(data):
       time.sleep(0.1)
       return data
@@ -189,7 +188,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_ping_dead(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     def slow(data):
       time.sleep(0.2)
       return data
@@ -204,17 +203,17 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_remote_error(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     def error(data):
       raise RuntimeError('foo')
-    server = Server(addr)
+    server = Server(addr, errors=True)
     server.bind('function', error)
     with server:
-      client = embodied.distr.Client(addr)
-      client.connect()
+      client = embodied.distr.Client(addr, errors=False, connect=True)
       future = client.function({'bar': 0})
       with pytest.raises(embodied.distr.RemoteError) as info1:
         future.result()
+      time.sleep(0.1)
       with pytest.raises(RuntimeError) as info2:
         server.check()
     assert repr(info1.value) == '''RemoteError("RuntimeError('foo')")'''
@@ -223,14 +222,13 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_remote_client_errors(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     def error(data):
       raise RuntimeError(data['foo'])
     server = Server(addr, errors=False)
     server.bind('function', error)
     with server:
-      client = embodied.distr.Client(addr, errors=True)
-      client.connect()
+      client = embodied.distr.Client(addr, connect=True, errors=True)
       client.function({'foo': 1})
       time.sleep(0.2)
       assert len(client.queue) == 1
@@ -243,7 +241,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_donefn_ordered(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     rng = np.random.default_rng(0)
     completed = []
     logged = []
@@ -269,7 +267,7 @@ class TestServer:
   @pytest.mark.parametrize('addr', ADDRESSES)
   @pytest.mark.parametrize('workers', (1, 4))
   def test_donefn_no_backlog(self, Server, addr, workers):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     lock = threading.Lock()
     work_calls = [0]
     done_calls = [0]
@@ -292,7 +290,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_connect_retry(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     results = []
     def client():
       try:
@@ -314,7 +312,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_shared_pool(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     def slow_function(data):
       time.sleep(0.1)
       return data
@@ -336,7 +334,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_separate_pools(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     def slow_function(data):
       time.sleep(0.1)
       return data
@@ -358,7 +356,7 @@ class TestServer:
   @pytest.mark.parametrize('addr', ADDRESSES)
   @pytest.mark.parametrize('batch', (1, 2, 4))
   def test_batching_single(self, Server, addr, batch):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     calls = [0]
     def function(data):
       assert set(data.keys()) == {'foo'}
@@ -379,7 +377,7 @@ class TestServer:
   @pytest.mark.parametrize('addr', ADDRESSES)
   @pytest.mark.parametrize('batch', (1, 2, 4))
   def test_batching_multiple(self, Server, addr, batch):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     def function(data):
       return data
     server = Server(addr)
@@ -405,8 +403,8 @@ class TestServer:
   @pytest.mark.parametrize('outer_addr', ADDRESSES)
   @pytest.mark.parametrize('workers', (1, 10))
   def test_proxy(self, Server, inner_addr, outer_addr, workers):
-    inner_addr = inner_addr.format(port=next(PORTS))
-    outer_addr = outer_addr.format(port=next(PORTS))
+    inner_addr = inner_addr.format(port=embodied.distr.get_free_port())
+    outer_addr = outer_addr.format(port=embodied.distr.get_free_port())
     proxy_client = embodied.distr.Client(inner_addr)
     proxy_server = Server(outer_addr, workers=workers)
     proxy_server.bind('function', lambda x: proxy_client.function(x).result())
@@ -426,8 +424,8 @@ class TestServer:
   @pytest.mark.parametrize('outer_addr', ADDRESSES)
   @pytest.mark.parametrize('workers', (2, 3, 10))
   def test_proxy_batched(self, Server, inner_addr, outer_addr, workers):
-    inner_addr = inner_addr.format(port=next(PORTS))
-    outer_addr = outer_addr.format(port=next(PORTS))
+    inner_addr = inner_addr.format(port=embodied.distr.get_free_port())
+    outer_addr = outer_addr.format(port=embodied.distr.get_free_port())
     proxy_client = embodied.distr.Client(inner_addr)
     proxy_server = Server(outer_addr)
     proxy_server.bind(
@@ -449,7 +447,7 @@ class TestServer:
   @pytest.mark.parametrize('Server', SERVERS)
   @pytest.mark.parametrize('addr', ADDRESSES)
   def test_empty_dict(self, Server, addr):
-    addr = addr.format(port=next(PORTS))
+    addr = addr.format(port=embodied.distr.get_free_port())
     client = embodied.distr.Client(addr, pings=0, maxage=1)
     server = Server(addr)
     def workfn(data):

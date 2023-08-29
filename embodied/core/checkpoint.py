@@ -33,7 +33,7 @@ class Checkpoint:
     if name.startswith('_'):
       raise AttributeError(name)
     try:
-      return getattr(self._values, name)
+      return self._values[name]
     except AttributeError:
       raise ValueError(name)
 

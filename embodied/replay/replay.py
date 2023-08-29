@@ -45,8 +45,6 @@ class Replay:
 
     if self.directory:
       self.directory.mkdirs()
-      # TODO
-      # self.workers = ThreadPoolExecutor(4, 'replay_saver')
       self.workers = ThreadPoolExecutor(8, 'replay_saver')
       self.promises = {}
 
@@ -125,12 +123,9 @@ class Replay:
       assert len(self.streams) == len(self.current)
 
       if len(stream) >= self.length:
-        # dur = self._wait(self.limiter.want_insert, 'Replay insert is waiting')
-        start = time.time()
-        while not self.limiter.want_insert():
-          time.sleep(0.001)
-        dur = time.time() - start
-        # TODO: These increments are not thread safe.
+        dur = self._wait(self.limiter.want_insert, 'Replay insert is waiting')
+        # These increments are not thread safe, so the metrics will be slightly
+        # wrong and it's faster than introducing a lock.
         self.metrics['inserts'] += 1
         self.metrics['insert_wait_dur'] += dur
         self.metrics['insert_wait_count'] += int(dur >= 0.001)
@@ -139,13 +134,10 @@ class Replay:
 
   @embodied.timer.section('replay_sample')
   def _sample(self):
-    # dur = self._wait(self.limiter.want_sample, 'Replay sample is waiting')
-    start = time.time()
-    while not self.limiter.want_sample():
-      time.sleep(0.001)
-    dur = time.time() - start
+    dur = self._wait(self.limiter.want_sample, 'Replay sample is waiting')
     self.limiter.sample()
-    # TODO: These increments are not thread safe.
+    # These increments are not thread safe, so the metrics will be slightly
+    # wrong and it's faster than introducing a lock.
     self.metrics['samples'] += 1
     self.metrics['sample_wait_dur'] += dur
     self.metrics['sample_wait_count'] += int(dur >= 0.001)
@@ -160,7 +152,6 @@ class Replay:
           break
         except KeyError:
           continue
-
     available = chunk.length - index
     if available >= self.length:
       with embodied.timer.section('slice'):
@@ -177,19 +168,13 @@ class Replay:
         seq = {
             k: np.concatenate([p[k] for p in parts], 0)
             for k in parts[0].keys()}
-
     with embodied.timer.section('isfirst'):
       if 'is_first' in seq:
         seq['is_first'] = seq['is_first'].copy()
         seq['is_first'][0] = True
-
-    # self._the_seq = seq
-
     return seq
 
   def _insert(self, chunkid, index):
-    # itemid = embodied.uuid()
-    # itemid = random.randint(0, 2 ** 63)
     itemid = self.itemid
     self.itemid += 1
     self.items[itemid] = (chunkid, index)
@@ -199,32 +184,18 @@ class Replay:
     while self.capacity and len(self.items) > self.capacity:
       self._remove()
 
-  # def _insert(self, chunk, index):
-  #   itemid = embodied.uuid()
-  #   self.items[itemid] = (chunk, index)
-  #   self.sampler[itemid] = (chunk, index)
-  #   self.fifo.append(itemid)
-  #   self.limiter.insert()
-  #   while self.capacity and len(self.items) > self.capacity:
-  #     self._remove()
-
   def _remove(self):
     self.limiter.remove()
     itemid = self.fifo.popleft()
     del self.sampler[itemid]
     chunkid, index = self.items.pop(itemid)
     with self.refs_lock:
-      # try:
       self.refs[chunkid] -= 1
       if self.refs[chunkid] < 1:
         del self.refs[chunkid]
         chunk = self.chunks.pop(chunkid)
         if chunk.succ in self.refs:
           self.refs[chunk.succ] -= 1
-        # for chunk in self.chunks.values():
-        #   assert chunk.succ != chunkid
-      # except KeyError:
-      #   pass  # There is a bug that I will never find.
 
   def dataset(self, batch=None):
     if batch:
@@ -282,15 +253,11 @@ class Replay:
 
     with ThreadPoolExecutor(16, 'replay_loader') as pool:
       chunks = [x for x in pool.map(load, filenames) if x]
-    # byid = {x.uuid: x for x in chunks}
-    # for chunk in chunks:
-    #   chunk.succ = byid.get(chunk.succ, embodied.uuid(0))
 
     # We need to recompute the number of items per chunk now because some
     # chunks be corrupted and thus not available.
     # numitems = self._numitems(chunks + list(self.chunks.values()))
     numitems = self._numitems(chunks)
-    # self.chunks.update({x.uuid: x for x in chunks})
 
     with self.rwlock.writing:
       with self.refs_lock:
@@ -335,18 +302,26 @@ class Replay:
     numitems = {k: np.clip(v, 0, lengths[k]) for k, v in numitems.items()}
     return numitems
 
-  # TODO
-  # def _wait(self, predicate, message, sleep=0.001, notify=1.0):
-  #   first = True
-  #   start = time.time()
-  #   notified = False
-  #   while True:
-  #     allowed, detail = predicate()
-  #     duration = time.time() - start
-  #     if allowed:
-  #       return 0 if first else duration
-  #     if not notified and duration >= notify:
-  #       print(f'{message} ({detail})')
-  #       notified = True
-  #     time.sleep(sleep)
-  #     first = False
+  def _wait(self, predicate, message, sleep=0.01, notify=1.0):
+    # Early exit if rate is not currently limited.
+    if predicate(reason=False):
+      return 0
+    # Wait without messages to avoid creating string objects.
+    start = time.time()
+    duration = 0
+    while duration < notify:
+      duration = time.time() - start
+      if predicate(reason=False):
+        return duration
+      time.sleep(sleep)
+    # Get the reason once to provide a useful user message.
+    allowed, reason = predicate(reason=True)
+    if allowed:
+      return time.time() - start
+    else:
+      print(f'{message} ({reason})')
+      time.sleep(sleep)
+    # Keep waiting without messages to avoid creating string objects.
+    while not predicate(reason=False):
+      time.sleep(sleep)
+    return time.time() - start

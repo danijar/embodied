@@ -10,7 +10,7 @@ from . import server
 from . import sockets
 
 
-class Server2:
+class ProcServer:
 
   def __init__(
       self, address, workers=1, name='Server', errors=True, ipv6=False):
@@ -50,7 +50,6 @@ class Server2:
       self.close()
 
   def stats(self):
-    # TODO
     return self.server.stats()
 
   def __enter__(self):

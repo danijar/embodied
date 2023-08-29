@@ -7,8 +7,6 @@ from . import expl
 from . import ninjax as nj
 from . import jaxutils
 
-from .director import Director  # noqa
-
 
 class Greedy(nj.Module):
 
