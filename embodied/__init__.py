@@ -1,8 +1,4 @@
-# try:
-#   import rich.traceback
-#   rich.traceback.install()
-# except ImportError:
-#   pass
+__version__ = '1.0.2'
 
 from .core import *
 

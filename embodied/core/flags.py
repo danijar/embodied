@@ -9,7 +9,7 @@ class Flags:
   def __init__(self, *args, **kwargs):
     self._config = config.Config(*args, **kwargs)
 
-  def parse(self, argv=None, help_exists=True):
+  def parse(self, argv=None, help_help_exits=True):
     parsed, remaining = self.parse_known(argv)
     for flag in remaining:
       if flag.startswith('--'):
@@ -17,14 +17,14 @@ class Flags:
     assert not remaining, remaining
     return parsed
 
-  def parse_known(self, argv=None, help_exists=False):
+  def parse_known(self, argv=None, help_help_exits=False):
     if argv is None:
       argv = sys.argv[1:]
     if '--help' in argv:
       print('\nHelp:')
       lines = str(self._config).split('\n')[2:]
       print('\n'.join('--' + re.sub(r'[:,\[\]]', '', x) for x in lines))
-      help_exists and sys.exit()
+      help_help_exits and sys.exit()
     parsed = {}
     remaining = []
     key = None
