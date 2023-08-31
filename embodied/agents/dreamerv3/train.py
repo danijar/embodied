@@ -49,7 +49,7 @@ def main(argv=None):
   print('Run script:', args.script)
 
   logdir = embodied.Path(args.logdir)
-  if args.script != 'parallel_env':
+  if args.script != 'env':
     logdir.mkdirs()
     config.save(logdir / 'config.yaml')
 
@@ -132,7 +132,7 @@ def make_replay(config, directory=None, is_eval=False, rate_limit=False):
   if rate_limit and config.run.train_ratio > 0:
     kwargs['samples_per_insert'] = config.run.train_ratio / config.batch_length
     kwargs['tolerance'] = 10 * config.batch_size
-    kwargs['min_size'] = config.batch_size
+    kwargs['min_size'] = max(config.batch_size, config.run.train_fill)
   replay = embodied.replay.Replay(
       config.batch_length, size, directory, **kwargs)
   return replay
@@ -166,7 +166,7 @@ def make_env(config, index, **overrides):
   kwargs = config.env.get(suite, {})
   kwargs.update(overrides)
   if kwargs.get('use_seed', False):
-    kwargs['seed'] = hash((config.seed, index))
+    kwargs['seed'] = hash((config.seed, index)) % (2 ** 32 - 1)
   env = ctor(task, **kwargs)
   return wrap_env(env, config)
 

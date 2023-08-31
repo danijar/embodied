@@ -34,7 +34,8 @@ def parallel(make_agent, make_replay, make_env, make_logger, args):
 
 
 def parallel_agent(make_agent, args):
-  make_agent = cloudpickle.loads(make_agent)
+  if isinstance(make_agent, bytes):
+    make_agent = cloudpickle.loads(make_agent)
   barrier = threading.Barrier(2)
   agent = make_agent()
   workers = []
@@ -53,11 +54,11 @@ def parallel_actor(agent, barrier, args):
 
   should_log = embodied.when.Clock(args.log_every)
   logger = embodied.distr.Client(
-      args.logger_addr, name='ActorLogger',
-      connect=True, maxinflight=8 * args.actor_threads)
+      args.logger_addr, 'ActorLogger', args.ipv6,
+      maxinflight=8 * args.actor_threads, connect=True)
   replay = embodied.distr.Client(
-      args.replay_addr, name='ActorReplay',
-      connect=True, maxinflight=8 * args.actor_threads)
+      args.replay_addr, 'ActorReplay', args.ipv6,
+      maxinflight=8 * args.actor_threads, connect=True)
 
   @embodied.timer.section('actor_workfn')
   def workfn(obs):
@@ -88,7 +89,7 @@ def parallel_actor(agent, barrier, args):
       stats.update(prefix(replay.stats(), 'client/actor_replay'))
       logger.add(stats)
 
-  server = embodied.distr.ProcServer(args.actor_addr, ipv6=args.ipv6)
+  server = embodied.distr.ProcServer(args.actor_addr, 'Actor', args.ipv6)
   server.bind('act', workfn, donefn, args.actor_threads, args.actor_batch)
   server.run()
 
@@ -108,14 +109,16 @@ def parallel_learner(agent, barrier, args):
     checkpoint.load(args.from_checkpoint)
   checkpoint.load_or_save()
   logger = embodied.distr.Client(
-      args.logger_addr, name='LearnerLogger', maxinflight=1, connect=True)
+      args.logger_addr, 'LearnerLogger', args.ipv6,
+      maxinflight=1, connect=True)
   barrier.wait()
   should_save()  # Register that we just saved.
 
   replays = []
   def parallel_dataset(prefetch=1):
     replay = embodied.distr.Client(
-        args.replay_addr, name=f'LearnerReplay{len(replays)}', connect=True)
+        args.replay_addr, f'LearnerReplay{len(replays)}', args.ipv6,
+        connect=True)
     replays.append(replay)
     futures = deque([replay.sample_batch({}) for _ in range(prefetch)])
     while True:
@@ -151,14 +154,16 @@ def parallel_learner(agent, barrier, args):
 
 
 def parallel_replay(make_replay, args):
-  make_replay = cloudpickle.loads(make_replay)
+  if isinstance(make_replay, bytes):
+    make_replay = cloudpickle.loads(make_replay)
 
   replay = make_replay()
   dataset = iter(replay.dataset(args.batch_size))
 
   should_log = embodied.when.Clock(args.log_every)
   logger = embodied.distr.Client(
-      args.logger_addr, name='ReplayLogger', connect=True, maxinflight=1)
+      args.logger_addr, 'ReplayLogger', args.ipv6,
+      maxinflight=1, connect=True)
   usage = embodied.Usage(**args.usage.update(nvsmi=False))
 
   should_save = embodied.when.Clock(args.save_every)
@@ -171,7 +176,7 @@ def parallel_replay(make_replay, args):
       replay.add({k: v[i] for k, v in data.items()}, envid)
     return {}
 
-  server = embodied.distr.Server(args.replay_addr, name='Replay')
+  server = embodied.distr.Server(args.replay_addr, 'Replay', args.ipv6)
   server.bind('add_batch', add_batch, workers=1)
   server.bind('sample_batch', lambda _: next(dataset), workers=1)
   with server:
@@ -189,7 +194,8 @@ def parallel_replay(make_replay, args):
 
 
 def parallel_logger(make_logger, args):
-  make_logger = cloudpickle.loads(make_logger)
+  if isinstance(make_logger, bytes):
+    make_logger = cloudpickle.loads(make_logger)
 
   logger = make_logger()
   should_log = embodied.when.Clock(args.log_every)
@@ -266,7 +272,7 @@ def parallel_logger(make_logger, args):
         del episodes[addr]
         del updated[addr]
 
-  server = embodied.distr.Server(args.logger_addr, name='Logger')
+  server = embodied.distr.Server(args.logger_addr, 'Logger', args.ipv6)
   server.bind('add', addfn)
   server.bind('trans', transfn)
   with server:
@@ -285,7 +291,8 @@ def parallel_logger(make_logger, args):
 
 
 def parallel_env(make_env, envid, args, logging=False):
-  make_env = cloudpickle.loads(make_env)
+  if isinstance(make_env, bytes):
+    make_env = cloudpickle.loads(make_env)
   assert envid >= 0, envid
   name = f'Env{envid}'
 
@@ -293,7 +300,8 @@ def parallel_env(make_env, envid, args, logging=False):
   should_log = embodied.when.Clock(args.log_every)
   if logging:
     logger = embodied.distr.Client(
-        args.logger_addr, name=f'{name}Logger', connect=True, maxinflight=1)
+        args.logger_addr, f'{name}Logger', args.ipv6,
+        maxinflight=1, connect=True)
   fps = embodied.FPS()
   if envid == 0:
     usage = embodied.Usage(**args.usage.update(nvsmi=False))
@@ -301,7 +309,7 @@ def parallel_env(make_env, envid, args, logging=False):
   _print('Make env')
   env = make_env(envid)
   actor = embodied.distr.Client(
-      args.actor_addr, envid, name, args.ipv6,
+      args.actor_addr, name, args.ipv6, identity=envid,
       pings=10, maxage=60, connect=True)
 
   done = True

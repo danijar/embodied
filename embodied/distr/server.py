@@ -17,7 +17,7 @@ Method = namedtuple('Method', (
 class Server:
 
   def __init__(
-      self, address, workers=1, name='Server', errors=True, ipv6=False):
+      self, address, name='Server', ipv6=False, workers=1, errors=True):
     self.address = address
     self.workers = workers
     self.name = name

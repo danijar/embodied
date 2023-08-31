@@ -51,10 +51,14 @@ class SamplesPerInsert:
 
   def want_insert(self, reason=False):
     if reason:
+      if self.size < self.minimum:
+        return True, 'ok'
       if self.avail >= self.max_avail:
         return False, f'rate limited: {self.avail:.3f} >= {self.max_avail:.3f}'
       return True, 'ok'
     else:
+      if self.size < self.minimum:
+        return True
       if self.avail >= self.max_avail:
         return False
       return True

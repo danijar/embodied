@@ -13,9 +13,12 @@ from . import sockets
 
 class Client:
 
+  RESOLVERS = []
+
   def __init__(
-      self, address, identity=None, name='Client', ipv6=False, pings=10,
-      maxage=120, maxinflight=16, errors=True, connect=False):
+      self, address, name='Client', ipv6=False, identity=None,
+      pings=10, maxage=120, maxinflight=16, errors=True,
+      connect=False):
     if identity is None:
       identity = int(np.random.randint(2 ** 32))
     self.address = address
@@ -130,8 +133,10 @@ class Client:
 
   @timer.section('client_resolve')
   def _resolve(self, address):
-    protocol, address = address.split('://', 1)
-    return f'{protocol}://{address}'
+    for check, resolve in self.RESOLVERS:
+      if check(address):
+        return resolve(address)
+    return address
 
   def _print(self, text):
     basics.print_(f'[{self.name}] {text}')

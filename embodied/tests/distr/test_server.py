@@ -280,7 +280,7 @@ class TestServer:
       with lock:
         done_calls[0] += 1
       time.sleep(0.01)
-    server = Server(addr, workers)
+    server = Server(addr, workers=workers)
     server.bind('function', workfn, donefn)
     with server:
       client = embodied.distr.Client(addr, pings=0, maxage=1, connect=True)

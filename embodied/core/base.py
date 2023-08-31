@@ -35,6 +35,10 @@ class Agent:
   def load(self, data):
     raise NotImplementedError('load(data) -> None')
 
+  @property
+  def aux_spaces(self):
+    return {}
+
 
 class Env:
 

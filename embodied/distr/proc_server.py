@@ -13,12 +13,12 @@ from . import sockets
 class ProcServer:
 
   def __init__(
-      self, address, workers=1, name='Server', errors=True, ipv6=False):
+      self, address, name='Server', ipv6=False, workers=1, errors=True):
     self.address = address
     self.inner = f'ipc:///tmp/inner{np.random.randint(2 ** 32)}'
     self.name = name
     self.ipv6 = ipv6
-    self.server = server.Server(self.inner, workers, name, errors, ipv6)
+    self.server = server.Server(self.inner, name, ipv6, workers, errors)
     self.batches = {}
     self.batcher = None
 

@@ -50,13 +50,13 @@ defaults:
     log_episode_timeout: 60
     from_checkpoint: ''
     actor_addr: 'tcp://localhost:{auto}'
-    replay_addr: 'ipc:///tmp/replay{auto}'
-    logger_addr: 'ipc:///tmp/logger{auto}'
+    replay_addr: 'tcp://localhost:{auto}'
+    logger_addr: 'tcp://localhost:{auto}'
     actor_batch: 32
     actor_threads: 4
     env_replica: -1
     ipv6: False
-    usage: {psutil: True, nvsmi: True, gputil: False, malloc: False, gc: False, gil: False}
+    usage: {psutil: True, nvsmi: True, gputil: False, malloc: False, gc: False}
     timer: True  # A bit slow but useful.
     driver_parallel: True
 
