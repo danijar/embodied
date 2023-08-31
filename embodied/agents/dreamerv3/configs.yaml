@@ -24,7 +24,6 @@ defaults:
     profiler: False  # True
     transfer_guard: True
     assert_num_devices: -1
-    policy_keys: '/(actor|wm/enc|wm/rssm)/'
 
   run:
     script: train
@@ -111,7 +110,6 @@ defaults:
   slow_critic_target: False
   retnorm: {impl: perc_ema, decay: 0.99, max: 1.0, perclo: 5.0, perchi: 95.0}
   actent: 3e-4
-  talk_prior: False
 
   # Exploration
   expl_rewards: {extr: 1.0, disag: 0.1}
@@ -119,24 +117,6 @@ defaults:
   disag_head: {layers: 5, units: 1024, act: silu, norm: layer, dist: mse, outscale: 1.0, inputs: [deter, stoch, action], winit: normal, fan: avg}
   disag_target: [stoch]
   disag_models: 8
-
-  # Director
-  director_jointly: True
-  train_skill_duration: 8
-  env_skill_duration: 8
-  goal_enc: {layers: 5, units: 1024, act: silu, norm: layer, dist: onehot, outscale: 1.0, inputs: [goal]}
-  goal_dec: {layers: 5, units: 1024, act: silu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
-  goal_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
-  goal_kl_scale: 0.1  # 1.0
-  goal_kl_free: 1.0
-  skill_shape: [8, 8]
-  manager_rews: {extr: 1.0, expl: 0.1, goal: 0.0}
-  worker_rews: {extr: 0.0, expl: 0.0, goal: 1.0}
-  worker_inputs: [deter, stoch, goal]
-  worker_goals: [manager]
-  worker_report_horizon: 64
-  manager_actent: 3e-4
-  worker_actent: 3e-4
 
 minecraft:
   task: minecraft_diamond

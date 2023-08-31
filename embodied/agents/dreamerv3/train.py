@@ -155,6 +155,7 @@ def make_env(config, index, **overrides):
       'minecraft': 'embodied.envs.minecraft:Minecraft',
       'loconav': 'embodied.envs.loconav:LocoNav',
       'pinpad': 'embodied.envs.pinpad:PinPad',
+      'langroom': 'embodied.envs.langroom:LangRoom',
       'procgen': lambda task, **kw: from_gym.FromGym(
           f'procgen:procgen-{task}-v0', **kw),
   }[suite]

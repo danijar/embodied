@@ -88,8 +88,9 @@ class JAXAgent(embodied.Agent):
       self.params = self._init_varibs(obs_space, act_space)
     self.updates = embodied.Counter()
 
-    pattern = re.compile(self.jaxcfg.policy_keys)
+    pattern = re.compile(self.agent.policy_keys)
     self.policy_keys = [k for k in self.params.keys() if pattern.search(k)]
+    assert self.policy_keys, (list(self.params.keys()), self.agent.policy_keys)
     self.should_sync = embodied.when.Every(self.jaxcfg.sync_every)
     self.prev_params = {k: self.params[k] for k in self.policy_keys}
     if not self.single_device:

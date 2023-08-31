@@ -540,20 +540,21 @@ def ada_clip(clip=0.1, b1=0.9, b2=0.999, eps=1e-6):
   return optax.GradientTransformation(init_fn, update_fn)
 
 
-# def late_grad_clip(value=1.0):
-#   def init_fn(params):
-#     return ()
-#   def update_fn(updates, state, params):
-#     updates = tree_map(lambda x: jnp.clip(x, -value, value), updates)
-#     return updates, ()
-#   return optax.GradientTransformation(init_fn, update_fn)
-
-
 def concat_dict(mapping, batch_shape=None):
   tensors = [v for _, v in sorted(mapping.items(), key=lambda x: x[0])]
   if batch_shape is not None:
     tensors = [x.reshape((*batch_shape, -1)) for x in tensors]
   return jnp.concatenate(tensors, -1)
+
+
+def onehot_dict(mapping, spaces):
+  result = {}
+  for key, value in mapping.items():
+    space = spaces[key]
+    if space.discrete:
+      value = jax.nn.one_hot(value, space.high.max().item())
+    result[key] = value
+  return result
 
 
 def tree_keys(params, prefix=''):

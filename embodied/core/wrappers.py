@@ -91,70 +91,6 @@ class NormalizeAction(base.Wrapper):
     return self.env.step({**action, self._key: orig})
 
 
-class OneHotObservation(base.Wrapper):
-
-  def __init__(self, env, key):
-    super().__init__(env)
-    space = env.obs_space[key]
-    assert space.dtype in (np.uint32, np.uint64), space
-    self._count = int(space.high)
-    self._key = key
-
-  @functools.cached_property
-  def obs_space(self):
-    shape = (self._count,)
-    space = spacelib.Space(np.float32, shape, 0, 1)
-    space.sample = functools.partial(self._sample, self._count)
-    space._discrete = True
-    return {**self.env.obs_space, self._key: space}
-
-  def step(self, action):
-    obs = self.env.step(action)
-    onehot = np.zeros(self._count, np.float32)
-    onehot[obs[self._key]] = 1.0
-    obs[self._key] = onehot
-    return obs
-
-  @staticmethod
-  def _sample(count):
-    index = np.random.randint(0, count)
-    sample = np.zeros(count, np.float32)
-    sample[index] = 1.0
-    return sample
-
-
-class OneHotAction(base.Wrapper):
-
-  def __init__(self, env, key='action'):
-    super().__init__(env)
-    self._count = int(env.act_space[key].high)
-    self._dtype = int(env.act_space[key].dtype)
-    self._key = key
-
-  @functools.cached_property
-  def act_space(self):
-    shape = (self._count,)
-    space = spacelib.Space(np.float32, shape, 0, 1)
-    space.sample = functools.partial(self._sample, self._count)
-    space._discrete = True
-    return {**self.env.act_space, self._key: space}
-
-  def step(self, action):
-    if not action['reset']:
-      assert action[self._key].min() == 0.0, action
-      assert action[self._key].max() == 1.0, action
-      assert action[self._key].sum() == 1.0, action
-    index = np.argmax(action[self._key]).astype(self._dtype)
-    return self.env.step({**action, self._key: index})
-
-  @staticmethod
-  def _sample(count):
-    index = np.random.randint(0, count)
-    sample = np.zeros(count, np.float32)
-    sample[index] = 1.0
-    return sample
-
-
 class ExpandScalars(base.Wrapper):
 
   def __init__(self, env):
@@ -284,28 +220,12 @@ class DiscretizeAction(base.Wrapper):
 
   @functools.cached_property
   def act_space(self):
-    shape = (self._dims, len(self._values))
-    space = spacelib.Space(np.float32, shape, 0, 1)
-    space.sample = functools.partial(
-        self._sample, self._dims, self._values)
-    space._discrete = True
+    space = spacelib.Space(np.int32, self._dims, 0, len(self._values))
     return {**self.env.act_space, self._key: space}
 
   def step(self, action):
-    if not action['reset']:
-      assert (action[self._key].min(-1) == 0.0).all(), action
-      assert (action[self._key].max(-1) == 1.0).all(), action
-      assert (action[self._key].sum(-1) == 1.0).all(), action
-    indices = np.argmax(action[self._key], axis=-1)
-    continuous = np.take(self._values, indices)
+    continuous = np.take(self._values, action[self._key])
     return self.env.step({**action, self._key: continuous})
-
-  @staticmethod
-  def _sample(dims, values):
-    indices = np.random.randint(0, len(values), dims)
-    action = np.zeros((dims, len(values)), dtype=np.float32)
-    action[np.arange(dims), indices] = 1.0
-    return action
 
 
 class ResizeImage(base.Wrapper):

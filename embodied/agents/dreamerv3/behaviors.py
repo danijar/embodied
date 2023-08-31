@@ -18,9 +18,6 @@ class Greedy(nj.Module):
     else:
       raise NotImplementedError(config.critic_type)
     act_priors = None
-    if config.talk_prior:
-      act_priors = {
-          'talk': lambda s: wm.heads['decoder'](s, cnn=False)['text']}
     self.ac = agent.ImagActorCritic(
         critics, {'extr': 1.0}, act_space, config, act_priors, name='ac')
 
