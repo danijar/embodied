@@ -107,7 +107,8 @@ class AsyncOutput:
     self._callback = callback
     self._parallel = parallel
     if parallel:
-      self._worker = concurrent.futures.ThreadPoolExecutor(1, 'logger_async')
+      name = type(self).__name__
+      self._worker = concurrent.futures.ThreadPoolExecutor(1, f'logger_{name}_async')
       self._future = None
 
   def wait(self):
@@ -144,19 +145,20 @@ class TerminalOutput:
         scalars = dict(list(scalars.items())[:self._limit])
     formatted = {k: self._format_value(v) for k, v in scalars.items()}
     if self._name:
-      header = f'{"-"*20}[{self._name} Step {step}]{"-"*20}'
+      header = f'{"-" * 20}[{self._name} Step {step}]{"-" * 20}'
     else:
-      header = f'{"-"*20}[Step {step}]{"-"*20}'
-    if formatted:
-      content = ' / '.join(f'{k} {v}' for k, v in formatted.items())
-    else:
-      content = 'No metrics.'
+      header = f'{"-" * 20}[Step {step}]{"-" * 20}'
+    content = ''
     if self._pattern:
-      content += f"\n(Filtered by '{self._pattern.pattern}')"
+      content += f"Metrics filtered by: '{self._pattern.pattern}'"
     elif truncated:
-      content += f'\n({truncated} more entries truncated;'
-      content += ' filter to see specific keys.)'
-    basics.print_(f'{header}\n{content}', flush=True)
+      content += f'{truncated} metrics truncated, filter to see specific keys.'
+    content += '\n'
+    if formatted:
+      content += ' / '.join(f'{k} {v}' for k, v in formatted.items())
+    else:
+      content += 'No metrics.'
+    basics.print_(f'\n{header}\n{content}\n', flush=True)
 
   def _format_value(self, value):
     value = float(value)
@@ -253,9 +255,9 @@ class TensorBoardOutput(AsyncOutput):
             value = value[:1024]
           tf.summary.histogram(name, value, step)
         elif len(value.shape) == 2:
-          tf.summary.image(name, value, step)
+          tf.summary.image(name, value[None, ..., None], step)
         elif len(value.shape) == 3:
-          tf.summary.image(name, value, step)
+          tf.summary.image(name, value[None], step)
         elif len(value.shape) == 4 and self._videos:
           self._video_summary(name, value, step)
       except Exception:

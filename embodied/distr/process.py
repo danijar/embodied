@@ -38,7 +38,7 @@ class Process:
   def running(self):
     running = self.process.is_alive()
     if running:
-      assert self.exitcode is None, self.exitcode
+      assert self.exitcode is None, (self.name, self.exitcode)
     return running
 
   @property
@@ -78,9 +78,13 @@ class Process:
       self.process.terminate()
       self.process.join(timeout=0.1)
     if self.running:
-      os.kill(self.pid, signal.SIGKILL)
-      self.process.join(timeout=1.0)
-    assert not self.running, self.name
+      try:
+        os.kill(self.pid, signal.SIGKILL)
+        self.process.join(timeout=0.1)
+      except ProcessLookupError:
+        pass
+    if self.running:
+      print(f'Process {self.name} did not shut down yet.')
 
   def __repr__(self):
     attrs = ('name', 'pid', 'running', 'exitcode')

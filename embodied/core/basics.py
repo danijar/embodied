@@ -1,19 +1,25 @@
-import pickle
 import re
+from datetime import datetime
 
-import numpy as np
 
 try:
   import colored
-  REGEX_TOKEN = re.compile(r"([^a-zA-Z0-9-_./'\"\[\]])", re.MULTILINE)
-  REGEX_NUMBER = re.compile(r'[-+]?[0-9]+[0-9.]*(e[-+]?[0-9])?')
-  KEYWORDS = ()  # ('True', 'False', 'None', 'bool', 'int', 'str', 'float')
 except ImportError:
   print('For colored outputs: pip install colored')
   colored = None
 
 
-def print_(value, color=True, **kwargs):
+REGEX_TOKEN = re.compile(
+    r"([^a-zA-Z0-9-_./'\"\[\]]|['\"][^\s]*['\"])", re.MULTILINE)
+REGEX_NUMBER = re.compile(
+    r'([-+]?[0-9]+[0-9.,]*(e[-+]?[0-9])?|nan|-?inf)')
+KEYWORDS = (
+    'True', 'False', 'None', 'bool', 'int', 'str', 'float',
+    'uint8', 'float16', 'float32', 'int32', 'int64')
+
+
+def print_(*values, color=True, **kwargs):
+  value = kwargs.get('sep', ' ').join(str(x) for x in values)
   assert not color or isinstance(color, (bool, str)), color
   if isinstance(color, str) and colored:
     value = colored.stylize(value, colored.fg(color))
@@ -23,34 +29,36 @@ def print_(value, color=True, **kwargs):
     tokens = REGEX_TOKEN.split(value) + [None]
     for i, token in enumerate(tokens[:-1]):
       new = prev.copy()
-      stripped = token.strip()
+      word = token.strip()
       new[2] = None
-      if not stripped:
+      if not word:
         new[0] = None
-      elif stripped in '/-+':
+      elif word in '/-+':
         new[0] = 'green'
         new[2] = True
-      elif stripped in '{}()<>,:':
+      elif word in '{}()<>,:':
         new[0] = 'white'
       elif token == '=':
         new[0] = 'white'
-      elif stripped[0].isalpha() and tokens[i + 1] == '=':
+      elif word[0].isalpha() and tokens[i + 1] == '=':
         new[0] = 'magenta'
-      elif stripped in KEYWORDS:
+      elif word in KEYWORDS:
         new[0] = 'blue'
-      elif stripped.startswith('---'):
+      elif word.startswith('---'):
         new[1] = True
-      elif REGEX_NUMBER.match(stripped):
+      elif REGEX_NUMBER.match(word):
         new[0] = 'blue'
-      elif stripped[0] == stripped[-1] == "'":
+      elif word[0] == word[-1] == "'":
         new[0] = 'red'
-      elif stripped[0] == stripped[-1] == '"':
+      elif word[0] == word[-1] == '"':
         new[0] = 'red'
-      elif stripped[0] == '[' and stripped[-1] == ']':
+      elif word[0] == '[' and word[-1] == ']':
         new[0] = 'cyan'
-      elif stripped[0] == '/':
+      elif any(word.startswith(x) for x in ('/', '~', './')):
         new[0] = 'yellow'
-      elif stripped[0] == stripped[0].upper():
+      elif len(word) >= 3 and word[0] == word[-1] and word[0] in ("'", '"'):
+        new[0] = 'green'
+      elif word[0] == word[0].upper():
         new[0] = None
       else:
         new[0] = None
@@ -112,3 +120,11 @@ def treemap(fn, *trees, isleaf=None):
         format_(trees))
     return {k: treemap(fn, *[t[k] for t in trees], **kw) for k in first}
   return fn(*trees)
+
+
+def timestamp(now=None, millis=False):
+  now = datetime.now() if now is None else now
+  string = now.strftime("%Y%m%dT%H%M%S")
+  if millis:
+    string += f'F{now.microsecond:06d}'
+  return string

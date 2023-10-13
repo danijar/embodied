@@ -7,7 +7,7 @@ defaults:
   replay_size: 1e6
   replay_online: False
   eval_dir: ''
-  filter: 'score|length|fps|ratio|train/.*loss_mean|randomness_mean'
+  filter: '.*'
   tensorboard_videos: True
 
   jax:
@@ -72,11 +72,29 @@ defaults:
     loconav: {size: [64, 64], repeat: 2, camera: -1}
 
   # Agent
-  task_behavior: Greedy
+  task_behavior: Director
   expl_behavior: None
   batch_size: 16
   batch_length: 64
   random_agent: False
+
+  # Director
+  director_jointly: True
+  train_skill_duration: 8
+  env_skill_duration: 8
+  goal_enc: {layers: 5, units: 1024, act: silu, norm: layer, dist: onehot, outscale: 1.0, inputs: [goal]}
+  goal_dec: {layers: 5, units: 1024, act: silu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
+  goal_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
+  goal_kl_scale: 0.1  # 1.0
+  goal_kl_free: 1.0
+  skill_shape: [8, 8]
+  manager_rews: {extr: 1.0, expl: 0.1, goal: 0.0}
+  worker_rews: {extr: 0.0, expl: 0.0, goal: 1.0}
+  worker_inputs: [deter, stoch, goal]
+  worker_goals: [manager]
+  worker_report_horizon: 64
+  manager_actent: 3e-4
+  worker_actent: 3e-4
 
   # World Model
   grad_heads: [decoder, reward, cont]
@@ -126,7 +144,7 @@ minecraft:
     script: train_save
     num_envs: 16
     eval_fill: 1e5
-    train_ratio: 16  # 32
+    train_ratio: 16
     log_keys_max: '^log_inventory.*'
   encoder: {mlp_keys: 'inventory|inventory_max|equipped|health|hunger|breath|reward', cnn_keys: 'image'}
   decoder: {mlp_keys: 'inventory|inventory_max|equipped|health|hunger|breath', cnn_keys: 'image'}

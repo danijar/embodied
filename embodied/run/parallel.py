@@ -27,17 +27,17 @@ def parallel(make_agent, make_replay, make_env, make_logger, args):
   workers = [
       embodied.distr.Process(parallel_env, make_env, i, args, True)
       for i in range(args.num_envs)]
-  workers.append(embodied.distr.Process(parallel_agent, make_agent, args))
+  workers.append(embodied.distr.Thread(parallel_agent, make_agent, args))
   workers.append(embodied.distr.Process(parallel_replay, make_replay, args))
   workers.append(embodied.distr.Process(parallel_logger, make_logger, args))
-  embodied.distr.run(workers, args.duration)
+  embodied.distr.run(workers, args.duration, exit_after=True)
 
 
 def parallel_agent(make_agent, args):
   if isinstance(make_agent, bytes):
     make_agent = cloudpickle.loads(make_agent)
-  barrier = threading.Barrier(2)
   agent = make_agent()
+  barrier = threading.Barrier(2)
   workers = []
   workers.append(embodied.distr.Thread(parallel_actor, agent, barrier, args))
   workers.append(embodied.distr.Thread(parallel_learner, agent, barrier, args))
@@ -296,7 +296,7 @@ def parallel_env(make_env, envid, args, logging=False):
   assert envid >= 0, envid
   name = f'Env{envid}'
 
-  _print = lambda x: embodied.print(f'[{name}] {x}')
+  _print = lambda x: embodied.print(f'[{name}] {x}', flush=True)
   should_log = embodied.when.Clock(args.log_every)
   if logging:
     logger = embodied.distr.Client(
@@ -328,7 +328,7 @@ def parallel_env(make_env, envid, args, logging=False):
     fps.step(1)
     done = obs['is_last']
     if done:
-      _print(f'Episode of length {length} with score {score:.4f}')
+      _print(f'Episode of length {length} with score {score:.2f}')
 
     with embodied.timer.section('env_request'):
       future = actor.act({'envid': envid, **obs})

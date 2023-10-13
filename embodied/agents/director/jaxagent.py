@@ -288,7 +288,7 @@ class JAXAgent(embodied.Agent):
     train_static = list(self.train_static.keys()) + ['create', 'modify']
     policy_static = list(self.policy_static.keys()) + ['create', 'modify']
     train_donate = ['donated', 'carry']  # 'rng', 'data'
-    policy_donate = ['obs', 'carry']  # 'rng'
+    policy_donate = ['carry']  # 'rng',  'obs'
 
     if len(self.train_devices) == 1:
       kw = dict(device=self.train_devices[0])

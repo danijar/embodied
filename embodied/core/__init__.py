@@ -1,8 +1,9 @@
 from .base import Agent, Env, Wrapper, Replay
 
-from .basics import treemap
-from .basics import print_ as print
 from .basics import format_ as format
+from .basics import print_ as print
+from .basics import timestamp
+from .basics import treemap
 
 from .space import Space
 from .path import Path

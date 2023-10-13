@@ -32,10 +32,10 @@ from embodied import wrappers
 
 def main(argv=None):
 
-  embodied.print(r"---  ___                           __   ______ ---")
-  embodied.print(r"--- |   \ _ _ ___ __ _ _ __  ___ _ \ \ / /__ / ---")
-  embodied.print(r"--- | |) | '_/ -_) _` | '  \/ -_) '/\ V / |_ \ ---")
-  embodied.print(r"--- |___/|_| \___\__,_|_|_|_\___|_|  \_/ |___/ ---")
+  embodied.print(r"---  ___  _            _            ---")
+  embodied.print(r"--- |   \(_)_ _ ___ __| |_ ___ _ _  ---")
+  embodied.print(r"--- | |) | | '_/ -_) _|  _| _ \ '_| ---")
+  embodied.print(r"--- |___/|_|_| \___\__|_| \___/_|   ---")
 
   from . import agent as agt
   parsed, other = embodied.Flags(configs=['defaults']).parse_known(argv)

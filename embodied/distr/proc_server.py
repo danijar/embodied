@@ -39,6 +39,7 @@ class ProcServer:
   def close(self):
     self.server.close()
     self.batcher.stop()
+    assert not self.batcher.running
 
   def run(self):
     try:

@@ -15,8 +15,8 @@ from . import selectors
 class Replay:
 
   def __init__(
-      self, length, capacity=None, directory=None, chunksize=1024,
-      min_size=1, samples_per_insert=None, tolerance=1e4, seed=0):
+      self, length, capacity=None, directory=None, chunksize=1024, min_size=1,
+      samples_per_insert=None, tolerance=1e4, online=False, seed=0):
     assert not capacity or min_size <= capacity
 
     self.length = length
@@ -42,6 +42,11 @@ class Replay:
     self.current = {}
     self.streams = defaultdict(deque)
     self.rwlock = embodied.RWLock()
+
+    self.online = online
+    if online:
+      self.lengths = defaultdict(int)
+      self.queue = deque()
 
     if self.directory:
       self.directory.mkdirs()
@@ -132,6 +137,12 @@ class Replay:
         chunkid, index = stream.popleft()
         self._insert(chunkid, index)
 
+        if self.online and self.lengths[worker] % self.length == 0:
+          self.queue.append((chunkid, index))
+
+      if self.online:
+        self.lengths[worker] += 1
+
   @embodied.timer.section('replay_sample')
   def _sample(self):
     dur = self._wait(self.limiter.want_sample, 'Replay sample is waiting')
@@ -148,6 +159,10 @@ class Replay:
         # Look up the item or repeat if it was already removed in the meantime.
         try:
           chunkid, index = self.items[itemid]
+
+          if self.online and self.queue:
+            chunkid, index = self.queue.popleft()
+
           chunk = self.chunks[chunkid]
           break
         except KeyError:
@@ -319,7 +334,7 @@ class Replay:
     if allowed:
       return time.time() - start
     else:
-      print(f'{message} ({reason})')
+      embodied.print(f'{message} ({reason})')
       time.sleep(sleep)
     # Keep waiting without messages to avoid creating string objects.
     while not predicate(reason=False):

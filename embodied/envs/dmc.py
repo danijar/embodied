@@ -8,8 +8,8 @@ import numpy as np
 class DMC(embodied.Env):
 
   DEFAULT_CAMERAS = dict(
-      locom_rodent=1,
       quadruped=2,
+      locom_rodent=4,
   )
 
   def __init__(self, env, repeat=1, render=True, size=(64, 64), camera=-1):
@@ -25,6 +25,10 @@ class DMC(embodied.Env):
         from dm_control import manipulation
         env = manipulation.load(task + '_vision')
       elif domain == 'locom':
+        # camera 0: topdown map
+        # camera 2: shoulder
+        # camera 4: topdown tracking
+        # camera 5: eyes
         from dm_control.locomotion.examples import basic_rodent_2020
         env = getattr(basic_rodent_2020, task)()
       else:

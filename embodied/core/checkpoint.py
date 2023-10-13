@@ -74,7 +74,7 @@ class Checkpoint:
       tmp = filename.parent / (filename.name + '.tmp')
       tmp.write(content, mode='wb')
       tmp.move(filename)
-    print('Wrote checkpoint')
+    print('Wrote checkpoint.')
 
   @timer.section('checkpoint_load')
   def load(self, filename=None, keys=None):
@@ -90,7 +90,7 @@ class Checkpoint:
       try:
         self._values[key].load(data[key])
       except Exception:
-        print(f'Error loading {key} from checkpoint.')
+        print(f"Error loading '{key}' from checkpoint.")
         raise
     age = time.time() - data['_timestamp']
     basics.print_(f'Loaded checkpoint from {age:.0f} seconds ago.')

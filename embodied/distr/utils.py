@@ -1,6 +1,9 @@
+import ctypes
 import multiprocessing as mp
+import os
 import socket
 import sys
+import threading
 import time
 import traceback
 
@@ -29,7 +32,7 @@ def port_free(port):
     return s.connect_ex(('localhost', int(port)))
 
 
-def run(workers, duration=None):
+def run(workers, duration=None, exit_after=False):
   try:
 
     for worker in workers:
@@ -52,10 +55,14 @@ def run(workers, duration=None):
       for worker in workers:
         if worker.exitcode not in (None, 0):
           time.sleep(0.1)  # Wait for workers to print their error messages.
-          msg = f'Terminated workers due to crash in {worker.name}.'
+          msg = f'Shutting down workers due to crash in {worker.name}.'
           print(msg)
-          worker.check()
-          raise RuntimeError(msg)  # In case the check did not raise.
+          if exit_after:
+            for worker in workers:
+              if hasattr(worker, 'pid'):
+                kill_subprocs(worker.pid)
+          worker.check()  # Raise the forwarded exception.
+          raise RuntimeError(msg)  # In case exception was not forwarded.
       time.sleep(0.1)
 
   finally:
@@ -64,6 +71,16 @@ def run(workers, duration=None):
     # up. Even worse, clients of the new program execution could connect to
     # servers of the previous program execution that did not get cleaned up.
     [x.kill() for x in workers]
+
+
+def assert_no_children(parent=None):
+  procs = list(psutil.Process(parent).children(recursive=True))
+  threads = list(threading.enumerate())
+  print(
+      f'Process {os.getpid()} should have no children.\n' +
+      f'Threads: {threads}\n'
+      f'Subprocs: {procs}')
+  kill_subprocs(parent)
 
 
 def kill_subprocs(parent=None):
@@ -115,6 +132,20 @@ def proc_alive(pid):
     return False
 
 
+def kill_thread(thread):
+  if isinstance(thread, int):
+    thread_id = int(thread)
+  elif hasattr(thread, '_thread_id'):
+    thread_id = thread._thread_id
+  else:
+    thread_id = [k for k, v in threading._active.items() if v is thread][0]
+  result = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+      ctypes.c_long(thread_id), ctypes.py_object(SystemExit))
+  if result > 1:
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_long(thread_id), None)
+
+
 def warn_remote_error(e, name, lock=get_print_lock):
   lock = lock() if callable(lock) else lock
   typ, tb = type(e), e.__traceback__
@@ -124,7 +155,7 @@ def warn_remote_error(e, name, lock=get_print_lock):
   msg += 'Call check() to reraise in main process. '
   msg += f'Worker stack trace:\n{full}'
   with lock:
-    embodied.print(msg, 'red')
+    embodied.print(msg, color='red')
   if sys.version_info.minor >= 11:
     e.add_note(f'\nWorker stack trace:\n\n{full}')
 

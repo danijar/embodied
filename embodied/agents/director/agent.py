@@ -21,7 +21,6 @@ from . import jaxagent
 from . import jaxutils
 from . import nets
 from . import ninjax as nj
-# from . import ssm
 
 
 @jaxagent.Wrapper
@@ -47,7 +46,7 @@ class Agent(nj.Module):
 
   @property
   def policy_keys(self):
-    return '/(actor|wm/enc|wm/rssm)/'
+    return '/(wm/enc|wm/rssm|task_behavior|expl_behavior)/'
 
   def policy_initial(self, batch_size):
     return (
@@ -144,7 +143,6 @@ class WorldModel(nj.Module):
         'decoder': nets.MultiDecoder(obs_space, **config.decoder, name='dec'),
         'reward': nets.MLP((), **config.reward_head, name='rew'),
         'cont': nets.MLP((), **config.cont_head, name='cont')}
-
     self.opt = jaxutils.Optimizer(name='model_opt', **config.model_opt)
     scales = self.config.loss_scales.copy()
     cnn = scales.pop('dec_cnn')

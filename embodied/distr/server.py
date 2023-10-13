@@ -1,5 +1,5 @@
-import time
 import concurrent.futures
+import time
 from collections import deque, namedtuple
 
 import numpy as np
@@ -7,6 +7,7 @@ import numpy as np
 from ..core import agg
 from ..core import basics
 from . import sockets
+from . import pool as poollib
 from . import thread
 
 
@@ -24,9 +25,9 @@ class Server:
     self.errors = errors
     self.ipv6 = ipv6
     self.methods = {}
-    self.default_pool = concurrent.futures.ThreadPoolExecutor(workers, 'work')
+    self.default_pool = poollib.ThreadPool(workers, 'work')
     self.other_pools = []
-    self.done_pool = concurrent.futures.ThreadPoolExecutor(1, 'log')
+    self.done_pool = poollib.ThreadPool(1, 'log')
     self.result_set = set()
     self.done_queue = deque()
     self.done_proms = deque()
@@ -36,7 +37,7 @@ class Server:
 
   def bind(self, name, workfn, donefn=None, workers=0, batch=0):
     if workers:
-      pool = concurrent.futures.ThreadPoolExecutor(workers, name)
+      pool = poollib.ThreadPool(workers, name)
       self.other_pools.append(pool)
     else:
       workers = self.workers
@@ -51,8 +52,6 @@ class Server:
 
   def check(self):
     self.loop.check()
-    for pool in [self.default_pool] + self.other_pools:
-      assert not pool._broken
     [not x.done() or x.result() for x in self.result_set.copy()]
     [not x.done() or x.result() for x in self.done_proms.copy()]
     if self.exception:
@@ -62,12 +61,11 @@ class Server:
 
   def close(self):
     self._print('Shutting down')
-    concurrent.futures.wait(self.result_set)
-    concurrent.futures.wait(self.done_proms)
     self.loop.stop()
-    self.default_pool.shutdown()
+    self.default_pool.close()
+    self.done_pool.close()
     for pool in self.other_pools:
-      pool.shutdown()
+      pool.close()
 
   def run(self):
     try:

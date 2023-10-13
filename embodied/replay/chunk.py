@@ -1,5 +1,4 @@
 import io
-from datetime import datetime
 
 import embodied
 import numpy as np
@@ -10,8 +9,7 @@ class Chunk:
   __slots__ = ('time', 'uuid', 'succ', 'length', 'size', 'data', 'saved')
 
   def __init__(self, size=1024):
-    now = datetime.now()
-    self.time = now.strftime("%Y%m%dT%H%M%S") + f'F{now.microsecond:06d}'
+    self.time = embodied.timestamp(millis=True)
     self.uuid = embodied.uuid()
     self.succ = embodied.uuid(0)
     # self.uuid = int(np.random.randint(1, 2 * 63))
@@ -56,7 +54,7 @@ class Chunk:
     return {k: v[index: index + length] for k, v in self.data.items()}
 
   @embodied.timer.section('chunk_save')
-  def save(self, directory):
+  def save(self, directory, log=False):
     assert not self.saved
     self.saved = True
     filename = embodied.Path(directory) / self.filename
@@ -65,7 +63,7 @@ class Chunk:
       np.savez_compressed(stream, **data)
       stream.seek(0)
       filename.write(stream.read(), mode='wb')
-    print(f'Saved chunk: {filename.name}')
+    log and print(f'Saved chunk: {filename.name}')
 
   @classmethod
   def load(cls, filename, error='raise'):
