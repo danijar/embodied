@@ -1,6 +1,7 @@
 import re
 from functools import partial as bind
 
+import elements
 import embodied
 import jax
 import jax.numpy as jnp
@@ -25,7 +26,7 @@ sample = lambda dist: {
 class Agent(nj.Module):
 
   configs = yaml.YAML(typ='safe').load(
-      (embodied.Path(__file__).parent / 'configs.yaml').read())
+      (elements.Path(__file__).parent / 'configs.yaml').read())
 
   def __init__(self, obs_space, act_space, config):
     self.obs_space = {
@@ -41,8 +42,8 @@ class Agent(nj.Module):
         k: v for k, v in obs_space.items()
         if k not in ('is_first', 'is_last', 'is_terminal', 'reward') and
         not k.startswith('log_') and re.match(config.dec.spaces, k)}
-    embodied.print('Encoder:', {k: v.shape for k, v in enc_space.items()})
-    embodied.print('Decoder:', {k: v.shape for k, v in dec_space.items()})
+    elements.print('Encoder:', {k: v.shape for k, v in enc_space.items()})
+    elements.print('Decoder:', {k: v.shape for k, v in dec_space.items()})
 
     # World Model
     self.enc = {
@@ -81,11 +82,7 @@ class Agent(nj.Module):
         name='updater')
 
     # Optimizer
-    kw = dict(config.opt)
-    lr = kw.pop('lr')
-    if config.separate_lrs:
-      lr = {f'agent/{k}': v for k, v in config.lrs.items()}
-    self.opt = jaxutils.Optimizer(lr, **kw, name='opt')
+    self.opt = jaxutils.Optimizer(**config.opt, name='opt')
     self.modules = [
         self.enc, self.dyn, self.dec, self.rew, self.con,
         self.actor, self.critic]
@@ -127,7 +124,7 @@ class Agent(nj.Module):
     return self.init_train(batch_size)
 
   def policy(self, obs, carry, mode='train'):
-    self.config.jax.jit and embodied.print(
+    self.config.jax.jit and elements.print(
         'Tracing policy function', color='yellow')
     prevlat, prevact = carry
     obs = self.preprocess(obs)
@@ -164,7 +161,7 @@ class Agent(nj.Module):
     return act, outs, (lat, act)
 
   def train(self, data, carry):
-    self.config.jax.jit and embodied.print(
+    self.config.jax.jit and elements.print(
         'Tracing train function', color='yellow')
     data = self.preprocess(data)
     stepid = data.pop('stepid')
@@ -399,7 +396,7 @@ class Agent(nj.Module):
     return loss, (outs, carry, metrics)
 
   def report(self, data, carry):
-    self.config.jax.jit and embodied.print(
+    self.config.jax.jit and elements.print(
         'Tracing report function', color='yellow')
     if not self.config.report:
       return {}, carry

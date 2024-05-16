@@ -5,6 +5,7 @@ from functools import partial as bind
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent.parent))
 sys.path.append(str(pathlib.Path(__file__).parent))
 
+import elements
 import embodied
 import numpy as np
 import pytest
@@ -53,12 +54,12 @@ class TestTrain:
     return embodied.replay.Replay(**kwargs)
 
   def _make_logger(self):
-    return embodied.Logger(embodied.Counter(), [
-        embodied.logger.TerminalOutput(),
+    return elements.Logger(elements.Counter(), [
+        elements.logger.TerminalOutput(),
     ])
 
   def _make_args(self, logdir):
-    return embodied.Config(
+    return elements.Config(
         logdir=str(logdir),
         num_envs=4,
         steps=5e4,

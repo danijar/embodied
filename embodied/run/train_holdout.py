@@ -2,6 +2,7 @@ import re
 from collections import defaultdict
 from functools import partial as bind
 
+import elements
 import embodied
 import numpy as np
 
@@ -15,24 +16,24 @@ def train_holdout(
   eval_replay = make_eval_replay()
   logger = make_logger()
 
-  logdir = embodied.Path(args.logdir)
+  logdir = elements.Path(args.logdir)
   logdir.mkdir()
   print('Logdir', logdir)
   step = logger.step
-  usage = embodied.Usage(**args.usage)
-  agg = embodied.Agg()
-  episodes = defaultdict(embodied.Agg)
-  epstats = embodied.Agg()
-  policy_fps = embodied.FPS()
-  train_fps = embodied.FPS()
+  usage = elements.Usage(**args.usage)
+  agg = elements.Agg()
+  episodes = defaultdict(elements.Agg)
+  epstats = elements.Agg()
+  policy_fps = elements.FPS()
+  train_fps = elements.FPS()
 
   batch_steps = args.batch_size * args.batch_length
-  should_expl = embodied.when.Until(args.expl_until)
-  should_train = embodied.when.Ratio(args.train_ratio / batch_steps)
-  should_log = embodied.when.Clock(args.log_every)
-  should_save = embodied.when.Clock(args.save_every)
+  should_expl = elements.when.Until(args.expl_until)
+  should_train = elements.when.Ratio(args.train_ratio / batch_steps)
+  should_log = elements.when.Clock(args.log_every)
+  should_save = elements.when.Clock(args.save_every)
 
-  @embodied.timer.section('log_step')
+  @elements.timer.section('log_step')
   def log_step(tran, worker):
 
     episode = episodes[worker]
@@ -87,7 +88,7 @@ def train_holdout(
     if len(train_replay) < args.batch_size or step < args.train_fill:
       return
     for _ in range(should_train(step)):
-      with embodied.timer.section('dataset_next'):
+      with elements.timer.section('dataset_next'):
         batch = next(dataset_train)
       outs, carry[0], mets = agent.train(batch, carry[0])
       train_fps.step(batch_steps)
@@ -96,7 +97,7 @@ def train_holdout(
       agg.add(mets, prefix='train')
   driver.on_step(train_step)
 
-  checkpoint = embodied.Checkpoint(logdir / 'checkpoint.ckpt')
+  checkpoint = elements.Checkpoint(logdir / 'checkpoint.ckpt')
   checkpoint.step = step
   checkpoint.agent = agent
   checkpoint.train_replay = train_replay
@@ -118,12 +119,12 @@ def train_holdout(
       logger.add(agg.result())
       logger.add(epstats.result(), prefix='epstats')
       if len(train_replay):
-        mets, _ = agent.report(next(dataset_report), init_report)
+        mets, _ = agent.report(next(dataset_report), carry_report)
         logger.add(mets, prefix='report')
       if len(eval_replay):
-        mets, _ = agent.report(next(dataset_eval), init_report)
+        mets, _ = agent.report(next(dataset_eval), carry_report)
         logger.add(mets, prefix='eval')
-      logger.add(embodied.timer.stats(), prefix='timer')
+      logger.add(elements.timer.stats(), prefix='timer')
       logger.add(train_replay.stats(), prefix='replay')
       logger.add(usage.stats(), prefix='usage')
       logger.add({'fps/policy': policy_fps.result()})

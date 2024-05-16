@@ -6,9 +6,11 @@ from functools import partial as bind
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent.parent))
 sys.path.append(str(pathlib.Path(__file__).parent))
 
+import elements
 import embodied
 import numpy as np
 import pytest
+import zerofun
 
 import utils
 
@@ -19,7 +21,7 @@ class TestParallel:
   def test_run_loop(self, tmpdir, train_ratio):
     addr = 'ipc:///tmp/teststats'
     received = deque(maxlen=1)
-    server = embodied.distr.Server(addr, name='TestStats')
+    server = zerofun.Server(addr, name='TestStats')
     server.bind('report', lambda stats: received.append(stats))
     server.start()
 
@@ -45,7 +47,7 @@ class TestParallel:
     assert stats['saves'] >= 2
     assert stats['loads'] == 0
     # for port in ports:
-    #   assert embodied.distr.port_free(port)
+    #   assert zerofun.port_free(port)
 
     embodied.run.parallel.combined(
         bind(self._make_agent, addr),
@@ -54,7 +56,7 @@ class TestParallel:
     stats = received[0]
     assert stats['loads'] == 1
     # for port in ports:
-    #   assert embodied.distr.port_free(port)
+    #   assert zerofun.port_free(port)
 
   def _make_agent(self, queue):
     env = self._make_env(0)
@@ -73,15 +75,15 @@ class TestParallel:
     return embodied.replay.Replay(**kwargs)
 
   def _make_logger(self):
-    return embodied.Logger(embodied.Counter(), [
-        embodied.logger.TerminalOutput(),
+    return elements.Logger(elements.Counter(), [
+        elements.logger.TerminalOutput(),
     ])
 
   def _make_args(self, logdir, train_ratio):
-    actor_port = embodied.distr.get_free_port()
-    replay_port = embodied.distr.get_free_port()
-    logger_port = embodied.distr.get_free_port()
-    return embodied.Config(
+    actor_port = zerofun.get_free_port()
+    replay_port = zerofun.get_free_port()
+    logger_port = zerofun.get_free_port()
+    return elements.Config(
         logdir=str(logdir),
         num_envs=4,
         duration=10,

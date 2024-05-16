@@ -2,7 +2,6 @@ __version__ = '1.1.0'
 
 from .core import *
 
-from . import distr
 from . import envs
 from . import replay
 from . import run

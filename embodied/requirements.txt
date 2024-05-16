@@ -1,9 +1,12 @@
 cloudpickle
 colored
+elements>=3.9.1
+expa[pubsub]
 gputil
 msgpack
 numpy
 psutil
 ruamel.yaml
 tensorflow-cpu
+zerofun>=2.1.1
 zmq

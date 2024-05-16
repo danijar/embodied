@@ -2,8 +2,7 @@ import time
 
 import cloudpickle
 import numpy as np
-
-from .. import distr
+import zerofun
 
 
 class Driver:
@@ -19,7 +18,7 @@ class Driver:
       self.pipes, pipes = zip(*[context.Pipe() for _ in range(self.length)])
       fns = [cloudpickle.dumps(fn) for fn in make_env_fns]
       self.procs = [
-          distr.StoppableProcess(self._env_server, i, pipe, fn, start=True)
+          zerofun.StoppableProcess(self._env_server, i, pipe, fn, start=True)
           for i, (fn, pipe) in enumerate(zip(fns, pipes))]
       self.pipes[0].send(('act_space',))
       self.act_space = self._receive(self.pipes[0])
@@ -123,8 +122,10 @@ class Driver:
           pipe.send(('result', env.act_space))
         else:
           raise ValueError(f'Invalid message {msg}')
+    except ConnectionResetError:
+      print('Connection to driver lost')
     except Exception as e:
-      distr.warn_remote_error(e, f'Env{envid}')
+      zerofun.warn_remote_error(e, f'Env{envid}')
       pipe.send(('error', e))
     finally:
       print(f'Closing env {envid}')

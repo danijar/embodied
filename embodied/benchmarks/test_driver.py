@@ -4,6 +4,7 @@ from functools import partial as bind
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
+import elements
 import embodied
 
 
@@ -17,7 +18,7 @@ class TestDriver:
     example.close()
     driver = embodied.Driver(make_env_fns, parallel)
     driver.reset(agent.init_policy)
-    fps = embodied.FPS()
+    fps = elements.FPS()
     while True:
       driver(agent.policy, steps=100)
       fps.step(100 * len(make_env_fns))
@@ -31,7 +32,7 @@ class TestDriver:
     example.close()
     driver = embodied.Driver(make_env_fns, parallel)
     driver.reset(agent.init_policy)
-    fps = embodied.FPS()
+    fps = elements.FPS()
     while True:
       driver(agent.policy, steps=100)
       fps.step(100 * len(make_env_fns))

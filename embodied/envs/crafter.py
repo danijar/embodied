@@ -1,5 +1,6 @@
 import json
 
+import elements
 import embodied
 import numpy as np
 
@@ -11,7 +12,7 @@ class Crafter(embodied.Env):
     import crafter
     self._env = crafter.Env(size=size, reward=(task == 'reward'), seed=seed)
     self._logs = logs
-    self._logdir = logdir and embodied.Path(logdir)
+    self._logdir = logdir and elements.Path(logdir)
     self._logdir and self._logdir.mkdir()
     self._episode = 0
     self._length = None

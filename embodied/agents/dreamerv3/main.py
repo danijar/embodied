@@ -15,28 +15,30 @@ warnings.filterwarnings('ignore', '.*using stateful random seeds*')
 warnings.filterwarnings('ignore', '.*is a deprecated alias for.*')
 warnings.filterwarnings('ignore', '.*truncated to dtype int32.*')
 
+import elements
 import embodied
+import zerofun
 from embodied import wrappers
 
 
 def main(argv=None):
 
-  embodied.print(r"---  ___                           __   ______ ---")
-  embodied.print(r"--- |   \ _ _ ___ __ _ _ __  ___ _ \ \ / /__ / ---")
-  embodied.print(r"--- | |) | '_/ -_) _` | '  \/ -_) '/\ V / |_ \ ---")
-  embodied.print(r"--- |___/|_| \___\__,_|_|_|_\___|_|  \_/ |___/ ---")
+  elements.print(r"---  ___                           __   ______ ---")
+  elements.print(r"--- |   \ _ _ ___ __ _ _ __  ___ _ \ \ / /__ / ---")
+  elements.print(r"--- | |) | '_/ -_) _` | '  \/ -_) '/\ V / |_ \ ---")
+  elements.print(r"--- |___/|_| \___\__,_|_|_|_\___|_|  \_/ |___/ ---")
 
   from . import agent as agt
-  parsed, other = embodied.Flags(configs=['defaults']).parse_known(argv)
-  config = embodied.Config(agt.Agent.configs['defaults'])
+  parsed, other = elements.Flags(configs=['defaults']).parse_known(argv)
+  config = elements.Config(agt.Agent.configs['defaults'])
   for name in parsed.configs:
     config = config.update(agt.Agent.configs[name])
-  config = embodied.Flags(config).parse(other)
+  config = elements.Flags(config).parse(other)
   config = config.update(
-      logdir=config.logdir.format(timestamp=embodied.timestamp()),
+      logdir=config.logdir.format(timestamp=elements.timestamp()),
       replay_length=config.replay_length or config.batch_length,
       replay_length_eval=config.replay_length_eval or config.batch_length_eval)
-  args = embodied.Config(
+  args = elements.Config(
       **config.run,
       logdir=config.logdir,
       batch_size=config.batch_size,
@@ -48,14 +50,14 @@ def main(argv=None):
   print('Run script:', args.script)
   print('Logdir:', args.logdir)
 
-  logdir = embodied.Path(args.logdir)
+  logdir = elements.Path(args.logdir)
   if not args.script.endswith(('_env', '_replay')):
     logdir.mkdir()
     config.save(logdir / 'config.yaml')
 
   def init():
-    embodied.timer.global_timer.enabled = args.timer
-  embodied.distr.Process.initializers.append(init)
+    elements.timer.global_timer.enabled = args.timer
+  zerofun.Process.initializers.append(init)
   init()
 
   if args.script == 'train':
@@ -97,14 +99,14 @@ def main(argv=None):
         bind(make_logger, config), args)
 
   elif args.script == 'parallel_env':
-    envid = args.env_replica
+    envid = args.replica
     if envid < 0:
       envid = int(os.environ['JOB_COMPLETION_INDEX'])
-    embodied.run.parallel.env(
-        bind(make_env, config), envid, args, False)
+    embodied.run.parallel.parallel_env(
+        bind(make_env, config), envid, args)
 
   elif args.script == 'parallel_replay':
-    embodied.run.parallel.replay(
+    embodied.run.parallel.parallel_replay(
         bind(make_replay, config, 'replay', rate_limit=True), args)
 
   elif args.script == 'parallel_with_eval':
@@ -117,12 +119,12 @@ def main(argv=None):
         bind(make_logger, config), args)
 
   elif args.script == 'parallel_with_eval_env':
-    envid = args.env_replica
+    envid = args.replica
     if envid < 0:
       envid = int(os.environ['JOB_COMPLETION_INDEX'])
     is_eval = envid >= args.num_envs
     embodied.run.parallel_with_eval.parallel_env(
-        bind(make_env, config), envid, args, True, is_eval)
+        bind(make_env, config), envid, args, is_eval)
 
   elif args.script == 'parallel_with_eval_replay':
     embodied.run.parallel_with_eval.parallel_replay(
@@ -145,22 +147,22 @@ def make_agent(config):
 
 
 def make_logger(config):
-  step = embodied.Counter()
+  step = elements.Counter()
   logdir = config.logdir
   multiplier = config.env.get(config.task.split('_')[0], {}).get('repeat', 1)
-  logger = embodied.Logger(step, [
-      embodied.logger.TerminalOutput(config.filter, 'Agent'),
-      embodied.logger.JSONLOutput(logdir, 'metrics.jsonl'),
-      embodied.logger.JSONLOutput(logdir, 'scores.jsonl', 'episode/score'),
-      embodied.logger.TensorBoardOutput(
+  logger = elements.Logger(step, [
+      elements.logger.TerminalOutput(config.filter, 'Agent'),
+      elements.logger.JSONLOutput(logdir, 'metrics.jsonl'),
+      elements.logger.JSONLOutput(logdir, 'scores.jsonl', 'episode/score'),
+      elements.logger.TensorBoardOutput(
           logdir, config.run.log_video_fps, config.tensorboard_videos),
-      # embodied.logger.WandbOutput(logdir.name, ...),
+      # elements.logger.WandbOutput(logdir.name, ...),
   ], multiplier)
   return logger
 
 
 def make_replay(config, directory=None, is_eval=False, rate_limit=False):
-  directory = directory and embodied.Path(config.logdir) / directory
+  directory = directory and elements.Path(config.logdir) / directory
   size = int(config.replay.size / 10 if is_eval else config.replay.size)
   length = config.replay_length_eval if is_eval else config.replay_length
   kwargs = {}
@@ -220,7 +222,7 @@ def make_env(config, index, **overrides):
   if kwargs.pop('use_seed', False):
     kwargs['seed'] = hash((config.seed, index)) % (2 ** 32 - 1)
   if kwargs.pop('use_logdir', False):
-    kwargs['logdir'] = embodied.Path(config.logdir) / f'env{index}'
+    kwargs['logdir'] = elements.Path(config.logdir) / f'env{index}'
   env = ctor(task, **kwargs)
   return wrap_env(env, config)
 

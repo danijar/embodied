@@ -1,6 +1,7 @@
 import time
 
-import embodied
+import elements
+import zerofun
 import numpy as np
 
 
@@ -10,8 +11,8 @@ class TestAgent:
     self.obs_space = obs_space
     self.act_space = act_space
     if addr:
-      self.client = embodied.distr.Client(addr, connect=True)
-      self.should_stats = embodied.when.Clock(1)
+      self.client = zerofun.Client(addr, connect=True)
+      self.should_stats = elements.when.Clock(1)
     else:
       self.client = None
     self._stats = {

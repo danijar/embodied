@@ -3,6 +3,7 @@ import re
 import threading
 
 import chex
+import elements
 import embodied
 import jax
 import jax.numpy as jnp
@@ -25,15 +26,15 @@ class JAXAgent(embodied.Agent):
 
   def __init__(self, agent_cls, obs_space, act_space, config):
     print('Observation space')
-    [embodied.print(f'  {k:<16} {v}') for k, v in obs_space.items()]
+    [elements.print(f'  {k:<16} {v}') for k, v in obs_space.items()]
     print('Action space')
-    [embodied.print(f'  {k:<16} {v}') for k, v in act_space.items()]
+    [elements.print(f'  {k:<16} {v}') for k, v in act_space.items()]
 
     self.obs_space = obs_space
     self.act_space = act_space
     self.config = config
     self.jaxcfg = config.jax
-    self.logdir = embodied.Path(config.logdir)
+    self.logdir = elements.Path(config.logdir)
     self._setup()
     self.agent = agent_cls(obs_space, act_space, config, name='agent')
     self.rng = np.random.default_rng(config.seed)
@@ -42,7 +43,7 @@ class JAXAgent(embodied.Agent):
         not k.startswith('_') and not k.startswith('log_') and k != 'reset')]
 
     available = jax.devices(self.jaxcfg.platform)
-    embodied.print(f'JAX devices ({jax.local_device_count()}):', available)
+    elements.print(f'JAX devices ({jax.local_device_count()}):', available)
     if self.jaxcfg.assert_num_devices > 0:
       assert len(available) == self.jaxcfg.assert_num_devices, (
           available, len(available), self.jaxcfg.assert_num_devices)
@@ -72,12 +73,12 @@ class JAXAgent(embodied.Agent):
     self.policy_lock = threading.Lock()
     self.train_lock = threading.Lock()
     self.params = self._init_params(obs_space, act_space)
-    self.updates = embodied.Counter()
+    self.updates = elements.Counter()
 
     pattern = re.compile(self.agent.policy_keys)
     self.policy_keys = [k for k in self.params.keys() if pattern.search(k)]
     assert self.policy_keys, (list(self.params.keys()), self.agent.policy_keys)
-    self.should_sync = embodied.when.Every(self.jaxcfg.sync_every)
+    self.should_sync = elements.when.Every(self.jaxcfg.sync_every)
     self.policy_params = jax.device_put(
         {k: self.params[k].copy() for k in self.policy_keys},
         self.policy_mirrored)
@@ -114,11 +115,11 @@ class JAXAgent(embodied.Agent):
     carry = self._init_report(self.params, seed, batch_size)
     return carry
 
-  @embodied.timer.section('jaxagent_policy')
+  @elements.timer.section('jaxagent_policy')
   def policy(self, obs, carry, mode='train'):
     obs = self._filter_data(obs)
 
-    with embodied.timer.section('prepare_carry'):
+    with elements.timer.section('prepare_carry'):
       if self.jaxcfg.fetch_policy_carry:
         carry = jax.tree.map(
             np.stack, carry, is_leaf=lambda x: isinstance(x, list))
@@ -126,7 +127,7 @@ class JAXAgent(embodied.Agent):
         with self.policy_lock:
           carry = self._stack(carry)
 
-    with embodied.timer.section('check_inputs'):
+    with elements.timer.section('check_inputs'):
       for key, space in self.obs_space.items():
         if key in self.keys:
           assert np.isfinite(obs[key]).all(), (obs[key], key, space)
@@ -134,17 +135,17 @@ class JAXAgent(embodied.Agent):
         for keypath, value in jax.tree_util.tree_leaves_with_path(carry):
           assert np.isfinite(value).all(), (value, keypath)
 
-    with embodied.timer.section('upload_inputs'):
+    with elements.timer.section('upload_inputs'):
       with self.policy_lock:
         obs, carry = jax.device_put((obs, carry), self.policy_sharded)
         seed = self._next_seeds(self.policy_sharded)
 
-    with embodied.timer.section('jit_policy'):
+    with elements.timer.section('jit_policy'):
       with self.policy_lock:
         acts, outs, carry = self._policy(
             self.policy_params, obs, carry, seed, mode)
 
-    with embodied.timer.section('swap_params'):
+    with elements.timer.section('swap_params'):
       with self.policy_lock:
         if self.pending_sync:
           old = self.policy_params
@@ -152,14 +153,14 @@ class JAXAgent(embodied.Agent):
           jax.tree.map(lambda x: x.delete(), old)
           self.pending_sync = None
 
-    with embodied.timer.section('fetch_outputs'):
+    with elements.timer.section('fetch_outputs'):
       if self.jaxcfg.fetch_policy_carry:
         acts, outs, carry = self._take_outs(fetch_async((acts, outs, carry)))
       else:
         carry = self._split(carry)
         acts, outs = self._take_outs(fetch_async((acts, outs)))
 
-    with embodied.timer.section('check_outputs'):
+    with elements.timer.section('check_outputs'):
       finite = outs.pop('finite', {})
       for key, (isfinite, _, _) in finite.items():
         assert isfinite.all(), str(finite)
@@ -173,13 +174,13 @@ class JAXAgent(embodied.Agent):
 
     return acts, outs, carry
 
-  @embodied.timer.section('jaxagent_train')
+  @elements.timer.section('jaxagent_train')
   def train(self, data, carry):
     seed = data['seed']
     data = self._filter_data(data)
     allo = {k: v for k, v in self.params.items() if k in self.policy_keys}
     dona = {k: v for k, v in self.params.items() if k not in self.policy_keys}
-    with embodied.timer.section('jit_train'):
+    with elements.timer.section('jit_train'):
       with self.train_lock:
         self.params, outs, carry, mets = self._train(
             allo, dona, data, carry, seed)
@@ -205,29 +206,29 @@ class JAXAgent(embodied.Agent):
       outdir, copyto = self.logdir, None
       if str(outdir).startswith(('gs://', '/gcs/')):
         copyto = outdir
-        outdir = embodied.Path('/tmp/profiler')
+        outdir = elements.Path('/tmp/profiler')
         outdir.mkdir()
       if self.updates == 100:
-        embodied.print(f'Start JAX profiler: {str(outdir)}', color='yellow')
+        elements.print(f'Start JAX profiler: {str(outdir)}', color='yellow')
         jax.profiler.start_trace(str(outdir))
       if self.updates == 120:
-        from embodied.core import path as pathlib
-        embodied.print('Stop JAX profiler', color='yellow')
+        elements.print('Stop JAX profiler', color='yellow')
         jax.profiler.stop_trace()
         if copyto:
-          pathlib.GFilePath(outdir).copy(copyto)
+          elements.Path(outdir).copy(copyto)
           print(f'Copied profiler result {outdir} to {copyto}')
 
     return return_outs, carry, return_mets
 
-  @embodied.timer.section('jaxagent_report')
+  @elements.timer.section('jaxagent_report')
   def report(self, data, carry):
     seed = data['seed']
     data = self._filter_data(data)
-    with embodied.timer.section('jit_report'):
+    with elements.timer.section('jit_report'):
       with self.train_lock:
         mets, carry = self._report(self.params, data, carry, seed)
         mets = self._take_mets(fetch_async(mets))
+    mets['params/summary'] = self.summary()
     return mets, carry
 
   def dataset(self, generator):
@@ -237,12 +238,12 @@ class JAXAgent(embodied.Agent):
           'seed': self._next_seeds(self.train_sharded)}
     return embodied.Prefetch(generator, transform)
 
-  @embodied.timer.section('jaxagent_save')
+  @elements.timer.section('jaxagent_save')
   def save(self):
     with self.train_lock:
       return jax.device_get(self.params)
 
-  @embodied.timer.section('jaxagent_load')
+  @elements.timer.section('jaxagent_load')
   def load(self, state):
     with self.train_lock:
       with self.policy_lock:
@@ -277,7 +278,7 @@ class JAXAgent(embodied.Agent):
       os.environ['NCCL_NVLS_ENABLE'] = '0'
       os.environ['CUDA_MODULE_LOADING'] = 'EAGER'
     if self.jaxcfg.xla_dump:
-      outdir = embodied.Path(self.config.logdir) / 'xla_dump'
+      outdir = elements.Path(self.config.logdir) / 'xla_dump'
       outdir.mkdir()
       xla_flags.append(f'--xla_dump_to={outdir}')
       xla_flags.append('--xla_dump_hlo_as_long_text')
@@ -423,6 +424,13 @@ class JAXAgent(embodied.Agent):
     seed = self._next_seeds(self.train_sharded)
     carry = self.init_report(self.config.batch_size)
     self._report = self._report.lower(self.params, data, carry, seed)
+
+  def summary(self):
+    lines = []
+    for k, v in self.params.items():
+      if k == 'agent/opt/state': continue
+      lines.append(f'{k:<40} {elements.format(v)}')
+    return '\n'.join(lines)
 
 
 def fetch_async(value):

@@ -6,7 +6,7 @@ from collections import defaultdict
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
-import embodied
+import zerofun
 import numpy as np
 
 
@@ -15,9 +15,9 @@ class TestDistr:
   def test_batched_throughput(self, clients=32, batch=16, workers=4):
     assert int(os.popen('ulimit -n').read()) > 1024
 
-    addr = f'tcp://localhost:{embodied.distr.get_free_port()}'
+    addr = f'tcp://localhost:{zerofun.get_free_port()}'
     stats = defaultdict(int)
-    barrier = embodied.distr.mp.Barrier(1 + clients)
+    barrier = zerofun.mp.Barrier(1 + clients)
 
     def client(context, addr, barrier):
       data = {
@@ -25,7 +25,7 @@ class TestDistr:
           'bar': np.zeros((1024,), np.float32),
           'baz': np.zeros((), bool),
       }
-      client = embodied.distr.Client(addr)
+      client = zerofun.Client(addr)
       client.connect()
       barrier.wait()
       while context.running:
@@ -41,11 +41,11 @@ class TestDistr:
       stats['nbytes'] += sum(x.nbytes for x in data.values())
 
     procs = [
-        embodied.distr.StoppableProcess(client, addr, barrier, start=True)
+        zerofun.StoppableProcess(client, addr, barrier, start=True)
         for _ in range(clients)]
 
-    server = embodied.distr.Server(addr)
-    # server = embodied.distr.Server2(addr)
+    server = zerofun.Server(addr)
+    # server = zerofun.Server2(addr)
 
     server.bind('function', workfn, donefn, batch=batch, workers=workers)
     with server:
@@ -56,9 +56,9 @@ class TestDistr:
         now = time.time()
         dur = now - start
         print(
-            f'{stats["batches"]/dur:.2f} bat/s ' +
-            f'{stats["frames"]/dur:.2f} frm/s ' +
-            f'{stats["nbytes"]/dur/(1024**3):.2f} gib/s')
+            f'{stats["batches"] / dur:.2f} bat/s ' +
+            f'{stats["frames"] / dur:.2f} frm/s ' +
+            f'{stats["nbytes"] / dur / (1024 ** 3):.2f} gib/s')
         stats.clear()
         start = now
         time.sleep(1)
@@ -75,17 +75,17 @@ class TestDistr:
           'bar': np.zeros((1024,), np.float32),
           'baz': np.zeros((), bool),
       }
-      client = embodied.distr.Client(outer_addr)
+      client = zerofun.Client(outer_addr)
       client.connect()
       barrier.wait()
       while context.running:
         client.function(data).result()
 
     def proxy(context, outer_addr, inner_addr, barrier):
-      client = embodied.distr.Client(
+      client = zerofun.Client(
           inner_addr, pings=0, maxage=0, name='ProxyInner')
       client.connect()
-      server = embodied.distr.Server(
+      server = zerofun.Server(
           outer_addr, errors=True, name='ProxyOuter')
       def function(data):
         return client.function(data).result()
@@ -105,7 +105,7 @@ class TestDistr:
         stats['batches'] += 1
         stats['frames'] += len(data['foo'])
         stats['nbytes'] += sum(x.nbytes for x in data.values())
-      server = embodied.distr.Server(
+      server = zerofun.Server(
           inner_addr, errors=True, name='Backend')
       server.bind('function', workfn, donefn, workers=workers)
       with server:
@@ -116,24 +116,24 @@ class TestDistr:
           now = time.time()
           dur = now - start
           print(
-              f'{stats["batches"]/dur:.2f} bat/s ' +
-              f'{stats["frames"]/dur:.2f} frm/s ' +
-              f'{stats["nbytes"]/dur/(1024**3):.2f} gib/s')
+              f'{stats["batches"] / dur:.2f} bat/s ' +
+              f'{stats["frames"] / dur:.2f} frm/s ' +
+              f'{stats["nbytes"] / dur / (1024**3):.2f} gib/s')
           stats.clear()
           start = now
           time.sleep(1)
 
     inner_addr = 'ipc:///tmp/test-inner'
     outer_addr = 'ipc:///tmp/test-outer'
-    barrier = embodied.distr.mp.Barrier(2 + clients)
+    barrier = zerofun.mp.Barrier(2 + clients)
     procs = [
-        embodied.distr.StoppableProcess(client, outer_addr, barrier)
+        zerofun.StoppableProcess(client, outer_addr, barrier)
         for _ in range(clients)]
-    procs.append(embodied.distr.StoppableProcess(
+    procs.append(zerofun.StoppableProcess(
         proxy, outer_addr, inner_addr, barrier))
-    procs.append(embodied.distr.StoppableProcess(
+    procs.append(zerofun.StoppableProcess(
         backend, inner_addr, barrier))
-    embodied.distr.run(procs)
+    zerofun.run(procs)
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@ import re
 from collections import defaultdict
 from functools import partial as bind
 
+import elements
 import embodied
 import numpy as np
 
@@ -12,25 +13,25 @@ def train(make_agent, make_replay, make_env, make_logger, args):
   replay = make_replay()
   logger = make_logger()
 
-  logdir = embodied.Path(args.logdir)
+  logdir = elements.Path(args.logdir)
   logdir.mkdir()
   print('Logdir', logdir)
   step = logger.step
-  usage = embodied.Usage(**args.usage)
-  agg = embodied.Agg()
-  epstats = embodied.Agg()
-  episodes = defaultdict(embodied.Agg)
-  policy_fps = embodied.FPS()
-  train_fps = embodied.FPS()
+  usage = elements.Usage(**args.usage)
+  agg = elements.Agg()
+  epstats = elements.Agg()
+  episodes = defaultdict(elements.Agg)
+  policy_fps = elements.FPS()
+  train_fps = elements.FPS()
 
   batch_steps = args.batch_size * (args.batch_length - args.replay_context)
-  should_expl = embodied.when.Until(args.expl_until)
-  should_train = embodied.when.Ratio(args.train_ratio / batch_steps)
-  should_log = embodied.when.Clock(args.log_every)
-  should_eval = embodied.when.Clock(args.eval_every)
-  should_save = embodied.when.Clock(args.save_every)
+  should_expl = elements.when.Until(args.expl_until)
+  should_train = elements.when.Ratio(args.train_ratio / batch_steps)
+  should_log = elements.when.Clock(args.log_every)
+  should_eval = elements.when.Clock(args.eval_every)
+  should_save = elements.when.Clock(args.save_every)
 
-  @embodied.timer.section('log_step')
+  @elements.timer.section('log_step')
   def log_step(tran, worker):
 
     episode = episodes[worker]
@@ -82,7 +83,7 @@ def train(make_agent, make_replay, make_env, make_logger, args):
     if len(replay) < args.batch_size or step < args.train_fill:
       return
     for _ in range(should_train(step)):
-      with embodied.timer.section('dataset_next'):
+      with elements.timer.section('dataset_next'):
         batch = next(dataset_train)
       outs, carry[0], mets = agent.train(batch, carry[0])
       train_fps.step(batch_steps)
@@ -91,7 +92,7 @@ def train(make_agent, make_replay, make_env, make_logger, args):
       agg.add(mets, prefix='train')
   driver.on_step(train_step)
 
-  checkpoint = embodied.Checkpoint(logdir / 'checkpoint.ckpt')
+  checkpoint = elements.Checkpoint(logdir / 'checkpoint.ckpt')
   checkpoint.step = step
   checkpoint.agent = agent
   checkpoint.replay = replay
@@ -115,7 +116,7 @@ def train(make_agent, make_replay, make_env, make_logger, args):
     if should_log(step):
       logger.add(agg.result())
       logger.add(epstats.result(), prefix='epstats')
-      logger.add(embodied.timer.stats(), prefix='timer')
+      logger.add(elements.timer.stats(), prefix='timer')
       logger.add(replay.stats(), prefix='replay')
       logger.add(usage.stats(), prefix='usage')
       logger.add({'fps/policy': policy_fps.result()})

@@ -6,8 +6,10 @@ from collections import defaultdict, deque
 from functools import partial as bind
 
 import cloudpickle
+import elements
 import embodied
 import numpy as np
+import zerofun
 
 prefix = lambda d, p: {f'{p}/{k}': v for k, v in d.items()}
 
@@ -17,7 +19,7 @@ def combined(make_agent, make_replay, make_env, make_logger, args):
     assert args.actor_batch <= args.num_envs, (args.actor_batch, args.num_envs)
   for key in ('actor_addr', 'replay_addr', 'logger_addr'):
     if '{auto}' in args[key]:
-      port = embodied.distr.get_free_port()
+      port = zerofun.get_free_port()
       args = args.update({key: args[key].format(auto=port)})
 
   make_env = cloudpickle.dumps(make_env)
@@ -26,16 +28,16 @@ def combined(make_agent, make_replay, make_env, make_logger, args):
   make_logger = cloudpickle.dumps(make_logger)
 
   workers = [
-      embodied.distr.Process(parallel_env, make_env, i, args, True)
+      zerofun.Process(parallel_env, make_env, i, args)
       for i in range(args.num_envs)]
   if args.agent_process:
-    workers.append(embodied.distr.Process(parallel_agent, make_agent, args))
+    workers.append(zerofun.Process(parallel_agent, make_agent, args))
   else:
-    workers.append(embodied.distr.Thread(parallel_agent, make_agent, args))
+    workers.append(zerofun.Thread(parallel_agent, make_agent, args))
   if not args.remote_replay:
-    workers.append(embodied.distr.Process(parallel_replay, make_replay, args))
-  workers.append(embodied.distr.Process(parallel_logger, make_logger, args))
-  embodied.distr.run(workers, args.duration, exit_after=True)
+    workers.append(zerofun.Process(parallel_replay, make_replay, args))
+  workers.append(zerofun.Process(parallel_logger, make_logger, args))
+  zerofun.run(workers, args.duration, exit_after=True)
 
 
 def parallel_agent(make_agent, args):
@@ -44,47 +46,47 @@ def parallel_agent(make_agent, args):
   agent = make_agent()
   barrier = threading.Barrier(2)
   workers = []
-  workers.append(embodied.distr.Thread(parallel_actor, agent, barrier, args))
-  workers.append(embodied.distr.Thread(parallel_learner, agent, barrier, args))
-  embodied.distr.run(workers, args.duration)
+  workers.append(zerofun.Thread(parallel_actor, agent, barrier, args))
+  workers.append(zerofun.Thread(parallel_learner, agent, barrier, args))
+  zerofun.run(workers, args.duration)
 
 
 def parallel_actor(agent, barrier, args):
 
   islist = lambda x: isinstance(x, list)
   initial = agent.init_policy(args.actor_batch)
-  initial = embodied.tree.map(lambda x: x[0], initial, isleaf=islist)
+  initial = elements.tree.map(lambda x: x[0], initial, isleaf=islist)
   allstates = defaultdict(lambda: initial)
   barrier.wait()  # Do not collect data before learner restored checkpoint.
-  fps = embodied.FPS()
+  fps = elements.FPS()
 
-  should_log = embodied.when.Clock(args.log_every)
-  logger = embodied.distr.Client(
+  should_log = elements.when.Clock(args.log_every)
+  logger = zerofun.Client(
       args.logger_addr, 'ActorLogger', args.ipv6,
       maxinflight=8 * args.actor_threads, connect=True)
-  replay = embodied.distr.Client(
+  replay = zerofun.Client(
       args.replay_addr, 'ActorReplay', args.ipv6,
       maxinflight=8 * args.actor_threads, connect=True)
 
-  @embodied.timer.section('actor_workfn')
+  @elements.timer.section('actor_workfn')
   def workfn(obs):
     envids = obs.pop('envid')
     fps.step(obs['is_first'].size)
-    with embodied.timer.section('get_states'):
+    with elements.timer.section('get_states'):
       states = [allstates[a] for a in envids]
-      states = embodied.tree.map(lambda *xs: list(xs), *states)
+      states = elements.tree.map(lambda *xs: list(xs), *states)
     acts, outs, states = agent.policy(obs, states)
     assert all(k not in acts for k in outs), (
         list(outs.keys()), list(acts.keys()))
     acts['reset'] = obs['is_last'].copy()
-    with embodied.timer.section('put_states'):
+    with elements.timer.section('put_states'):
       for i, a in enumerate(envids):
-        allstates[a] = embodied.tree.map(lambda x: x[i], states, isleaf=islist)
+        allstates[a] = elements.tree.map(lambda x: x[i], states, isleaf=islist)
     trans = {'envids': envids, **obs, **acts, **outs}
     [x.setflags(write=False) for x in trans.values()]
     return acts, trans
 
-  @embodied.timer.section('actor_donefn')
+  @elements.timer.section('actor_donefn')
   def donefn(trans):
     replay.add_batch(trans)
     logger.trans(trans)
@@ -97,38 +99,38 @@ def parallel_actor(agent, barrier, args):
       stats.update(prefix(replay.stats(), 'client/actor_replay'))
       logger.add(stats)
 
-  server = embodied.distr.ProcServer(args.actor_addr, 'Actor', args.ipv6)
+  server = zerofun.ProcServer(args.actor_addr, 'Actor', args.ipv6)
   server.bind('act', workfn, donefn, args.actor_threads, args.actor_batch)
   server.run()
 
 
 def parallel_learner(agent, barrier, args):
 
-  logdir = embodied.Path(args.logdir)
-  agg = embodied.Agg()
-  usage = embodied.Usage(**args.usage)
-  should_log = embodied.when.Clock(args.log_every)
-  should_eval = embodied.when.Clock(args.eval_every)
-  should_save = embodied.when.Clock(args.save_every)
-  fps = embodied.FPS()
+  logdir = elements.Path(args.logdir)
+  agg = elements.Agg()
+  usage = elements.Usage(**args.usage)
+  should_log = elements.when.Clock(args.log_every)
+  should_eval = elements.when.Clock(args.eval_every)
+  should_save = elements.when.Clock(args.save_every)
+  fps = elements.FPS()
   batch_steps = args.batch_size * (args.batch_length - args.replay_context)
 
-  checkpoint = embodied.Checkpoint(logdir / 'checkpoint.ckpt')
+  checkpoint = elements.Checkpoint(logdir / 'checkpoint.ckpt')
   checkpoint.agent = agent
   if args.from_checkpoint:
     checkpoint.load(args.from_checkpoint)
   checkpoint.load_or_save()
-  logger = embodied.distr.Client(
+  logger = zerofun.Client(
       args.logger_addr, 'LearnerLogger', args.ipv6,
       maxinflight=1, connect=True)
-  updater = embodied.distr.Client(
+  updater = zerofun.Client(
       args.replay_addr, 'LearnerReplayUpdater', args.ipv6,
       maxinflight=8, connect=True)
   barrier.wait()
 
   replays = []
   def parallel_dataset(source, prefetch=2):
-    replay = embodied.distr.Client(
+    replay = zerofun.Client(
         args.replay_addr, f'LearnerReplay{len(replays)}', args.ipv6,
         connect=True)
     replays.append(replay)
@@ -147,27 +149,27 @@ def parallel_learner(agent, barrier, args):
 
   while True:
 
-    with embodied.timer.section('learner_batch_next'):
+    with elements.timer.section('learner_batch_next'):
       batch = next(dataset_train)
-    with embodied.timer.section('learner_train_step'):
+    with elements.timer.section('learner_train_step'):
       outs, carry, mets = agent.train(batch, carry)
     if 'replay' in outs:
-      with embodied.timer.section('learner_replay_update'):
+      with elements.timer.section('learner_replay_update'):
         updater.update(outs['replay'])
     time.sleep(0.0001)
     agg.add(mets)
     fps.step(batch_steps)
 
     if should_eval():
-      with embodied.timer.section('learner_eval'):
+      with elements.timer.section('learner_eval'):
         mets, _ = agent.report(next(dataset_report), carry_report)
         logger.add(prefix(mets, 'report'))
 
     if should_log():
-      with embodied.timer.section('learner_metrics'):
+      with elements.timer.section('learner_metrics'):
         stats = {}
         stats.update(prefix(agg.result(), 'train'))
-        stats.update(prefix(embodied.timer.stats(), 'timer/agent'))
+        stats.update(prefix(elements.timer.stats(), 'timer/agent'))
         stats.update(prefix(usage.stats(), 'usage/agent'))
         stats.update(prefix(logger.stats(), 'client/learner_logger'))
         stats.update(prefix(replays[0].stats(), 'client/learner_replay0'))
@@ -187,14 +189,14 @@ def parallel_replay(make_replay, args):
   dataset_report = iter(replay.dataset(
       args.batch_size, args.batch_length_eval))
 
-  should_log = embodied.when.Clock(args.log_every)
-  logger = embodied.distr.Client(
+  should_log = elements.when.Clock(args.log_every)
+  logger = zerofun.Client(
       args.logger_addr, 'ReplayLogger', args.ipv6,
       maxinflight=1, connect=True)
-  usage = embodied.Usage(**args.usage.update(nvsmi=False))
+  usage = elements.Usage(**args.usage.update(nvsmi=False))
 
-  should_save = embodied.when.Clock(args.save_every)
-  cp = embodied.Checkpoint(embodied.Path(args.logdir) / 'replay.ckpt')
+  should_save = elements.when.Clock(args.save_every)
+  cp = elements.Checkpoint(elements.Path(args.logdir) / 'replay.ckpt')
   cp.replay = replay
   cp.load_or_save()
 
@@ -203,7 +205,7 @@ def parallel_replay(make_replay, args):
       replay.add({k: v[i] for k, v in data.items()}, envid)
     return {}
 
-  server = embodied.distr.Server(args.replay_addr, 'Replay', args.ipv6)
+  server = zerofun.Server(args.replay_addr, 'Replay', args.ipv6)
   server.bind('add_batch', add_batch, workers=1)
   server.bind('sample_batch_train', lambda _: next(dataset_train), workers=1)
   server.bind('sample_batch_report', lambda _: next(dataset_report), workers=1)
@@ -215,7 +217,7 @@ def parallel_replay(make_replay, args):
       time.sleep(1)
       if should_log():
         stats = prefix(replay.stats(), 'replay')
-        stats.update(prefix(embodied.timer.stats(), 'timer/replay'))
+        stats.update(prefix(elements.timer.stats(), 'timer/replay'))
         stats.update(prefix(usage.stats(), 'usage/replay'))
         stats.update(prefix(logger.stats(), 'client/replay_logger'))
         stats.update(prefix(server.stats(), 'server/replay'))
@@ -227,17 +229,17 @@ def parallel_logger(make_logger, args):
     make_logger = cloudpickle.loads(make_logger)
 
   logger = make_logger()
-  should_log = embodied.when.Clock(args.log_every)
-  usage = embodied.Usage(**args.usage.update(nvsmi=False))
+  should_log = elements.when.Clock(args.log_every)
+  usage = elements.Usage(**args.usage.update(nvsmi=False))
 
-  should_save = embodied.when.Clock(args.save_every)
-  cp = embodied.Checkpoint(embodied.Path(args.logdir) / 'logger.ckpt')
+  should_save = elements.when.Clock(args.save_every)
+  cp = elements.Checkpoint(elements.Path(args.logdir) / 'logger.ckpt')
   cp.step = logger.step
   cp.load_or_save()
 
-  parallel = embodied.Agg()
-  epstats = embodied.Agg()
-  episodes = defaultdict(embodied.Agg)
+  parallel = elements.Agg()
+  epstats = elements.Agg()
+  episodes = defaultdict(elements.Agg)
   updated = defaultdict(lambda: None)
   dones = defaultdict(lambda: True)
 
@@ -245,11 +247,11 @@ def parallel_logger(make_logger, args):
   log_keys_sum = re.compile(args.log_keys_sum)
   log_keys_avg = re.compile(args.log_keys_avg)
 
-  @embodied.timer.section('logger_addfn')
+  @elements.timer.section('logger_addfn')
   def addfn(metrics):
     logger.add(metrics)
 
-  @embodied.timer.section('logger_transfn')
+  @elements.timer.section('logger_transfn')
   def transfn(trans):
     now = time.time()
     envids = trans.pop('envids')
@@ -302,7 +304,7 @@ def parallel_logger(make_logger, args):
         del episodes[addr]
         del updated[addr]
 
-  server = embodied.distr.Server(args.logger_addr, 'Logger', args.ipv6)
+  server = zerofun.Server(args.logger_addr, 'Logger', args.ipv6)
   server.bind('add', addfn)
   server.bind('trans', transfn)
   with server:
@@ -311,34 +313,33 @@ def parallel_logger(make_logger, args):
       should_save() and cp.save()
       time.sleep(1)
       if should_log():
-        with embodied.timer.section('logger_metrics'):
+        with elements.timer.section('logger_metrics'):
           logger.add(parallel.result(), prefix='parallel')
           logger.add(epstats.result(), prefix='epstats')
-          logger.add(embodied.timer.stats(), prefix='timer/logger')
+          logger.add(elements.timer.stats(), prefix='timer/logger')
           logger.add(usage.stats(), prefix='usage/logger')
           logger.add(server.stats(), prefix='server/logger')
         logger.write()
 
 
-def parallel_env(make_env, envid, args, logging=False):
+def parallel_env(make_env, envid, args):
   if isinstance(make_env, bytes):
     make_env = cloudpickle.loads(make_env)
   assert envid >= 0, envid
   name = f'Env{envid}'
+  _print = lambda x: elements.print(f'[{name}] {x}', flush=True)
 
-  _print = lambda x: embodied.print(f'[{name}] {x}', flush=True)
-  should_log = embodied.when.Clock(args.log_every)
-  if logging:
-    logger = embodied.distr.Client(
+  should_log = elements.when.Clock(args.log_every)
+  fps = elements.FPS()
+  if envid == 0:
+    logger = zerofun.Client(
         args.logger_addr, f'{name}Logger', args.ipv6,
         maxinflight=1, connect=True)
-  fps = embodied.FPS()
-  if envid == 0:
-    usage = embodied.Usage(**args.usage.update(nvsmi=False))
+    usage = elements.Usage(**args.usage.update(nvsmi=False))
 
   _print('Make env')
   env = make_env(envid)
-  actor = embodied.distr.Client(
+  actor = zerofun.Client(
       args.actor_addr, name, args.ipv6, identity=envid,
       pings=10, maxage=60, connect=True)
 
@@ -350,7 +351,7 @@ def parallel_env(make_env, envid, args, logging=False):
       act['reset'] = True
       score, length = 0, 0
 
-    with embodied.timer.section('env_step'):
+    with elements.timer.section('env_step'):
       obs = env.step(act)
     obs = {k: np.asarray(v, order='C') for k, v in obs.items()}
     score += obs['reward']
@@ -360,25 +361,25 @@ def parallel_env(make_env, envid, args, logging=False):
     if done:
       _print(f'Episode of length {length} with score {score:.2f}')
 
-    with embodied.timer.section('env_request'):
+    with elements.timer.section('env_request'):
       future = actor.act({'envid': envid, **obs})
     try:
-      with embodied.timer.section('env_response'):
+      with elements.timer.section('env_response'):
         act = future.result()
-    except embodied.distr.NotAliveError:
+    except zerofun.NotAliveError:
       # Wait until we are connected again, so we don't unnecessarily reset the
       # environment hundreds of times while the server is unavailable.
       _print('Lost connection to server')
       actor.connect()
       done = True
-    except embodied.distr.RemoteError as e:
+    except zerofun.RemoteError as e:
       _print(f'Shutting down env due to agent error: {e}')
       sys.exit(0)
 
-    if should_log() and logging and envid == 0:
+    if should_log() and envid == 0:
       stats = {f'fps/env{envid}': fps.result()}
       stats.update(prefix(usage.stats(), f'usage/env{envid}'))
       stats.update(prefix(logger.stats(), f'client/env{envid}_logger'))
       stats.update(prefix(actor.stats(), f'client/env{envid}_actor'))
-      stats.update(prefix(embodied.timer.stats(), f'timer/env{envid}'))
+      stats.update(prefix(elements.timer.stats(), f'timer/env{envid}'))
       logger.add(stats)

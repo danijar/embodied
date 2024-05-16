@@ -1,9 +1,8 @@
 import queue as queuelib
 
+import elements
 import numpy as np
-
-from . import timer
-from .. import distr
+import zerofun
 
 
 class Prefetch:
@@ -12,7 +11,7 @@ class Prefetch:
     self.source = source
     self.transform = transform
     self.queue = queuelib.Queue(amount)
-    self.worker = distr.StoppableThread(self._worker, start=True)
+    self.worker = zerofun.StoppableThread(self._worker, start=True)
 
   def close(self):
     self.worker.stop()
@@ -33,10 +32,10 @@ class Prefetch:
     # it = iter(self.source)
     it = self.source()
     while context.running:
-      with timer.section('prefetch_source'):
+      with elements.timer.section('prefetch_source'):
         data = next(it)
       if self.transform:
-        with timer.section('prefetch_transform'):
+        with elements.timer.section('prefetch_transform'):
           data = self.transform(data)
       self.queue.put(data)
 
@@ -46,7 +45,7 @@ class Batch:
   def __init__(self, sources, amount=1):
     self.sources = sources
     self.queue = queuelib.Queue(amount)
-    self.worker = distr.StoppableThread(self._worker, start=True)
+    self.worker = zerofun.StoppableThread(self._worker, start=True)
 
   def close(self):
     self.worker.stop()
@@ -63,8 +62,8 @@ class Batch:
   def _worker(self, context):
     its = [source() for source in self.sources]
     while context.running:
-      with timer.section('batch_source'):
+      with elements.timer.section('batch_source'):
         data = [next(it) for it in its]
-      with timer.section('batch_stack'):
+      with elements.timer.section('batch_stack'):
         data = {k: np.stack([x[k] for x in data]) for k in data[0]}
       self.queue.put(data)

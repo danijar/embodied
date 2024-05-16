@@ -449,10 +449,7 @@ class Optimizer(nj.Module):
       wdmaskfn = lambda params: {k: bool(pattern.search(k)) for k in params}
       chain.append(optax.add_decayed_weights(self.wd, wdmaskfn))
 
-    if isinstance(self.lr, dict):
-      chain.append(scale_by_groups({pfx: -lr for pfx, lr in self.lr.items()}))
-    else:
-      chain.append(optax.scale(-self.lr))
+    chain.append(optax.scale(-self.lr))
 
     self.chain = optax.chain(*chain)
     self.step = nj.Variable(jnp.array, 0, i32, name='step')
@@ -614,47 +611,6 @@ class Optimizer(nj.Module):
             prop_mean=jnp.stack([x.mean() for x in pr]).mean(),
         ).items()})
     return metrics
-
-
-def expand_groups(groups, keys):
-  if isinstance(groups, (float, int)):
-    return {key: groups for key in keys}
-  groups = {
-      group if group.endswith('/') else f'{group}/': value
-      for group, value in groups.items()}
-  assignment = {}
-  groupcount = collections.defaultdict(int)
-  for key in keys:
-    matches = [prefix for prefix in groups if key.startswith(prefix)]
-    if not matches:
-      raise ValueError(
-          f'Parameter {key} not fall into any of the groups:\n' +
-          ''.join(f'- {group}\n' for group in groups.keys()))
-    if len(matches) > 1:
-      raise ValueError(
-          f'Parameter {key} fall into more than one of the groups:\n' +
-          ''.join(f'- {group}\n' for group in groups.keys()))
-    assignment[key] = matches[0]
-    groupcount[matches[0]] += 1
-  for group in groups.keys():
-    if not groupcount[group]:
-      raise ValueError(
-          f'Group {group} did not match any of the {len(keys)} keys.')
-  expanded = {key: groups[assignment[key]] for key in keys}
-  return expanded
-
-
-def scale_by_groups(groups):
-
-  def init_fn(params):
-    return ()
-
-  def update_fn(updates, state, params=None):
-    scales = expand_groups(groups, updates.keys())
-    updates = treemap(lambda u, s: u * s, updates, scales)
-    return updates, state
-
-  return optax.GradientTransformation(init_fn, update_fn)
 
 
 def scale_by_agc(clip=0.03, pmin=1e-3):

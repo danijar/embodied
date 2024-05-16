@@ -4,6 +4,7 @@ from functools import partial as bind
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
+import elements
 import embodied
 import numpy as np
 

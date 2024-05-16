@@ -1,6 +1,7 @@
 import re
 from functools import partial as bind
 
+import elements
 import embodied
 import jax
 import jax.numpy as jnp
@@ -58,7 +59,7 @@ class Model(nj.Module):
 class Agent(nj.Module):
 
   configs = yaml.YAML(typ='safe').load(
-      (embodied.Path(__file__).parent / 'configs.yaml').read())
+      (elements.Path(__file__).parent / 'configs.yaml').read())
 
   def __init__(self, obs_space, act_space, config):
     self.config = config
@@ -106,7 +107,7 @@ class Agent(nj.Module):
     return ()
 
   def policy(self, obs, carry, mode='train'):
-    self.config.jax.jit and embodied.print(
+    self.config.jax.jit and elements.print(
         'Tracing policy function', color='yellow')
     lat, prevact = carry
     outs = {}
@@ -124,7 +125,7 @@ class Agent(nj.Module):
     return acts, outs, (lat, acts)
 
   def train(self, data, carry):
-    self.config.jax.jit and embodied.print(
+    self.config.jax.jit and elements.print(
         'Tracing train function', color='yellow')
     data = self.preprocess(data)
     if self.config.recurrent and self.config.replay_context:
@@ -139,7 +140,7 @@ class Agent(nj.Module):
     return {}, carry, metrics
 
   def report(self, data, carry):
-    self.config.jax.jit and embodied.print(
+    self.config.jax.jit and elements.print(
         'Tracing report function', color='yellow')
     return {}, carry
 

@@ -2,6 +2,7 @@ import re
 from collections import defaultdict
 from functools import partial as bind
 
+import elements
 import embodied
 import numpy as np
 
@@ -12,18 +13,18 @@ def eval_only(make_agent, make_env, make_logger, args):
   agent = make_agent()
   logger = make_logger()
 
-  logdir = embodied.Path(args.logdir)
+  logdir = elements.Path(args.logdir)
   logdir.mkdir()
   print('Logdir', logdir)
   step = logger.step
-  usage = embodied.Usage(**args.usage)
-  agg = embodied.Agg()
-  epstats = embodied.Agg()
-  episodes = defaultdict(embodied.Agg)
-  should_log = embodied.when.Clock(args.log_every)
-  policy_fps = embodied.FPS()
+  usage = elements.Usage(**args.usage)
+  agg = elements.Agg()
+  epstats = elements.Agg()
+  episodes = defaultdict(elements.Agg)
+  should_log = elements.when.Clock(args.log_every)
+  policy_fps = elements.FPS()
 
-  @embodied.timer.section('log_step')
+  @elements.timer.section('log_step')
   def log_step(tran, worker):
 
     episode = episodes[worker]
@@ -63,7 +64,7 @@ def eval_only(make_agent, make_env, make_logger, args):
   driver.on_step(lambda tran, _: policy_fps.step())
   driver.on_step(log_step)
 
-  checkpoint = embodied.Checkpoint()
+  checkpoint = elements.Checkpoint()
   checkpoint.agent = agent
   checkpoint.load(args.from_checkpoint, keys=['agent'])
 
@@ -75,7 +76,7 @@ def eval_only(make_agent, make_env, make_logger, args):
     if should_log(step):
       logger.add(agg.result())
       logger.add(epstats.result(), prefix='epstats')
-      logger.add(embodied.timer.stats(), prefix='timer')
+      logger.add(elements.timer.stats(), prefix='timer')
       logger.add(usage.stats(), prefix='usage')
       logger.add({'fps/policy': policy_fps.result()})
       logger.write()

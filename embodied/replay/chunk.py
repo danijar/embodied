@@ -1,6 +1,6 @@
 import io
 
-import embodied
+import elements
 import numpy as np
 
 
@@ -9,9 +9,9 @@ class Chunk:
   __slots__ = ('time', 'uuid', 'succ', 'length', 'size', 'data', 'saved')
 
   def __init__(self, size=1024):
-    self.time = embodied.timestamp(millis=True)
-    self.uuid = embodied.uuid()
-    self.succ = embodied.uuid(0)
+    self.time = elements.timestamp(millis=True)
+    self.uuid = elements.UUID()
+    self.succ = elements.UUID(0)
     # self.uuid = int(np.random.randint(1, 2 * 63))
     # self.succ = 0
     self.length = 0
@@ -59,11 +59,11 @@ class Chunk:
     assert 0 <= index and index + length <= self.length
     return {k: v[index: index + length] for k, v in self.data.items()}
 
-  @embodied.timer.section('chunk_save')
+  @elements.timer.section('chunk_save')
   def save(self, directory, log=False):
     assert not self.saved
     self.saved = True
-    filename = embodied.Path(directory) / self.filename
+    filename = elements.Path(directory) / self.filename
     data = {k: v[:self.length] for k, v in self.data.items()}
     with io.BytesIO() as stream:
       np.savez_compressed(stream, **data)
@@ -77,7 +77,7 @@ class Chunk:
     time, uuid, succ, length = filename.stem.split('-')
     length = int(length)
     try:
-      with embodied.Path(filename).open('rb') as f:
+      with elements.Path(filename).open('rb') as f:
         data = np.load(f)
         data = {k: data[k] for k in data.keys()}
     except Exception as e:
@@ -88,10 +88,8 @@ class Chunk:
         return None
     chunk = cls(length)
     chunk.time = time
-    chunk.uuid = embodied.uuid(uuid)
-    chunk.succ = embodied.uuid(succ)
-    # chunk.uuid = int(uuid)
-    # chunk.succ = int(succ)
+    chunk.uuid = elements.UUID(uuid)
+    chunk.succ = elements.UUID(succ)
     chunk.length = length
     chunk.data = data
     chunk.saved = True

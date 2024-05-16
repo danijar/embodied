@@ -4,7 +4,7 @@ from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial as bind
 
-import embodied
+import elements
 import numpy as np
 
 from . import chunk as chunklib
@@ -42,7 +42,7 @@ class Replay:
 
     self.current = {}
     self.streams = defaultdict(deque)
-    self.rwlock = embodied.RWLock()
+    self.rwlock = elements.RWLock()
 
     self.online = online
     if online:
@@ -50,7 +50,7 @@ class Replay:
       self.queue = deque()
 
     if directory:
-      self.directory = embodied.Path(directory)
+      self.directory = elements.Path(directory)
       self.directory.mkdir()
       self.workers = ThreadPoolExecutor(16, 'replay_saver')
       self.saved = set()
@@ -94,7 +94,7 @@ class Replay:
       self.metrics[key] = 0
     return stats
 
-  @embodied.timer.section('replay_add')
+  @elements.timer.section('replay_add')
   def add(self, step, worker=0):
     with self.rwlock.reading:
 
@@ -143,7 +143,7 @@ class Replay:
       if self.online:
         self.lengths[worker] += 1
 
-  @embodied.timer.section('replay_update')
+  @elements.timer.section('replay_update')
   def update(self, data):
     data = data.copy()
     stepid = data.pop('stepid')
@@ -158,7 +158,7 @@ class Replay:
     if data:
       for i, stepid in enumerate(stepid):
         stepid = stepid[0].tobytes()
-        chunkid = embodied.uuid(stepid[:-4])
+        chunkid = elements.UUID(stepid[:-4])
         index = int.from_bytes(stepid[-4:], 'big')
         values = {k: v[i] for k, v in data.items()}
         try:
@@ -166,7 +166,7 @@ class Replay:
         except KeyError:
           pass
 
-  @embodied.timer.section('replay_sample')
+  @elements.timer.section('replay_sample')
   def _sample(self):
     dur = self._wait(self.limiter.want_sample, 'Replay sample is waiting')
     self.limiter.sample()
@@ -181,7 +181,7 @@ class Replay:
           chunkid, index = self.queue.popleft()
           is_online = True
         else:
-          with embodied.timer.section('sample'):
+          with elements.timer.section('sample'):
             itemid = self.sampler()
           chunkid, index = self.items[itemid]
           is_online = False
@@ -220,13 +220,13 @@ class Replay:
     chunk = self.chunks[chunkid]
     available = chunk.length - index
     if available >= self.length:
-      with embodied.timer.section('get_slice'):
+      with elements.timer.section('get_slice'):
         seq = chunk.slice(index, self.length)
         if not concat:
           seq = {k: [v] for k, v in seq.items()}
         return seq
     else:
-      with embodied.timer.section('get_compose'):
+      with elements.timer.section('get_compose'):
         parts = [chunk.slice(index, available)]
         remaining = self.length - available
         while remaining > 0:
@@ -244,10 +244,10 @@ class Replay:
     chunk = self.chunks[chunkid]
     available = chunk.length - index
     if available >= length:
-      with embodied.timer.section('set_slice'):
+      with elements.timer.section('set_slice'):
         return chunk.update(index, length, values)
     else:
-      with embodied.timer.section('set_compose'):
+      with elements.timer.section('set_compose'):
         part = {k: v[:available] for k, v in values.items()}
         values = {k: v[available:] for k, v in values.items()}
         chunk.update(index, available, part)
@@ -277,7 +277,7 @@ class Replay:
           data = self._annotate_batch(data, is_online, is_first=(t == 0))
           yield data
 
-  @embodied.timer.section('assemble_batch')
+  @elements.timer.section('assemble_batch')
   def _assemble_batch(self, seqs, start, stop):
     shape = (len(seqs), stop - start)
     data = {
@@ -299,7 +299,7 @@ class Replay:
           break
     return data
 
-  @embodied.timer.section('annotate_batch')
+  @elements.timer.section('annotate_batch')
   def _annotate_batch(self, data, is_online, is_first):
     data = data.copy()
     if self.online:
@@ -316,7 +316,7 @@ class Replay:
         data['is_last'] = data['is_last'] | next_is_first
     return data
 
-  @embodied.timer.section('replay_save')
+  @elements.timer.section('replay_save')
   def save(self):
     if self.directory:
       with self.rwlock.writing:
@@ -333,7 +333,7 @@ class Replay:
           [promise.result() for promise in promises]
     return {'limiter': self.limiter.save()}
 
-  @embodied.timer.section('replay_load')
+  @elements.timer.section('replay_load')
   def load(self, data=None, directory=None, amount=None):
 
     directory = directory or self.directory
@@ -341,7 +341,7 @@ class Replay:
     if not directory:
       return
     revsorted = lambda x: list(reversed(sorted(list(x))))
-    directory = embodied.Path(directory)
+    directory = elements.Path(directory)
     names_loaded = revsorted(x.filename for x in list(self.chunks.values()))
     names_ondisk = revsorted(x.name for x in directory.glob('*.npz'))
     names_ondisk = [x for x in names_ondisk if x not in names_loaded]
@@ -349,7 +349,7 @@ class Replay:
       return
 
     numitems = self._numitems(names_loaded + names_ondisk)
-    uuids = [embodied.uuid(x.split('-')[1]) for x in names_ondisk]
+    uuids = [elements.UUID(x.split('-')[1]) for x in names_ondisk]
     total = 0
     numchunks = 0
     for uuid in uuids:
@@ -386,7 +386,7 @@ class Replay:
     if data and 'limiter' in data:
       self.limiter.load(data.pop('limiter'))
 
-  @embodied.timer.section('complete_chunk')
+  @elements.timer.section('complete_chunk')
   def _complete(self, chunk, worker):
     succ = chunklib.Chunk(self.chunksize)
     with self.refs_lock:
@@ -399,10 +399,10 @@ class Replay:
 
   def _numitems(self, chunks):
     chunks = [x.filename if hasattr(x, 'filename') else x for x in chunks]
-    chunks = list(reversed(sorted([embodied.Path(x).stem for x in chunks])))
+    chunks = list(reversed(sorted([elements.Path(x).stem for x in chunks])))
     times, uuids, succs, lengths = zip(*[x.split('-') for x in chunks])
-    uuids = [embodied.uuid(x) for x in uuids]
-    succs = [embodied.uuid(x) for x in succs]
+    uuids = [elements.UUID(x) for x in uuids]
+    succs = [elements.UUID(x) for x in succs]
     lengths = {k: int(v) for k, v in zip(uuids, lengths)}
     future = {}
     for uuid, succ in zip(uuids, succs):
@@ -423,7 +423,7 @@ class Replay:
         if allowed:
           break
         dur = time.time() - start
-        embodied.print(f'{message} {dur:.1f}s ({reason})')
+        elements.print(f'{message} {dur:.1f}s ({reason})')
         last_notify = time.time()
       time.sleep(sleep)
     return time.time() - start
