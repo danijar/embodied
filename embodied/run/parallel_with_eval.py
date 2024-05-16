@@ -12,7 +12,9 @@ import numpy as np
 prefix = lambda d, p: {f'{p}/{k}': v for k, v in d.items()}
 
 
-def combined(make_agent, make_replay, make_env, make_logger, args):
+def combined(
+    make_agent, make_replay, make_replay_eval, make_env, make_env_eval,
+    make_logger, args):
   if args.num_envs:
     assert args.actor_batch <= args.num_envs, (args.actor_batch, args.num_envs)
   for key in ('actor_addr', 'replay_addr', 'logger_addr'):
@@ -20,20 +22,27 @@ def combined(make_agent, make_replay, make_env, make_logger, args):
       port = embodied.distr.get_free_port()
       args = args.update({key: args[key].format(auto=port)})
 
-  make_env = cloudpickle.dumps(make_env)
   make_agent = cloudpickle.dumps(make_agent)
   make_replay = cloudpickle.dumps(make_replay)
+  make_replay_eval = cloudpickle.dumps(make_replay_eval)
+  make_env = cloudpickle.dumps(make_env)
+  make_env_eval = cloudpickle.dumps(make_env_eval)
   make_logger = cloudpickle.dumps(make_logger)
 
-  workers = [
-      embodied.distr.Process(parallel_env, make_env, i, args, True)
-      for i in range(args.num_envs)]
+  workers = []
+  for i in range(args.num_envs):
+    workers.append(embodied.distr.Process(
+        parallel_env, make_env, i, args, True))
+  for i in range(args.num_envs_eval):
+    workers.append(embodied.distr.Process(
+        parallel_env, make_env_eval, args.num_envs + i, args, True, True))
   if args.agent_process:
     workers.append(embodied.distr.Process(parallel_agent, make_agent, args))
   else:
     workers.append(embodied.distr.Thread(parallel_agent, make_agent, args))
   if not args.remote_replay:
-    workers.append(embodied.distr.Process(parallel_replay, make_replay, args))
+    workers.append(embodied.distr.Process(
+        parallel_replay, make_replay, make_replay_eval, args))
   workers.append(embodied.distr.Process(parallel_logger, make_logger, args))
   embodied.distr.run(workers, args.duration, exit_after=True)
 
@@ -127,21 +136,34 @@ def parallel_learner(agent, barrier, args):
   barrier.wait()
 
   replays = []
+  received = defaultdict(int)
   def parallel_dataset(source, prefetch=2):
     replay = embodied.distr.Client(
         args.replay_addr, f'LearnerReplay{len(replays)}', args.ipv6,
         connect=True)
     replays.append(replay)
-    call = getattr(replay, source)
+    call = getattr(replay, f'sample_batch_{source}')
     futures = deque([call({}) for _ in range(prefetch)])
     while True:
       futures.append(call({}))
-      yield futures.popleft().result()
+      batch = futures.popleft().result()
+      received[source] += 1
+      yield batch
 
-  dataset_train = agent.dataset(bind(parallel_dataset, 'sample_batch_train'))
-  dataset_report = agent.dataset(bind(parallel_dataset, 'sample_batch_report'))
+  def evaluate(dataset):
+    num_batches = args.replay_length_eval // args.batch_length_eval
+    carry = agent.init_report(args.batch_size)
+    agg = embodied.Agg()
+    for _ in range(num_batches):
+      batch = next(dataset)
+      metrics, carry = agent.report(batch, carry)
+      agg.add(metrics)
+    return agg.result()
+
+  dataset_train = agent.dataset(bind(parallel_dataset, 'train'))
+  dataset_report = agent.dataset(bind(parallel_dataset, 'report'))
+  dataset_eval = agent.dataset(bind(parallel_dataset, 'eval'))
   carry = agent.init_train(args.batch_size)
-  carry_report = agent.init_report(args.batch_size)
   should_save()  # Delay first save.
   should_eval()  # Delay first eval.
 
@@ -160,8 +182,10 @@ def parallel_learner(agent, barrier, args):
 
     if should_eval():
       with embodied.timer.section('learner_eval'):
-        mets, _ = agent.report(next(dataset_report), carry_report)
-        logger.add(prefix(mets, 'report'))
+        if received['report'] > 0:
+          logger.add(prefix(evaluate(dataset_report), 'report'))
+        if received['eval'] > 0:
+          logger.add(prefix(evaluate(dataset_eval), 'eval'))
 
     if should_log():
       with embodied.timer.section('learner_metrics'):
@@ -178,13 +202,19 @@ def parallel_learner(agent, barrier, args):
       checkpoint.save()
 
 
-def parallel_replay(make_replay, args):
+def parallel_replay(make_replay, make_replay_eval, args):
   if isinstance(make_replay, bytes):
     make_replay = cloudpickle.loads(make_replay)
+  if isinstance(make_replay_eval, bytes):
+    make_replay_eval = cloudpickle.loads(make_replay_eval)
 
   replay = make_replay()
-  dataset_train = iter(replay.dataset(args.batch_size, args.batch_length))
+  replay_eval = make_replay_eval()
+  dataset_train = iter(replay.dataset(
+      args.batch_size, args.batch_length))
   dataset_report = iter(replay.dataset(
+      args.batch_size, args.batch_length_eval))
+  dataset_eval = iter(replay_eval.dataset(
       args.batch_size, args.batch_length_eval))
 
   should_log = embodied.when.Clock(args.log_every)
@@ -200,13 +230,18 @@ def parallel_replay(make_replay, args):
 
   def add_batch(data):
     for i, envid in enumerate(data.pop('envids')):
-      replay.add({k: v[i] for k, v in data.items()}, envid)
+      tran = {k: v[i] for k, v in data.items()}
+      if tran.pop('is_eval', False):
+        replay_eval.add(tran, envid)
+      else:
+        replay.add(tran, envid)
     return {}
 
   server = embodied.distr.Server(args.replay_addr, 'Replay', args.ipv6)
   server.bind('add_batch', add_batch, workers=1)
   server.bind('sample_batch_train', lambda _: next(dataset_train), workers=1)
   server.bind('sample_batch_report', lambda _: next(dataset_report), workers=1)
+  server.bind('sample_batch_eval', lambda _: next(dataset_eval), workers=1)
   server.bind('update', lambda data: replay.update(data), workers=1)
   with server:
     while True:
@@ -214,7 +249,9 @@ def parallel_replay(make_replay, args):
       should_save() and cp.save()
       time.sleep(1)
       if should_log():
-        stats = prefix(replay.stats(), 'replay')
+        stats = {}
+        stats.update(prefix(replay.stats(), 'replay'))
+        stats.update(prefix(replay_eval.stats(), 'replay_eval'))
         stats.update(prefix(embodied.timer.stats(), 'timer/replay'))
         stats.update(prefix(usage.stats(), 'usage/replay'))
         stats.update(prefix(logger.stats(), 'client/replay_logger'))
@@ -320,7 +357,7 @@ def parallel_logger(make_logger, args):
         logger.write()
 
 
-def parallel_env(make_env, envid, args, logging=False):
+def parallel_env(make_env, envid, args, logging=False, is_eval=False):
   if isinstance(make_env, bytes):
     make_env = cloudpickle.loads(make_env)
   assert envid >= 0, envid
@@ -328,7 +365,7 @@ def parallel_env(make_env, envid, args, logging=False):
 
   _print = lambda x: embodied.print(f'[{name}] {x}', flush=True)
   should_log = embodied.when.Clock(args.log_every)
-  if logging:
+  if logging and envid == 0:
     logger = embodied.distr.Client(
         args.logger_addr, f'{name}Logger', args.ipv6,
         maxinflight=1, connect=True)
@@ -353,6 +390,7 @@ def parallel_env(make_env, envid, args, logging=False):
     with embodied.timer.section('env_step'):
       obs = env.step(act)
     obs = {k: np.asarray(v, order='C') for k, v in obs.items()}
+    obs['is_eval'] = is_eval
     score += obs['reward']
     length += 1
     fps.step(1)

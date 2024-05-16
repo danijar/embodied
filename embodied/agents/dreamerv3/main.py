@@ -5,26 +5,15 @@ import sys
 import warnings
 from functools import partial as bind
 
-# def warn_with_traceback(
-#       message, category, filename, lineno, file=None, line=None):
-#   log = file if hasattr(file, 'write') else sys.stderr
-#   import traceback
-#   traceback.print_stack(file=log)
-#   log.write(warnings.formatwarning(
-#       message, category, filename, lineno, line))
-# warnings.showwarning = warn_with_traceback
+directory = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(directory.parent))
+sys.path.insert(0, str(directory.parent.parent.parent))
+__package__ = directory.name
 
 warnings.filterwarnings('ignore', '.*box bound precision lowered.*')
 warnings.filterwarnings('ignore', '.*using stateful random seeds*')
 warnings.filterwarnings('ignore', '.*is a deprecated alias for.*')
 warnings.filterwarnings('ignore', '.*truncated to dtype int32.*')
-
-directory = pathlib.Path(__file__).resolve()
-directory = directory.parent
-sys.path.append(str(directory.parent))
-sys.path.append(str(directory.parent.parent))
-sys.path.append(str(directory.parent.parent.parent))
-__package__ = directory.name
 
 import embodied
 from embodied import wrappers
@@ -43,19 +32,31 @@ def main(argv=None):
   for name in parsed.configs:
     config = config.update(agt.Agent.configs[name])
   config = embodied.Flags(config).parse(other)
-  config = config.update(logdir=config.logdir.format(
-      timestamp=embodied.timestamp()))
+  config = config.update(
+      logdir=config.logdir.format(timestamp=embodied.timestamp()),
+      replay_length=config.replay_length or config.batch_length,
+      replay_length_eval=config.replay_length_eval or config.batch_length_eval)
   args = embodied.Config(
-      **config.run, logdir=config.logdir,
-      batch_size=config.batch_size, batch_length=config.batch_length)
+      **config.run,
+      logdir=config.logdir,
+      batch_size=config.batch_size,
+      batch_length=config.batch_length,
+      batch_length_eval=config.batch_length_eval,
+      replay_length=config.replay_length,
+      replay_length_eval=config.replay_length_eval,
+      replay_context=config.replay_context)
   print('Run script:', args.script)
+  print('Logdir:', args.logdir)
 
   logdir = embodied.Path(args.logdir)
-  if args.script != 'env':
-    logdir.mkdirs()
+  if not args.script.endswith(('_env', '_replay')):
+    logdir.mkdir()
     config.save(logdir / 'config.yaml')
 
-  embodied.timer.global_timer.enabled = args.timer
+  def init():
+    embodied.timer.global_timer.enabled = args.timer
+  embodied.distr.Process.initializers.append(init)
+  init()
 
   if args.script == 'train':
     embodied.run.train(
@@ -89,17 +90,44 @@ def main(argv=None):
         bind(make_logger, config), args)
 
   elif args.script == 'parallel':
-    embodied.run.parallel(
+    embodied.run.parallel.combined(
         bind(make_agent, config),
         bind(make_replay, config, 'replay', rate_limit=True),
         bind(make_env, config),
         bind(make_logger, config), args)
 
-  elif args.script == 'env':
+  elif args.script == 'parallel_env':
     envid = args.env_replica
     if envid < 0:
       envid = int(os.environ['JOB_COMPLETION_INDEX'])
-    embodied.run.parallel_env(bind(make_env, config), envid, args)
+    embodied.run.parallel.env(
+        bind(make_env, config), envid, args, False)
+
+  elif args.script == 'parallel_replay':
+    embodied.run.parallel.replay(
+        bind(make_replay, config, 'replay', rate_limit=True), args)
+
+  elif args.script == 'parallel_with_eval':
+    embodied.run.parallel_with_eval.combined(
+        bind(make_agent, config),
+        bind(make_replay, config, 'replay', rate_limit=True),
+        bind(make_replay, config, 'replay_eval', is_eval=True),
+        bind(make_env, config),
+        bind(make_env, config),
+        bind(make_logger, config), args)
+
+  elif args.script == 'parallel_with_eval_env':
+    envid = args.env_replica
+    if envid < 0:
+      envid = int(os.environ['JOB_COMPLETION_INDEX'])
+    is_eval = envid >= args.num_envs
+    embodied.run.parallel_with_eval.parallel_env(
+        bind(make_env, config), envid, args, True, is_eval)
+
+  elif args.script == 'parallel_with_eval_replay':
+    embodied.run.parallel_with_eval.parallel_replay(
+        bind(make_replay, config, 'replay', rate_limit=True),
+        bind(make_replay, config, 'replay_eval', is_eval=True), args)
 
   else:
     raise NotImplementedError(args.script)
@@ -126,29 +154,45 @@ def make_logger(config):
       embodied.logger.JSONLOutput(logdir, 'scores.jsonl', 'episode/score'),
       embodied.logger.TensorBoardOutput(
           logdir, config.run.log_video_fps, config.tensorboard_videos),
+      # embodied.logger.WandbOutput(logdir.name, ...),
   ], multiplier)
   return logger
 
 
 def make_replay(config, directory=None, is_eval=False, rate_limit=False):
   directory = directory and embodied.Path(config.logdir) / directory
-  size = config.replay_size // 10 if is_eval else config.replay_size
+  size = int(config.replay.size / 10 if is_eval else config.replay.size)
+  length = config.replay_length_eval if is_eval else config.replay_length
   kwargs = {}
-  kwargs['online'] = config.replay_online
+  kwargs['online'] = config.replay.online
   if rate_limit and config.run.train_ratio > 0:
-    kwargs['samples_per_insert'] = config.run.train_ratio / config.batch_length
-    kwargs['tolerance'] = 10 * config.batch_size
-    kwargs['min_size'] = max(config.batch_size, config.run.train_fill)
-  replay = embodied.replay.Replay(
-      config.batch_length, size, directory, **kwargs)
+    kwargs['samples_per_insert'] = config.run.train_ratio / (
+        length - config.replay_context)
+    kwargs['tolerance'] = 5 * config.batch_size
+    kwargs['min_size'] = min(
+        max(config.batch_size, config.run.train_fill), size)
+  selectors = embodied.replay.selectors
+  if config.replay.fracs.uniform < 1 and not is_eval:
+    assert config.jax.compute_dtype in ('bfloat16', 'float32'), (
+        'Gradient scaling for low-precision training can produce invalid loss '
+        'outputs that are incompatible with prioritized replay.')
+    import numpy as np
+    recency = 1.0 / np.arange(1, size + 1) ** config.replay.recexp
+    kwargs['selector'] = selectors.Mixture(dict(
+        uniform=selectors.Uniform(),
+        priority=selectors.Prioritized(**config.replay.prio),
+        recency=selectors.Recency(recency),
+    ), config.replay.fracs)
+  kwargs['chunksize'] = config.replay.chunksize
+  replay = embodied.replay.Replay(length, size, directory, **kwargs)
   return replay
 
 
 def make_env(config, index, **overrides):
   suite, task = config.task.split('_', 1)
-  if suite == 'procgen':
+  if suite == 'memmaze':
     from embodied.envs import from_gym
-    import procgen  # noqa
+    import memory_maze  # noqa
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',
@@ -162,8 +206,10 @@ def make_env(config, index, **overrides):
       'loconav': 'embodied.envs.loconav:LocoNav',
       'pinpad': 'embodied.envs.pinpad:PinPad',
       'langroom': 'embodied.envs.langroom:LangRoom',
-      'procgen': lambda task, **kw: from_gym.FromGym(
-          f'procgen:procgen-{task}-v0', **kw),
+      'procgen': 'embodied.envs.procgen:ProcGen',
+      'bsuite': 'embodied.envs.bsuite:BSuite',
+      'memmaze': lambda task, **kw: from_gym.FromGym(
+          f'MemoryMaze-{task}-ExtraObs-v0', **kw),
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
@@ -173,6 +219,8 @@ def make_env(config, index, **overrides):
   kwargs.update(overrides)
   if kwargs.pop('use_seed', False):
     kwargs['seed'] = hash((config.seed, index)) % (2 ** 32 - 1)
+  if kwargs.pop('use_logdir', False):
+    kwargs['logdir'] = embodied.Path(config.logdir) / f'env{index}'
   env = ctor(task, **kwargs)
   return wrap_env(env, config)
 

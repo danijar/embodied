@@ -3,12 +3,11 @@ import concurrent.futures
 import json
 import os
 import re
-import time
 
 import numpy as np
 
-from . import basics
 from . import path
+from . import printing
 from . import timer
 
 
@@ -68,11 +67,7 @@ class Logger:
     self.add({name: value})
 
   @timer.section('logger_write')
-  def write(self, fps=False):
-    if fps:
-      value = self._compute_fps()
-      if value is not None:
-        self.scalar('fps', value)
+  def write(self):
     if not self._metrics:
       return
     for output in self.outputs:
@@ -88,18 +83,6 @@ class Logger:
         except Exception as e:
           print(f'Error waiting on output: {e}')
 
-  def _compute_fps(self):
-    step = int(self.step) * self.multiplier
-    if self._last_step is None:
-      self._last_time = time.time()
-      self._last_step = step
-      return None
-    steps = step - self._last_step
-    duration = time.time() - self._last_time
-    self._last_time += duration
-    self._last_step = step
-    return steps / duration
-
 
 class AsyncOutput:
 
@@ -108,7 +91,8 @@ class AsyncOutput:
     self._parallel = parallel
     if parallel:
       name = type(self).__name__
-      self._worker = concurrent.futures.ThreadPoolExecutor(1, f'logger_{name}_async')
+      self._worker = concurrent.futures.ThreadPoolExecutor(
+          1, f'logger_{name}_async')
       self._future = None
 
   def wait(self):
@@ -158,7 +142,7 @@ class TerminalOutput:
       content += ' / '.join(f'{k} {v}' for k, v in formatted.items())
     else:
       content += 'No metrics.'
-    basics.print_(f'\n{header}\n{content}\n', flush=True)
+    printing.print_(f'\n{header}\n{content}\n', flush=True)
 
   def _format_value(self, value):
     value = float(value)
@@ -188,7 +172,7 @@ class JSONLOutput(AsyncOutput):
     self._pattern = re.compile(pattern)
     self._strings = strings
     logdir = path.Path(logdir)
-    logdir.mkdirs()
+    logdir.mkdir()
     self._filename = logdir / filename
 
   @timer.section('jsonl')
@@ -204,7 +188,7 @@ class JSONLOutput(AsyncOutput):
     lines = ''.join([
         json.dumps({'step': step, **scalars}) + '\n'
         for step, scalars in bystep.items()])
-    basics.print_(f'Writing metrics: {self._filename}')
+    printing.print_(f'Writing metrics: {self._filename}')
     with self._filename.open('a') as f:
       f.write(lines)
 
@@ -293,16 +277,10 @@ class TensorBoardOutput(AsyncOutput):
 
 class WandBOutput:
 
-  def __init__(self, name, config=None, pattern=r'.*'):
+  def __init__(self, name, pattern=r'.*', **kwargs):
     self._pattern = re.compile(pattern)
     import wandb
-    wandb.init(
-        project='embodied',
-        name=name,
-        # sync_tensorboard=True,
-        entity='word-bots',
-        config=config and dict(config),
-    )
+    wandb.init(name=name, **kwargs)
     self._wandb = wandb
 
   def __call__(self, summaries):
@@ -368,6 +346,31 @@ class MLFlowOutput:
     else:
       tags = {'resume_id': resume_id or ''}
       self._mlflow.start_run(run_name=run_name, tags=tags)
+
+
+class ExpaOutput:
+
+  def __init__(self, exp, run, project, user, config=None):
+    try:
+      import expa
+      print(f'Expa: {exp}/{run} ({project})')
+      self._expa = expa.Logger(
+          exp, run, project, user, api_url='pubsub://expa-dev/ingest')
+      if config:
+        self._expa.log_params(dict(config))
+    except Exception as e:
+      print(f'Error exporting Expa: {e}')
+      self._expa = None
+      return
+
+  def __call__(self, summaries):
+    if not self._expa:
+      return
+    bystep = collections.defaultdict(dict)
+    for step, name, value in summaries:
+      bystep[step][name] = value
+    for step, metrics in bystep.items():
+      self._expa.log(metrics, step)
 
 
 @timer.section('gif')

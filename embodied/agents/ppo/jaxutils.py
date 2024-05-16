@@ -1,5 +1,5 @@
-import collections
 import re
+from functools import partial as bind
 
 import jax
 import jax.numpy as jnp
@@ -11,20 +11,19 @@ from tensorflow_probability.substrates import jax as tfp
 from . import ninjax as nj
 
 tfd = tfp.distributions
-tfb = tfp.bijectors
-treemap = jax.tree_util.tree_map
-sg = lambda x: treemap(jax.lax.stop_gradient, x)
+sg = lambda x: jax.tree.map(jax.lax.stop_gradient, x)
 f32 = jnp.float32
 i32 = jnp.int32
 COMPUTE_DTYPE = f32
 PARAM_DTYPE = f32
 ENABLE_CHECKS = False
+TRACKSHAPES = []
+TRACKACTS = []
+TRACKFLOPS = []
 
 
 def cast_to_compute(values):
-  return treemap(
-      lambda x: x if x.dtype == COMPUTE_DTYPE else x.astype(COMPUTE_DTYPE),
-      values)
+  return jax.tree.map(lambda x: x.astype(COMPUTE_DTYPE), values)
 
 
 def get_param_dtype():
@@ -44,11 +43,6 @@ def parallel():
     return False
 
 
-def scan(fun, carry, xs, unroll=False, axis=0):
-  unroll = jax.tree_util.tree_leaves(xs)[0].shape[axis] if unroll else 1
-  return nj.scan(fun, carry, xs, False, unroll, axis)
-
-
 def tensorstats(tensor, prefix=None):
   assert tensor.size > 0, tensor.shape
   assert jnp.issubdtype(tensor.dtype, jnp.floating), tensor.dtype
@@ -62,7 +56,7 @@ def tensorstats(tensor, prefix=None):
       'dist': subsample(tensor),
   }
   if prefix:
-    metrics = {f'{prefix}/{k}': v for k, v in metrics.items()}
+    metrics = {f'{prefix}_{k}': v for k, v in metrics.items()}
   return metrics
 
 
@@ -71,6 +65,37 @@ def subsample(values, amount=1024):
   if len(values) > amount:
     values = jax.random.permutation(nj.seed(), values)[:amount]
   return values
+
+
+def masked_mean(tensor, mask, axis=None):
+  assert tensor.shape == mask.shape
+  mask = mask.astype(tensor.dtype)
+  return (mask * tensor).sum(axis) / mask.sum(axis)
+
+
+def scan(fn, inputs, start, unroll=False, axis=0):
+  if axis:
+    inputs = jax.tree.map(lambda x: x.swapaxes(0, axis), inputs)
+  fn2 = lambda carry, inp: (fn(carry, inp),) * 2
+  if unroll:
+    length = len(jax.tree_util.tree_leaves(inputs)[0])
+    carrydef = jax.tree_util.tree_structure(start)
+    carry = start
+    outs = []
+    for index in range(length):
+      carry, out = fn2(carry, jax.tree.map(lambda x: x[index], inputs))
+      flat, treedef = jax.tree_util.tree_flatten(out)
+      assert treedef == carrydef, (treedef, carrydef)
+      outs.append(flat)
+    outs = [
+        jnp.stack([carry[i] for carry in outs], 0)
+        for i in range(len(outs[0]))]
+    outs = carrydef.unflatten(outs)
+  else:
+    carry, outs = nj.scan(fn2, start, inputs)
+  if axis:
+    outs = jax.tree.map(lambda x: x.swapaxes(0, axis), outs)
+  return outs
 
 
 def symlog(x):
@@ -88,7 +113,7 @@ def switch(pred, lhs, rhs):
     while len(mask.shape) < len(lhs.shape):
       mask = mask[..., None]
     return jnp.where(mask, lhs, rhs)
-  return treemap(fn, lhs, rhs)
+  return jax.tree.map(fn, lhs, rhs)
 
 
 def reset(xs, reset):
@@ -97,7 +122,7 @@ def reset(xs, reset):
     while len(mask.shape) < len(x.shape):
       mask = mask[..., None]
     return x * (1 - mask.astype(x.dtype))
-  return treemap(fn, xs)
+  return jax.tree.map(fn, xs)
 
 
 class OneHotDist(tfd.OneHotCategorical):
@@ -112,8 +137,7 @@ class OneHotDist(tfd.OneHotCategorical):
   def sample(self, sample_shape=(), seed=None):
     sample = sg(super().sample(sample_shape, seed))
     probs = self._pad(super().probs_parameter(), sample.shape)
-    sample = sg(sample) + (probs - sg(probs)).astype(sample.dtype)
-    return sample
+    return sg(sample) + (probs - sg(probs)).astype(sample.dtype)
 
   def _pad(self, tensor, shape):
     while len(tensor.shape) < len(shape):
@@ -148,56 +172,33 @@ class MSEDist:
     return -loss
 
 
-class HuberDist:
+class SymlogDist:
 
-  def __init__(self, mode, dims, agg='sum'):
+  def __init__(self, mode, dims, dist='mse', agg='sum', tol=1e-8):
     self._mode = mode
     self._dims = tuple([-x for x in range(1, dims + 1)])
-    self._agg = agg
-    self.batch_shape = mode.shape[:len(mode.shape) - dims]
-    self.event_shape = mode.shape[len(mode.shape) - dims:]
-
-  def mode(self):
-    return self._mode
-
-  def mean(self):
-    return self._mode
-
-  def log_prob(self, value):
-    assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
-    distance = ((self._mode - value) ** 2)
-    distance = jnp.sqrt(1 + distance) - 1
-    if self._agg == 'mean':
-      loss = distance.mean(self._dims)
-    elif self._agg == 'sum':
-      loss = distance.sum(self._dims)
-    else:
-      raise NotImplementedError(self._agg)
-    return -loss
-
-
-class TransformedMseDist:
-
-  def __init__(self, mode, dims, fwd, bwd, agg='sum', tol=1e-8):
-    self._mode = mode
-    self._dims = tuple([-x for x in range(1, dims + 1)])
-    self._fwd = fwd
-    self._bwd = bwd
+    self._dist = dist
     self._agg = agg
     self._tol = tol
     self.batch_shape = mode.shape[:len(mode.shape) - dims]
     self.event_shape = mode.shape[len(mode.shape) - dims:]
 
   def mode(self):
-    return self._bwd(self._mode)
+    return symexp(self._mode)
 
   def mean(self):
-    return self._bwd(self._mode)
+    return symexp(self._mode)
 
   def log_prob(self, value):
     assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
-    distance = (self._mode - self._fwd(value)) ** 2
-    distance = jnp.where(distance < self._tol, 0, distance)
+    if self._dist == 'mse':
+      distance = (self._mode - symlog(value)) ** 2
+      distance = jnp.where(distance < self._tol, 0, distance)
+    elif self._dist == 'abs':
+      distance = jnp.abs(self._mode - symlog(value))
+      distance = jnp.where(distance < self._tol, 0, distance)
+    else:
+      raise NotImplementedError(self._dist)
     if self._agg == 'mean':
       loss = distance.mean(self._dims)
     elif self._agg == 'sum':
@@ -209,8 +210,7 @@ class TransformedMseDist:
 
 class TwoHotDist:
 
-  def __init__(
-      self, logits, bins, dims=0, transfwd=None, transbwd=None):
+  def __init__(self, logits, bins, dims=0, transfwd=None, transbwd=None):
     assert logits.shape[-1] == len(bins), (logits.shape, len(bins))
     assert logits.dtype == f32, logits.dtype
     assert bins.dtype == f32, bins.dtype
@@ -300,13 +300,13 @@ def balance_stats(dist, target, thres):
 
 class Moments(nj.Module):
 
-  rate: float = 0.01
-  limit: float = 1e-8
-  perclo: float = 5.0
-  perchi: float = 95.0
-
-  def __init__(self, impl='mean_std'):
+  def __init__(
+      self, impl='mean_std', rate=0.01, limit=1e-8, perclo=5, perchi=95):
     self.impl = impl
+    self.rate = rate
+    self.limit = limit
+    self.perclo = perclo
+    self.perchi = perchi
     if self.impl == 'off':
       pass
     elif self.impl == 'mean_std':
@@ -397,69 +397,45 @@ class Moments(nj.Module):
 
 class Optimizer(nj.Module):
 
-  # Normalization
-  scaler: str = 'adam'
-  eps: float = 1e-7
-  beta1: float = 0.9
-  beta2: float = 0.999
-
-  # Learning rate
-  warmup: int = 1000
-  anneal: int = 0
-  schedule: str = 'constant'
-
-  # Regularization
-  wd: float = 0.0
-  wd_pattern: str = r'/kernel$'
-
-  # Clipping
-  pmin: float = 1e-3
-  globclip: float = 0.0
-  agc: float = 0.0
-
-  # Smoothing
-  momentum: bool = False
-  nesterov: bool = False
-
-  # Metrics
-  details: bool = False
-
-  def __init__(self, lr):
-    self.lr = lr
+  def __init__(
+      self, lr, opt='adam', eps=1e-7, clip=0.0, warmup=1000, wd=0.0,
+      wd_pattern=r'/kernel$', agc=0.03, postagc=0.0, anneal=0,
+      beta1=0.9, beta2=0.999, pmin=1e-3, details=False):
     chain = []
 
-    if self.globclip:
-      chain.append(optax.clip_by_global_norm(self.globclip))
-    if self.agc:
-      chain.append(scale_by_agc(self.agc, self.pmin))
+    if clip:
+      chain.append(optax.clip_by_global_norm(clip))
+    if agc:
+      chain.append(scale_by_agc(agc, pmin))
 
-    if self.scaler == 'adam':
-      chain.append(optax.scale_by_adam(self.beta1, self.beta2, self.eps))
-    elif self.scaler == 'rms':
-      chain.append(scale_by_rms(self.beta2, self.eps))
+    if opt == 'adam':
+      chain.append(optax.scale_by_adam(beta1, beta2, eps=eps))
     else:
-      raise NotImplementedError(self.scaler)
+      raise NotImplementedError(opt)
 
-    if self.momentum:
-      chain.append(scale_by_momentum(self.beta1, self.nesterov))
+    if wd:
+      assert not wd_pattern[0].isnumeric(), wd_pattern
+      wd_pattern = re.compile(wd_pattern)
+      wdmaskfn = lambda params: {k: bool(wd_pattern.search(k)) for k in params}
+      chain.append(optax.add_decayed_weights(wd, wdmaskfn))
 
-    if self.wd:
-      assert not self.wd_pattern[0].isnumeric(), self.wd_pattern
-      pattern = re.compile(self.wd_pattern)
-      wdmaskfn = lambda params: {k: bool(pattern.search(k)) for k in params}
-      chain.append(optax.add_decayed_weights(self.wd, wdmaskfn))
-
-    if isinstance(self.lr, dict):
-      chain.append(scale_by_groups({pfx: -lr for pfx, lr in self.lr.items()}))
+    self.lr = lr
+    if isinstance(lr, dict):
+      chain.append(scale_by_groups({k + '/': -v for k, v in lr.items()}))
     else:
-      chain.append(optax.scale(-self.lr))
+      chain.append(optax.scale(-lr))
 
-    self.chain = optax.chain(*chain)
+    if postagc:
+      chain.append(scale_by_agc(postagc, pmin))
+
+    self.opt = optax.chain(*chain)
+    self.warmup = warmup
+    self.anneal = anneal
+    self.details = details
     self.step = nj.Variable(jnp.array, 0, i32, name='step')
     self.scaling = (COMPUTE_DTYPE == jnp.float16)
     if self.scaling:
-      self.chain = optax.apply_if_finite(
-          self.chain, max_consecutive_errors=1000)
+      self.opt = optax.apply_if_finite(self.opt, max_consecutive_errors=1000)
       self.grad_scale = nj.Variable(jnp.array, 1e4, f32, name='grad_scale')
       self.good_steps = nj.Variable(jnp.array, 0, i32, name='good_steps')
     self.once = True
@@ -496,32 +472,23 @@ class Optimizer(nj.Module):
         print(f'{count:>14,} {prefix}')
 
     if parallel():
-      grads = treemap(lambda x: jax.lax.pmean(x, 'i'), grads)
+      grads = jax.tree.map(lambda x: jax.lax.pmean(x, 'i'), grads)
     if self.scaling:
       invscale = 1.0 / self.grad_scale.read()
-      grads = treemap(lambda x: x * invscale, grads)
-    optstate = self.get('state', self.chain.init, params)
-    updates, optstate = self.chain.update(grads, optstate, params)
+      grads = jax.tree.map(lambda x: x * invscale, grads)
+    optstate = self.get('state', self.opt.init, params)
+    updates, optstate = self.opt.update(grads, optstate, params)
     self.put('state', optstate)
 
     if self.details:
-      metrics.update(self._detailed_stats(optstate, params, updates, grads))
+      metrics.update(self._detailed_stats(optstate, params, updates))
 
-    scale = 1
-    step = self.step.read().astype(f32)
     if self.warmup > 0:
-      scale *= jnp.clip(step / self.warmup, 0, 1)
-    assert self.schedule == 'constant' or self.anneal > self.warmup
-    prog = jnp.clip((step - self.warmup) / (self.anneal - self.warmup), 0, 1)
-    if self.schedule == 'constant':
-      pass
-    elif self.schedule == 'linear':
-      scale *= 1 - prog
-    elif self.schedule == 'cosine':
-      scale *= 0.5 * (1 + jnp.cos(jnp.pi * prog))
-    else:
-      raise NotImplementedError(self.schedule)
-    updates = treemap(lambda x: x * scale, updates)
+      scale = jnp.clip(self.step.read().astype(f32) / self.warmup, 0, 1)
+      updates = jax.tree.map(lambda x: x * scale, updates)
+    if self.anneal > 0:
+      scale = jnp.clip(1 - self.step.read().astype(f32) / self.anneal, 0, 1)
+      updates = jax.tree.map(lambda x: x * scale, updates)
 
     nj.context().update(optax.apply_updates(params, updates))
     grad_norm = optax.global_norm(grads)
@@ -562,16 +529,18 @@ class Optimizer(nj.Module):
         1e-4, 1e5))
     return finite
 
-  def _detailed_stats(self, optstate, params, updates, grads):
+  def _detailed_stats(self, optstate, params, updates):
     groups = {
         'all': r'.*',
-        'enc': r'/enc/.*',
-        'dec': r'/dec/.*',
-        'dyn': r'/dyn/.*',
-        'con': r'/con/.*',
-        'rew': r'/rew/.*',
-        'actor': r'/actor/.*',
-        'critic': r'/critic/.*',
+        'enc': r'/enc/.*/kernel$',
+        'dec': r'/dec/.*/kernel$',
+        'rssm': r'/rssm/.*/kernel$',
+        'cont': r'/cont/.*/kernel$',
+        'rew': r'/rew/.*/kernel$',
+        'actor': r'/actor/.*/kernel$',
+        'critic': r'/critic/.*/kernel$',
+        'gru': r'/gru/kernel$',
+        'bias': r'/bias$',
         'out': r'/out/kernel$',
         'repr': r'/repr_logit/kernel$',
         'prior': r'/prior_logit/kernel$',
@@ -583,23 +552,20 @@ class Optimizer(nj.Module):
     for state in getattr(optstate, 'inner_state', optstate):
       if isinstance(state, optax.ScaleByAdamState):
         corr = 1 / (1 - 0.999 ** state.count)
-        stddev = treemap(lambda x: jnp.sqrt(x * corr), state.nu)
+        stddev = jax.tree.map(lambda x: jnp.sqrt(x * corr), state.nu)
     for name, pattern in groups.items():
       keys = [k for k in params if re.search(pattern, k)]
       ps = [params[k] for k in keys]
       us = [updates[k] for k in keys]
-      gs = [grads[k] for k in keys]
       if not ps:
         continue
       metrics.update({f'{k}/{name}': v for k, v in dict(
-          param_count=jnp.array(np.sum([np.prod(x.shape) for x in ps])),
           param_abs_max=jnp.stack([jnp.abs(x).max() for x in ps]).max(),
           param_abs_mean=jnp.stack([jnp.abs(x).mean() for x in ps]).mean(),
           param_norm=optax.global_norm(ps),
           update_abs_max=jnp.stack([jnp.abs(x).max() for x in us]).max(),
           update_abs_mean=jnp.stack([jnp.abs(x).mean() for x in us]).mean(),
           update_norm=optax.global_norm(us),
-          grad_norm=optax.global_norm(gs),
       ).items()})
       if stddev is not None:
         sc = [stddev[k] for k in keys]
@@ -612,47 +578,24 @@ class Optimizer(nj.Module):
             prop_max=jnp.stack([x.max() for x in pr]).max(),
             prop_min=jnp.stack([x.min() for x in pr]).min(),
             prop_mean=jnp.stack([x.mean() for x in pr]).mean(),
-        ).items()})
+      ).items()})
     return metrics
 
 
-def expand_groups(groups, keys):
-  if isinstance(groups, (float, int)):
-    return {key: groups for key in keys}
-  groups = {
-      group if group.endswith('/') else f'{group}/': value
-      for group, value in groups.items()}
-  assignment = {}
-  groupcount = collections.defaultdict(int)
-  for key in keys:
-    matches = [prefix for prefix in groups if key.startswith(prefix)]
-    if not matches:
-      raise ValueError(
-          f'Parameter {key} not fall into any of the groups:\n' +
-          ''.join(f'- {group}\n' for group in groups.keys()))
-    if len(matches) > 1:
-      raise ValueError(
-          f'Parameter {key} fall into more than one of the groups:\n' +
-          ''.join(f'- {group}\n' for group in groups.keys()))
-    assignment[key] = matches[0]
-    groupcount[matches[0]] += 1
-  for group in groups.keys():
-    if not groupcount[group]:
-      raise ValueError(
-          f'Group {group} did not match any of the {len(keys)} keys.')
-  expanded = {key: groups[assignment[key]] for key in keys}
-  return expanded
-
-
-def scale_by_groups(groups):
+def scale_by_groups(mapping):
 
   def init_fn(params):
     return ()
 
   def update_fn(updates, state, params=None):
-    scales = expand_groups(groups, updates.keys())
-    updates = treemap(lambda u, s: u * s, updates, scales)
-    return updates, state
+    scaled = {}
+    for key, update in updates.items():
+      matches = [prefix for prefix in mapping if key.startswith(prefix)]
+      assert len(matches) == 1, (key, matches)
+      scale = mapping[matches[0]]
+      assert 0 < abs(scale) < 1, (key, matches[0], scale)
+      scaled[key] = scale * update
+    return scaled, state
 
   return optax.GradientTransformation(init_fn, update_fn)
 
@@ -668,49 +611,18 @@ def scale_by_agc(clip=0.03, pmin=1e-3):
       pnorm = jnp.linalg.norm(param.flatten(), 2)
       upper = clip * jnp.maximum(pmin, pnorm)
       return update * (1 / jnp.maximum(1.0, unorm / upper))
-    updates = treemap(fn, params, updates)
+    updates = jax.tree.map(fn, params, updates)
     return updates, ()
 
   return optax.GradientTransformation(init_fn, update_fn)
 
 
-def scale_by_rms(beta=0.999, eps=1e-8):
-
-  def init_fn(params):
-    nu = treemap(lambda t: jnp.zeros_like(t, f32), params)
-    step = jnp.zeros((), i32)
-    return (step, nu)
-
-  def update_fn(updates, state, params=None):
-    step, nu = state
-    step = optax.safe_int32_increment(step)
-    nu = treemap(lambda v, u: beta * v + (1 - beta) * (u * u), nu, updates)
-    nu_hat = optax.bias_correction(nu, beta, step)
-    updates = treemap(lambda u, v: u / (jnp.sqrt(v) + eps), updates, nu_hat)
-    return updates, (step, nu)
-
-  return optax.GradientTransformation(init_fn, update_fn)
-
-
-def scale_by_momentum(beta=0.9, nesterov=False):
-
-  def init_fn(params):
-    mu = treemap(lambda t: jnp.zeros_like(t, f32), params)
-    step = jnp.zeros((), i32)
-    return (step, mu)
-
-  def update_fn(updates, state, params=None):
-    step, mu = state
-    step = optax.safe_int32_increment(step)
-    mu = optax.update_moment(updates, mu, beta, 1)
-    if nesterov:
-      mu_nesterov = optax.update_moment(updates, mu, beta, 1)
-      mu_hat = optax.bias_correction(mu_nesterov, beta, step)
-    else:
-      mu_hat = optax.bias_correction(mu, beta, step)
-    return mu_hat, (step, mu)
-
-  return optax.GradientTransformation(init_fn, update_fn)
+def onehot_dict(mapping, spaces):
+  mapping = mapping.copy()
+  for key, space in spaces.items():
+    if space.discrete and key in mapping:
+      mapping[key] = jax.nn.one_hot(mapping[key], space.high.max().item())
+  return mapping
 
 
 def concat_dict(mapping, batch_shape=None):
@@ -720,18 +632,17 @@ def concat_dict(mapping, batch_shape=None):
   return jnp.concatenate(tensors, -1)
 
 
-def onehot_dict(mapping, spaces, filter=False, limit=256):
-  result = {}
-  for key, value in mapping.items():
-    if key not in spaces and filter:
-      continue
-    space = spaces[key]
-    if space.discrete and space.dtype != jnp.uint8:
-      if limit:
-        assert space.classes <= limit, (key, space, limit)
-      value = jax.nn.one_hot(value, space.classes)
-    result[key] = value
-  return result
+def tree_keys(params, prefix=''):
+  if hasattr(params, 'items'):
+    return type(params)({
+        k: tree_keys(v, prefix + '/' + k.lstrip('/'))
+        for k, v in params.items()})
+  elif isinstance(params, (tuple, list)):
+    return [tree_keys(x, prefix) for x in params]
+  elif isinstance(params, jnp.ndarray):
+    return prefix
+  else:
+    raise TypeError(type(params))
 
 
 class SlowUpdater(nj.Module):
@@ -752,11 +663,24 @@ class SlowUpdater(nj.Module):
     params = {
         k.replace(f'/{self.src.name}/', f'/{self.dst.name}/'): v
         for k, v in self.src.find().items()}
-    ema = treemap(
+    ema = jax.tree.map(
         lambda s, d: mix * s + (1 - mix) * d,
         params, self.dst.find())
     for name, param in ema.items():
       assert param.dtype == jnp.float32, (
           f'EMA of {name} should be float32 not {param.dtype}')
-    self.dst.put(ema)
+    self.dst.put(sg(ema))
     self.updates.write(updates + 1)
+
+
+def draw_time_hist(data, bins=32, zoom=4, range=None, **kwargs):
+  range = (data.min(), data.max()) if range is None else range
+  B, T = data.shape
+  fn = bind(jnp.histogram, bins=bins, range=range, **kwargs)
+  hist, _ = jax.vmap(fn, 1, 1)(data)
+  hist = hist.astype(f32)
+  hist /= hist.max(0, keepdims=True)
+  hist = jnp.nan_to_num(hist, 1)
+  hist = jnp.repeat(hist, zoom, 0)
+  hist = jnp.repeat(hist, zoom, 1)
+  return (255 * hist[::-1]).astype(np.uint8)

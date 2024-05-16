@@ -1,9 +1,8 @@
 from .base import Agent, Env, Wrapper, Replay
 
-from .basics import format_ as format
-from .basics import print_ as print
-from .basics import timestamp
-from .basics import treemap
+from .printing import print_ as print
+from .printing import format_ as format
+from .utils import timestamp
 
 from .space import Space
 from .path import Path
@@ -27,3 +26,6 @@ from . import logger
 from . import when
 from . import wrappers
 from . import timer
+from . import tree
+
+

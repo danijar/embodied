@@ -1,5 +1,4 @@
 import functools
-import os
 
 import embodied
 import numpy as np
@@ -28,13 +27,16 @@ class FromDM(embodied.Env):
       if int(np.prod(value.shape)) == 0:
         self._obs_empty.append(key)
         del spec[key]
-    return {
+    spaces = {
         'reward': embodied.Space(np.float32),
         'is_first': embodied.Space(bool),
         'is_last': embodied.Space(bool),
         'is_terminal': embodied.Space(bool),
-        **{k or self._obs_key: self._convert(v) for k, v in spec.items()},
     }
+    for key, value in spec.items():
+      key = key.replace('/', '_')
+      spaces[key] = self._convert(value)
+    return spaces
 
   @functools.cached_property
   def act_space(self):
@@ -65,6 +67,7 @@ class FromDM(embodied.Env):
       obs['obs_reward'] = obs.pop('reward')
     for key in self._obs_empty:
       del obs[key]
+    obs = {k.replace('/', '_'): v for k, v in obs.items()}
     return dict(
         reward=np.float32(0.0 if time_step.first() else time_step.reward),
         is_first=time_step.first(),

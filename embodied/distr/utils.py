@@ -2,12 +2,12 @@ import ctypes
 import multiprocessing as mp
 import os
 import socket
-import sys
 import threading
 import time
 import traceback
 
 import embodied
+import numpy as np
 import psutil
 
 
@@ -19,10 +19,10 @@ def get_print_lock():
   return _PRINT_LOCK
 
 
-_PORTS = iter(range(5000, 8000))
 def get_free_port():
+  rng = np.random.default_rng()
   while True:
-    port = next(_PORTS)
+    port = int(rng.integers(5000, 8000))
     if port_free(port):
       return port
 
@@ -156,7 +156,7 @@ def warn_remote_error(e, name, lock=get_print_lock):
   msg += f'Worker stack trace:\n{full}'
   with lock:
     embodied.print(msg, color='red')
-  if sys.version_info.minor >= 11:
+  if hasattr(e, 'add_note'):
     e.add_note(f'\nWorker stack trace:\n\n{full}')
 
 

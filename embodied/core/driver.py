@@ -53,8 +53,8 @@ class Driver:
       step, episode = self._step(policy, step, episode)
 
   def _step(self, policy, step, episode):
-    assert all(len(x) == self.length for x in self.acts.values())
-    acts = {k: v for k, v in self.acts.items() if not k.startswith('log_')}
+    acts = self.acts
+    assert all(len(x) == self.length for x in acts.values())
     assert all(isinstance(v, np.ndarray) for v in acts.values())
     acts = [{k: v[i] for k, v in acts.items()} for i in range(self.length)]
     if self.parallel:
@@ -64,13 +64,15 @@ class Driver:
       obs = [env.step(act) for env, act in zip(self.envs, acts)]
     obs = {k: np.stack([x[k] for x in obs]) for k in obs[0].keys()}
     assert all(len(x) == self.length for x in obs.values()), obs
-    acts, self.carry = policy(obs, self.carry, **self.kwargs)
+    acts, outs, self.carry = policy(obs, self.carry, **self.kwargs)
+    assert all(k not in acts for k in outs), (
+        list(outs.keys()), list(acts.keys()))
     if obs['is_last'].any():
       mask = ~obs['is_last']
       acts = {k: self._mask(v, mask) for k, v in acts.items()}
     acts['reset'] = obs['is_last'].copy()
     self.acts = acts
-    trans = {**obs, **acts}
+    trans = {**obs, **acts, **outs}
     for i in range(self.length):
       trn = {k: v[i] for k, v in trans.items()}
       [fn(trn, i, **self.kwargs) for fn in self.callbacks]
@@ -127,3 +129,4 @@ class Driver:
     finally:
       print(f'Closing env {envid}')
       env.close()
+      pipe.close()

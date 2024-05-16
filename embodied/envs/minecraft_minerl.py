@@ -44,10 +44,9 @@ np.bool = bool
 
 class MineRLEnv(EnvSpec):
 
-  def __init__(self, resolution=(64, 64), break_speed=50, gamma=10.0):
+  def __init__(self, resolution=(64, 64), break_speed=50):
     self.resolution = resolution
     self.break_speed = break_speed
-    self.gamma = gamma
     super().__init__(name='MineRLEnv-v1')
 
   def create_agent_start(self):
@@ -135,18 +134,6 @@ class BreakSpeedMultiplier(handler.Handler):
 
   def xml_template(self):
     return '<BreakSpeedMultiplier>{{multiplier}}</BreakSpeedMultiplier>'
-
-
-class Gamma(handler.Handler):
-
-  def __init__(self, gamma=2.0):
-    self.gamma = gamma
-
-  def to_string(self):
-    return f'gamma({self.gamma})'
-
-  def xml_template(self):
-    return '<GammaSetting>{{gamma}}</GammaSetting>'
 
 
 NOOP_ACTION = dict(

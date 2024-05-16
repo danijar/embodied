@@ -46,8 +46,14 @@ class Chunk:
     for key, value in step.items():
       self.data[key][self.length] = value
     self.length += 1
-    if self.length == self.size:
-      [x.setflags(write=False) for x in self.data.values()]
+    # if self.length == self.size:
+    #   [x.setflags(write=False) for x in self.data.values()]
+
+  def update(self, index, length, mapping):
+    assert 0 <= index <= self.length, (index, self.length)
+    assert 0 <= index + length <= self.length, (index, length, self.length)
+    for key, value in mapping.items():
+      self.data[key][index: index + length] = value
 
   def slice(self, index, length):
     assert 0 <= index and index + length <= self.length

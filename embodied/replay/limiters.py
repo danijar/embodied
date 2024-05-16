@@ -9,6 +9,12 @@ class MinSize:
     self.size = 0
     self.lock = threading.Lock()
 
+  def save(self):
+    return {'size': self.size}
+
+  def load(self, data):
+    self.size = data['size']
+
   def want_insert(self, reason=False):
     if reason:
       return True, 'ok'
@@ -48,6 +54,13 @@ class SamplesPerInsert:
     self.max_avail = tolerance * samples_per_insert
     self.size = 0
     self.lock = threading.Lock()
+
+  def save(self):
+    return {'size': self.size, 'avail': self.avail}
+
+  def load(self, data):
+    self.size = data['size']
+    self.avail = data['avail']
 
   def want_insert(self, reason=False):
     if reason:

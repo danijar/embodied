@@ -1,6 +1,4 @@
 import re
-from datetime import datetime
-
 
 try:
   import colored
@@ -98,33 +96,3 @@ def format_(value):
     if len(value) > 32:
       value = value[:32 - 3] + '...'
   return str(value)
-
-
-def treemap(fn, *trees, isleaf=None):
-  assert trees, 'Provide one or more nested Python structures'
-  kw = dict(isleaf=isleaf)
-  first = trees[0]
-  assert all(isinstance(x, type(first)) for x in trees)
-  if isleaf and isleaf(trees):
-    return fn(*trees)
-  if isinstance(first, list):
-    assert all(len(x) == len(first) for x in trees), format_(trees)
-    return [treemap(
-        fn, *[t[i] for t in trees], **kw) for i in range(len(first))]
-  if isinstance(first, tuple):
-    assert all(len(x) == len(first) for x in trees), format_(trees)
-    return tuple([treemap(
-        fn, *[t[i] for t in trees], **kw) for i in range(len(first))])
-  if isinstance(first, dict):
-    assert all(set(x.keys()) == set(first.keys()) for x in trees), (
-        format_(trees))
-    return {k: treemap(fn, *[t[k] for t in trees], **kw) for k in first}
-  return fn(*trees)
-
-
-def timestamp(now=None, millis=False):
-  now = datetime.now() if now is None else now
-  string = now.strftime("%Y%m%dT%H%M%S")
-  if millis:
-    string += f'F{now.microsecond:06d}'
-  return string

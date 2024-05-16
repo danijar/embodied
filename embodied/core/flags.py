@@ -12,9 +12,11 @@ class Flags:
   def parse(self, argv=None, help_exits=True):
     parsed, remaining = self.parse_known(argv)
     for flag in remaining:
-      if flag.startswith('--'):
-        raise ValueError(f"Flag '{flag}' did not match any config keys.")
-    assert not remaining, remaining
+      if flag.startswith('--') and flag[2:] not in self._config.flat:
+        raise KeyError(f"Flag '{flag}' did not match any config keys.")
+    if remaining:
+      raise ValueError(
+          f'Could not parse all arguments. Remaining: {remaining}')
     return parsed
 
   def parse_known(self, argv=None, help_exits=False):
@@ -52,25 +54,40 @@ class Flags:
       return
     if not key:
       vals = ', '.join(f"'{x}'" for x in vals)
-      raise ValueError(f"Values {vals} were not preceded by any flag.")
+      remaining.extend(vals)
+      return
+      # raise ValueError(f"Values {vals} were not preceded by any flag.")
     name = key[len('--'):]
     if '=' in name:
       remaining.extend([key] + vals)
       return
-    if self._config.IS_PATTERN.fullmatch(name):
-      pattern = re.compile(name)
-      keys = {k for k in self._config.flat if pattern.fullmatch(k)}
-    elif name in self._config:
-      keys = [name]
-    else:
-      keys = []
-    if not keys:
-      remaining.extend([key] + vals)
-      return
     if not vals:
-      raise ValueError(f"Flag '{key}' was not followed by any values.")
-    for key in keys:
+      remaining.extend([key])
+      return
+      # raise ValueError(f"Flag '{key}' was not followed by any values.")
+    if name.endswith('+') and name[:-1] in self._config:
+      key = name[:-1]
+      default = self._config[key]
+      if not isinstance(default, tuple):
+        raise TypeError(
+            f"Cannot append to key '{key}' which is of type "
+            f"'{type(default).__name__}' instead of tuple.")
+      if key not in parsed:
+        parsed[key] = default
+      parsed[key] += self._parse_flag_value(default, vals, key)
+    elif self._config.IS_PATTERN.fullmatch(name):
+      pattern = re.compile(name)
+      keys = [k for k in self._config.flat if pattern.fullmatch(k)]
+      if keys:
+        for key in keys:
+          parsed[key] = self._parse_flag_value(self._config[key], vals, key)
+      else:
+        remaining.extend([key] + vals)
+    elif name in self._config:
+      key = name
       parsed[key] = self._parse_flag_value(self._config[key], vals, key)
+    else:
+      remaining.extend([key] + vals)
 
   def _parse_flag_value(self, default, value, key):
     value = value if isinstance(value, (tuple, list)) else (value,)
@@ -78,7 +95,9 @@ class Flags:
       if len(value) == 1 and ',' in value[0]:
         value = value[0].split(',')
       return tuple(self._parse_flag_value(default[0], [x], key) for x in value)
-    assert len(value) == 1, value
+    if len(value) != 1:
+      raise TypeError(
+          f"Expected a single value for key '{key}' but got: {value}")
     value = str(value[0])
     if default is None:
       return value
@@ -92,11 +111,16 @@ class Flags:
       try:
         value = float(value)  # Allow scientific notation for integers.
         assert float(int(value)) == value
-      except (TypeError, AssertionError):
-        message = f"Expected int but got float '{value}' for key '{key}'."
+      except (ValueError, TypeError, AssertionError):
+        message = f"Expected int but got '{value}' for key '{key}'."
         raise TypeError(message)
       return int(value)
     if isinstance(default, dict):
-      raise TypeError(
+      raise KeyError(
           f"Key '{key}' refers to a whole dict. Please speicfy a subkey.")
-    return type(default)(value)
+    try:
+      return type(default)(value)
+    except ValueError:
+      raise TypeError(
+          f"Cannot convert '{value}' to type '{type(default).__name__}' for "
+          f"key '{key}'.")

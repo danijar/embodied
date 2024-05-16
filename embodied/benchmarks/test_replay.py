@@ -39,7 +39,7 @@ class TestReplay:
     duration = time.time() - start
     print(name, 'inserts/sec:', int(inserts / duration))
     start = time.time()
-    dataset = iter(replay.dataset())
+    dataset = iter(replay.dataset(1))
     for _ in range(int(samples)):
       next(dataset)
     duration = time.time() - start
@@ -58,7 +58,7 @@ class TestReplay:
     duration = time.time() - start
     print('chunksize', chunksize, 'inserts/sec:', int(inserts / duration))
     start = time.time()
-    dataset = iter(replay.dataset())
+    dataset = iter(replay.dataset(1))
     for _ in range(int(samples)):
       next(dataset)
     duration = time.time() - start
@@ -100,7 +100,7 @@ class TestReplay:
     def sampler():
       try:
         ident = threading.get_ident()
-        dataset = iter(replay.dataset())
+        dataset = iter(replay.dataset(1))
         while running:
           next(dataset)
           samples[ident] += 1
@@ -112,9 +112,9 @@ class TestReplay:
       try:
         ident = threading.get_ident()
         while running:
-          replay.save()
+          data = replay.save()
           time.sleep(0.1)
-          replay.load()
+          replay.load(data)
           time.sleep(0.1)
           saves[ident] += 1
       except Exception as e:

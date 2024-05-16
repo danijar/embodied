@@ -17,8 +17,8 @@ class Dummy(embodied.Env):
     return {
         'image': embodied.Space(np.uint8, self._size + (3,)),
         'vector': embodied.Space(np.float32, (7,)),
-        # 'token': embodied.Space(np.int32, (), 0, 256),
-        'step': embodied.Space(np.int32, (), 0, self._length),
+        'token': embodied.Space(np.int32, (), 0, 256),
+        'step': embodied.Space(np.float32, (), 0, self._length),
         'reward': embodied.Space(np.float32),
         'is_first': embodied.Space(bool),
         'is_last': embodied.Space(bool),
@@ -27,11 +27,11 @@ class Dummy(embodied.Env):
 
   @property
   def act_space(self):
-    if self._task == 'cont':
-      space = embodied.Space(np.float32, (6,))
-    else:
-      space = embodied.Space(np.int32, (), 0, 5)
-    return {'action': space, 'reset': embodied.Space(bool)}
+    return {
+        'action': embodied.Space(np.int32, (), 0, 5),
+        'other': embodied.Space(np.float32, (6,)),
+        'reset': embodied.Space(bool),
+    }
 
   def step(self, action):
     if action['reset'] or self._done:
@@ -47,8 +47,8 @@ class Dummy(embodied.Env):
     return dict(
         image=np.zeros(self._size + (3,), np.uint8),
         vector=np.zeros(7, np.float32),
-        # token=np.zeros((), np.int32),
-        step=np.int32(self._step),
+        token=np.zeros((), np.int32),
+        step=np.float32(self._step),
         reward=np.float32(reward),
         is_first=is_first,
         is_last=is_last,

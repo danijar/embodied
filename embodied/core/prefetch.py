@@ -17,6 +17,9 @@ class Prefetch:
   def close(self):
     self.worker.stop()
 
+  def check(self):
+    self.worker.check()
+
   def __iter__(self):
     return self
 

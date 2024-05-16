@@ -1,8 +1,7 @@
 .pytest_cache
-.git
 dist
 __pycache__/
 *.py[cod]
 *.egg-info
 MUJOCO_LOG.TXT
-;
+[][';:]

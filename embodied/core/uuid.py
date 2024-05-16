@@ -32,6 +32,9 @@ class uuid:
       self.value = value.value
     elif isinstance(value, int):
       self.value = value.to_bytes(16, 'big')
+    elif isinstance(value, bytes):
+      assert len(value) == 16, value
+      self.value = value
     elif isinstance(value, str):
       if self.DEBUG_ID is None:
         integer = 0
@@ -44,7 +47,7 @@ class uuid:
       self.value = value.tobytes()
     else:
       raise ValueError(value)
-    assert type(self.value) == bytes, type(self.value)
+    assert type(self.value) == bytes, type(self.value)  # noqa
     assert len(self.value) == 16, len(self.value)
     self._hash = hash(self.value)
 

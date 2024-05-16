@@ -52,16 +52,15 @@ class LocoNav(embodied.Env):
         time_limit=60, task=task, random_state=None,
         strip_singleton_obs_buffer_dim=True)
     from . import dmc
-    self._env = dmc.DMC(env, repeat, size=size, camera=camera)
+    self._env = dmc.DMC(env, repeat, size=size, camera=camera, image=False)
     self._visited = None
     self._weaker = weaker
 
   @property
   def obs_space(self):
-    return {
-        **self._env.obs_space,
-        'log_coverage': embodied.Space(np.int64, low=0),
-    }
+    spaces = self._env.obs_space.copy()
+    spaces['log_coverage'] = embodied.Space(np.int32, low=-1)
+    return spaces
 
   @property
   def act_space(self):
@@ -78,7 +77,7 @@ class LocoNav(embodied.Env):
     global_pos = self._walker.get_pose(
         self._env._dmenv._physics)[0].reshape(-1)
     self._visited.add(tuple(np.round(global_pos[:2]).astype(int).tolist()))
-    obs['log_coverage'] = len(self._visited)
+    obs['log_coverage'] = np.int32(len(self._visited))
     return obs
 
   def _make_walker(self, name):

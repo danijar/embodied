@@ -16,15 +16,16 @@ class Replay:
 
   def __init__(
       self, length, capacity=None, directory=None, chunksize=1024, min_size=1,
-      samples_per_insert=None, tolerance=1e4, online=False, seed=0):
+      samples_per_insert=None, tolerance=1e4, online=False, selector=None,
+      save_wait=False, seed=0):
     assert not capacity or min_size <= capacity
 
     self.length = length
     self.capacity = capacity
-    self.directory = directory and embodied.Path(directory)
     self.chunksize = chunksize
 
-    self.sampler = selectors.Uniform(seed)
+    self.sampler = selector or selectors.Uniform(seed)
+
     if samples_per_insert:
       self.limiter = limiters.SamplesPerInsert(
           samples_per_insert, tolerance, min_size)
@@ -48,10 +49,15 @@ class Replay:
       self.lengths = defaultdict(int)
       self.queue = deque()
 
-    if self.directory:
-      self.directory.mkdirs()
-      self.workers = ThreadPoolExecutor(8, 'replay_saver')
-      self.promises = {}
+    if directory:
+      self.directory = embodied.Path(directory)
+      self.directory.mkdir()
+      self.workers = ThreadPoolExecutor(16, 'replay_saver')
+      self.saved = set()
+    else:
+      self.directory = None
+
+    self.save_wait = save_wait
 
     self.metrics = {
         'samples': 0,
@@ -60,6 +66,7 @@ class Replay:
         'inserts': 0,
         'insert_wait_dur': 0,
         'insert_wait_count': 0,
+        'updates': 0,
     }
 
   def __len__(self):
@@ -76,6 +83,7 @@ class Replay:
         'ram_gb': chunk_nbytes / (1024 ** 3),
         'inserts': m['inserts'],
         'samples': m['samples'],
+        'updates': m['updates'],
         'replay_ratio': ratio(self.length * m['samples'], m['inserts']),
         'insert_wait_avg': ratio(m['insert_wait_dur'], m['inserts']),
         'insert_wait_frac': ratio(m['insert_wait_count'], m['inserts']),
@@ -86,22 +94,12 @@ class Replay:
       self.metrics[key] = 0
     return stats
 
-  def clear(self):
-    self.chunks.clear()
-    self.refs.clear()
-    self.items.clear()
-    self.fifo.clear()
-    self.itemid = 0
-    self.current.clear()
-    self.streams.clear()
-
   @embodied.timer.section('replay_add')
   def add(self, step, worker=0):
     with self.rwlock.reading:
 
       step = {k: v for k, v in step.items() if not k.startswith('log_')}
       step = {k: np.asarray(v) for k, v in step.items()}
-      # step['id'] = np.asarray(embodied.uuid(step.get('id')))
 
       if worker not in self.current:
         chunk = chunklib.Chunk(self.chunksize)
@@ -111,6 +109,8 @@ class Replay:
         self.current[worker] = (chunk.uuid, 0)
 
       chunkid, index = self.current[worker]
+      step['stepid'] = np.frombuffer(
+          bytes(chunkid) + index.to_bytes(4, 'big'), np.uint8)
       stream = self.streams[worker]
       chunk = self.chunks[chunkid]
       assert chunk.length == index, (chunk.length, index)
@@ -143,64 +143,68 @@ class Replay:
       if self.online:
         self.lengths[worker] += 1
 
+  @embodied.timer.section('replay_update')
+  def update(self, data):
+    data = data.copy()
+    stepid = data.pop('stepid')
+    priority = data.pop('priority', None)
+    assert stepid.ndim == 3, stepid.shape
+    self.metrics['updates'] += int(np.prod(stepid.shape[:-1]))
+    if priority is not None:
+      assert priority.ndim == 2, priority.shape
+      self.sampler.prioritize(
+          stepid.reshape((-1, stepid.shape[-1])),
+          priority.flatten())
+    if data:
+      for i, stepid in enumerate(stepid):
+        stepid = stepid[0].tobytes()
+        chunkid = embodied.uuid(stepid[:-4])
+        index = int.from_bytes(stepid[-4:], 'big')
+        values = {k: v[i] for k, v in data.items()}
+        try:
+          self._setseq(chunkid, index, values)
+        except KeyError:
+          pass
+
   @embodied.timer.section('replay_sample')
   def _sample(self):
     dur = self._wait(self.limiter.want_sample, 'Replay sample is waiting')
     self.limiter.sample()
-    # These increments are not thread safe, so the metrics will be slightly
+    # These increments are not thread safe, so the metrics can be slightly
     # wrong and it's faster than introducing a lock.
     self.metrics['samples'] += 1
     self.metrics['sample_wait_dur'] += dur
     self.metrics['sample_wait_count'] += int(dur >= 0.001)
     while True:
-      with embodied.timer.section('draw'):
-        itemid = self.sampler()
-      with embodied.timer.section('lookup'):
-        # Look up the item or repeat if it was already removed in the meantime.
-        try:
+      try:
+        if self.online and self.queue:
+          chunkid, index = self.queue.popleft()
+          is_online = True
+        else:
+          with embodied.timer.section('sample'):
+            itemid = self.sampler()
           chunkid, index = self.items[itemid]
+          is_online = False
+        seq = self._getseq(chunkid, index, concat=False)
+        return seq, is_online
+      except KeyError:
+        continue
 
-          if self.online and self.queue:
-            chunkid, index = self.queue.popleft()
-
-          chunk = self.chunks[chunkid]
-          break
-        except KeyError:
-          continue
-    available = chunk.length - index
-    if available >= self.length:
-      with embodied.timer.section('slice'):
-        seq = chunk.slice(index, self.length)
-    else:
-      with embodied.timer.section('compose'):
-        parts = [chunk.slice(index, available)]
-        remaining = self.length - available
-        while remaining > 0:
-          chunk = self.chunks[chunk.succ]
-          take = min(remaining, chunk.length)
-          parts.append(chunk.slice(0, take))
-          remaining -= take
-        seq = {
-            k: np.concatenate([p[k] for p in parts], 0)
-            for k in parts[0].keys()}
-    with embodied.timer.section('isfirst'):
-      if 'is_first' in seq:
-        seq['is_first'] = seq['is_first'].copy()
-        seq['is_first'][0] = True
-    return seq
-
-  def _insert(self, chunkid, index):
+  def _insert(self, chunkid, index, loading=False):
+    while self.capacity and len(self.items) >= self.capacity:
+      self._remove(loading=loading)
     itemid = self.itemid
     self.itemid += 1
     self.items[itemid] = (chunkid, index)
-    self.sampler[itemid] = (chunkid, index)
+    stepids = self._getseq(chunkid, index, ['stepid'])['stepid']
+    self.sampler[itemid] = stepids
     self.fifo.append(itemid)
-    self.limiter.insert()
-    while self.capacity and len(self.items) > self.capacity:
-      self._remove()
+    if not loading:
+      self.limiter.insert()
 
-  def _remove(self):
-    self.limiter.remove()
+  def _remove(self, loading=False):
+    if not loading:
+      self.limiter.remove()
     itemid = self.fifo.popleft()
     del self.sampler[itemid]
     chunkid, index = self.items.pop(itemid)
@@ -212,35 +216,126 @@ class Replay:
         if chunk.succ in self.refs:
           self.refs[chunk.succ] -= 1
 
-  def dataset(self, batch=None):
-    if batch:
-      while True:
-        seqs = []
-        for _ in range(batch):
-          seqs.append(self._sample())
-        stacked = {
-            k: np.stack([seq[k] for seq in seqs])
-            for k in seqs[0].keys()}
-        yield stacked
+  def _getseq(self, chunkid, index, keys=None, concat=True):
+    chunk = self.chunks[chunkid]
+    available = chunk.length - index
+    if available >= self.length:
+      with embodied.timer.section('get_slice'):
+        seq = chunk.slice(index, self.length)
+        if not concat:
+          seq = {k: [v] for k, v in seq.items()}
+        return seq
     else:
-      while True:
-        yield self._sample()
+      with embodied.timer.section('get_compose'):
+        parts = [chunk.slice(index, available)]
+        remaining = self.length - available
+        while remaining > 0:
+          chunk = self.chunks[chunk.succ]
+          used = min(remaining, chunk.length)
+          parts.append(chunk.slice(0, used))
+          remaining -= used
+        seq = {k: [p[k] for p in parts] for k in keys or parts[0].keys()}
+        if concat:
+          seq = {k: np.concatenate(v, 0) for k, v in seq.items()}
+        return seq
+
+  def _setseq(self, chunkid, index, values):
+    length = len(next(iter(values.values())))
+    chunk = self.chunks[chunkid]
+    available = chunk.length - index
+    if available >= length:
+      with embodied.timer.section('set_slice'):
+        return chunk.update(index, length, values)
+    else:
+      with embodied.timer.section('set_compose'):
+        part = {k: v[:available] for k, v in values.items()}
+        values = {k: v[available:] for k, v in values.items()}
+        chunk.update(index, available, part)
+        remaining = length - available
+        while remaining > 0:
+          chunk = self.chunks[chunk.succ]
+          used = min(remaining, chunk.length)
+          part = {k: v[:used] for k, v in values.items()}
+          values = {k: v[used:] for k, v in values.items()}
+          chunk.update(0, used, part)
+          remaining -= used
+
+  def dataset(self, batch, length=None):
+    # For performance, each batch should be consecutive in memory, rather than
+    # a non-consecutive view into a longer batch. For example, this allows
+    # near-instant serialization when sending over the network.
+    while True:
+      seqs, is_online = zip(*[self._sample() for _ in range(batch)])
+      if not length or length == self.length:
+        data = self._assemble_batch(seqs, 0, self.length)
+        data = self._annotate_batch(data, is_online, is_first=True)
+        yield data
+      else:
+        assert length <= self.length, (length, self.length)
+        for t in range(0, self.length - self.length % length, length):
+          data = self._assemble_batch(seqs, t, t + length)
+          data = self._annotate_batch(data, is_online, is_first=(t == 0))
+          yield data
+
+  @embodied.timer.section('assemble_batch')
+  def _assemble_batch(self, seqs, start, stop):
+    shape = (len(seqs), stop - start)
+    data = {
+        key: np.empty((*shape, *parts[0].shape[1:]), parts[0].dtype)
+        for key, parts in seqs[0].items()}
+    for n, seq in enumerate(seqs):
+      st, dt = 0, 0  # Source and destination time index.
+      for p in range(len(seq['stepid'])):
+        partlen = len(seq['stepid'][p])
+        if start < st + partlen:
+          part_start = max(0, start - st)
+          part_stop = min(stop - st, partlen)
+          num = part_stop - part_start
+          for k in data.keys():
+            data[k][n, dt: dt + num] = seq[k][p][part_start: part_stop]
+          dt += num
+        st += partlen
+        if st >= stop:
+          break
+    return data
+
+  @embodied.timer.section('annotate_batch')
+  def _annotate_batch(self, data, is_online, is_first):
+    data = data.copy()
+    if self.online:
+      broadcasted = [[x] for x in is_online]
+      data['is_online'] = np.full(data['is_first'].shape, broadcasted, bool)
+    if 'is_first' in data:
+      if is_first:
+        data['is_first'] = data['is_first'].copy()
+        data['is_first'][:, 0] = True
+      if 'is_last' in data:
+        # Make sure that abandoned episodes have is_last set.
+        next_is_first = np.roll(data['is_first'], shift=-1, axis=1)
+        next_is_first[:, -1] = False
+        data['is_last'] = data['is_last'] | next_is_first
+    return data
 
   @embodied.timer.section('replay_save')
-  def save(self, wait=False):
-    if not self.directory:
-      return
-    with self.rwlock.writing:
-      [x.result() for x in list(self.promises.values())]
-      for worker, (chunkid, _) in self.current.items():
-        chunk = self.chunks[chunkid]
-        if chunk.length > 0:
-          self._complete(chunk, worker)
-      wait and [x.result() for x in list(self.promises.values())]
+  def save(self):
+    if self.directory:
+      with self.rwlock.writing:
+        for worker, (chunkid, _) in self.current.items():
+          chunk = self.chunks[chunkid]
+          if chunk.length > 0:
+            self._complete(chunk, worker)
+        promises = []
+        for chunk in self.chunks.values():
+          if chunk.length > 0 and chunk.uuid not in self.saved:
+            self.saved.add(chunk.uuid)
+            promises.append(self.workers.submit(chunk.save, self.directory))
+        if self.save_wait:
+          [promise.result() for promise in promises]
+    return {'limiter': self.limiter.save()}
 
   @embodied.timer.section('replay_load')
   def load(self, data=None, directory=None, amount=None):
-    assert data is None
+
     directory = directory or self.directory
     amount = amount or self.capacity or np.inf
     if not directory:
@@ -270,11 +365,12 @@ class Replay:
       chunks = [x for x in pool.map(load, filenames) if x]
 
     # We need to recompute the number of items per chunk now because some
-    # chunks be corrupted and thus not available.
+    # chunks may be corrupted and thus not available.
     # numitems = self._numitems(chunks + list(self.chunks.values()))
     numitems = self._numitems(chunks)
 
     with self.rwlock.writing:
+      self.saved.update([chunk.uuid for chunk in chunks])
       with self.refs_lock:
         for chunk in chunks:
           self.chunks[chunk.uuid] = chunk
@@ -285,7 +381,10 @@ class Replay:
           if chunk.succ in self.refs:
             self.refs[chunk.succ] += 1
           for index in range(amount):
-            self._insert(chunk.uuid, index)
+            self._insert(chunk.uuid, index, loading=True)
+
+    if data and 'limiter' in data:
+      self.limiter.load(data.pop('limiter'))
 
   @embodied.timer.section('complete_chunk')
   def _complete(self, chunk, worker):
@@ -296,9 +395,6 @@ class Replay:
     self.chunks[succ.uuid] = succ
     self.current[worker] = (succ.uuid, 0)
     chunk.succ = succ.uuid
-    if self.directory:
-      (worker in self.promises) and self.promises.pop(worker).result()
-      self.promises[worker] = self.workers.submit(chunk.save, self.directory)
     return succ
 
   def _numitems(self, chunks):
@@ -317,26 +413,17 @@ class Replay:
     numitems = {k: np.clip(v, 0, lengths[k]) for k, v in numitems.items()}
     return numitems
 
-  def _wait(self, predicate, message, sleep=0.01, notify=1.0):
-    # Early exit if rate is not currently limited.
+  def _wait(self, predicate, message, sleep=0.01, notify=60):
     if predicate(reason=False):
       return 0
-    # Wait without messages to avoid creating string objects.
-    start = time.time()
-    duration = 0
-    while duration < notify:
-      duration = time.time() - start
-      if predicate(reason=False):
-        return duration
-      time.sleep(sleep)
-    # Get the reason once to provide a useful user message.
-    allowed, reason = predicate(reason=True)
-    if allowed:
-      return time.time() - start
-    else:
-      embodied.print(f'{message} ({reason})')
-      time.sleep(sleep)
-    # Keep waiting without messages to avoid creating string objects.
+    start = last_notify = time.time()
     while not predicate(reason=False):
+      if time.time() - last_notify > notify:
+        allowed, reason = predicate(reason=True)
+        if allowed:
+          break
+        dur = time.time() - start
+        embodied.print(f'{message} {dur:.1f}s ({reason})')
+        last_notify = time.time()
       time.sleep(sleep)
     return time.time() - start

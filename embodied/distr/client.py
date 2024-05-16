@@ -5,8 +5,8 @@ from collections import deque
 
 import numpy as np
 
-from ..core import basics
 from ..core import fps
+from ..core import printing
 from ..core import timer
 from . import sockets
 
@@ -17,7 +17,7 @@ class Client:
 
   def __init__(
       self, address, name='Client', ipv6=False, identity=None,
-      pings=10, maxage=120, maxinflight=16, errors=True,
+      pings=10, maxage=300, maxinflight=16, errors=True,
       connect=False):
     if identity is None:
       identity = int(np.random.randint(2 ** 32))
@@ -139,7 +139,7 @@ class Client:
     return address
 
   def _print(self, text):
-    basics.print_(f'[{self.name}] {text}')
+    printing.print_(f'[{self.name}] {text}')
 
 
 class Future:

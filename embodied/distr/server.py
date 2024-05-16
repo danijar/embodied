@@ -1,11 +1,12 @@
 import concurrent.futures
 import time
+import traceback
 from collections import deque, namedtuple
 
 import numpy as np
 
 from ..core import agg
-from ..core import basics
+from ..core import printing
 from . import sockets
 from . import pool as poollib
 from . import thread
@@ -147,11 +148,15 @@ class Server:
           for addr, rid, payload in zip(addr, rid, payload):
             socket.send_result(addr, rid, payload)
           for recvd in recvd:
-            self.agg.add('result_time', now - recvd, ('min', 'avg', 'max'))
+            self.agg.add(method.name, now - recvd, ('min', 'avg', 'max'))
         else:
           socket.send_result(addr, rid, payload)
-          self.agg.add('result_time', now - recvd, ('min', 'avg', 'max'))
+          self.agg.add(method.name, now - recvd, ('min', 'avg', 'max'))
       except Exception as e:
+        print(f'Exception in server {self.name}:')
+        typ, tb = type(e), e.__traceback__
+        full = ''.join(traceback.format_exception(typ, e, tb)).strip('\n')
+        print(full)
         if method.batched:
           for addr, rid in zip(future.addr, future.rid):
             socket.send_error(addr, rid, repr(e))
@@ -200,4 +205,4 @@ class Server:
     return addr, rid, payload, logs, recvd
 
   def _print(self, text):
-    basics.print_(f'[{self.name}] {text}')
+    printing.print_(f'[{self.name}] {text}')

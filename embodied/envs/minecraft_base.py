@@ -18,7 +18,7 @@ class MinecraftBase(embodied.Env):
       sticky_attack=30,
       sticky_jump=10,
       pitch_limit=(-60, 60),
-      log_inv_keys=('diamond',),
+      log_inv_keys=('log', 'cobblestone', 'iron_ingot', 'diamond'),
       logs=False,
   ):
     if logs:
@@ -31,8 +31,7 @@ class MinecraftBase(embodied.Env):
     # Make env
     with self._LOCK:
       from .import minecraft_minerl
-      self._gymenv = minecraft_minerl.MineRLEnv(
-          size, break_speed, gamma).make()
+      self._gymenv = minecraft_minerl.MineRLEnv(size, break_speed).make()
     from . import from_gym
     self._env = from_gym.FromGym(self._gymenv)
     self._inventory = {}
@@ -85,7 +84,7 @@ class MinecraftBase(embodied.Env):
   @property
   def act_space(self):
     return {
-        'action': embodied.Space(np.int64, (), 0, len(self._action_values)),
+        'action': embodied.Space(np.int32, (), 0, len(self._action_values)),
         'reset': embodied.Space(bool),
     }
 

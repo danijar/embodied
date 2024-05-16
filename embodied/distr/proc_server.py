@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from ..core import basics
+from ..core import printing
 
 from . import process
 from . import server
@@ -69,7 +69,7 @@ class ProcServer:
     queues = collections.defaultdict(list)
     buffers = collections.defaultdict(dict)
     pending = {}
-    basics.print_(f'[{name}] Listening at {address}')
+    printing.print_(f'[{name}] Listening at {address}')
 
     while context.running:
 

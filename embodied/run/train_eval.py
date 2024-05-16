@@ -16,7 +16,7 @@ def train_eval(
   logger = make_logger()
 
   logdir = embodied.Path(args.logdir)
-  logdir.mkdirs()
+  logdir.mkdir()
   print('Logdir', logdir)
   step = logger.step
   usage = embodied.Usage(**args.usage)
@@ -25,13 +25,15 @@ def train_eval(
   train_epstats = embodied.Agg()
   eval_episodes = defaultdict(embodied.Agg)
   eval_epstats = embodied.Agg()
+  policy_fps = embodied.FPS()
+  train_fps = embodied.FPS()
 
-  batch_steps = args.batch_size * args.batch_length
+  batch_steps = args.batch_size * (args.batch_length - args.replay_context)
   should_expl = embodied.when.Until(args.expl_until)
   should_train = embodied.when.Ratio(args.train_ratio / batch_steps)
   should_log = embodied.when.Clock(args.log_every)
   should_save = embodied.when.Clock(args.save_every)
-  should_eval = embodied.when.Every(args.eval_every, args.eval_initial)
+  should_eval = embodied.when.Clock(args.eval_every)
 
   @embodied.timer.section('log_step')
   def log_step(tran, worker, mode):
@@ -62,15 +64,17 @@ def train_eval(
       result = episode.result()
       logger.add({
           'score': result.pop('score'),
-          'length': result.pop('length') - 1,
+          'length': result.pop('length'),
       }, prefix='episode')
       rew = result.pop('rewards')
-      result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
+      if len(rew) > 1:
+        result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
       epstats.add(result)
 
   fns = [bind(make_train_env, i) for i in range(args.num_envs)]
   train_driver = embodied.Driver(fns, args.driver_parallel)
   train_driver.on_step(lambda tran, _: step.increment())
+  train_driver.on_step(lambda tran, _: policy_fps.step())
   train_driver.on_step(train_replay.add)
   train_driver.on_step(bind(log_step, mode='train'))
 
@@ -78,20 +82,27 @@ def train_eval(
   eval_driver = embodied.Driver(fns, args.driver_parallel)
   eval_driver.on_step(eval_replay.add)
   eval_driver.on_step(bind(log_step, mode='eval'))
+  eval_driver.on_step(lambda tran, _: policy_fps.step())
 
-  train_dataset = agent.dataset(
-      embodied.Batch([train_replay.dataset] * args.batch_size))
-  eval_dataset = agent.dataset(
-      embodied.Batch([eval_replay.dataset] * args.batch_size))
-
+  dataset_train = agent.dataset(
+      bind(train_replay.dataset, args.batch_size, args.batch_length))
+  dataset_report = agent.dataset(
+      bind(train_replay.dataset, args.batch_size, args.batch_length_eval))
+  dataset_eval = agent.dataset(
+      bind(eval_replay.dataset, args.batch_size, args.batch_length_eval))
   carry = [agent.init_train(args.batch_size)]
+  carry_report = agent.init_report(args.batch_size)
+
   def train_step(tran, worker):
     if len(train_replay) < args.batch_size or step < args.train_fill:
       return
     for _ in range(should_train(step)):
       with embodied.timer.section('dataset_next'):
-        batch = next(train_dataset)
+        batch = next(dataset_train)
       outs, carry[0], mets = agent.train(batch, carry[0])
+      train_fps.step(batch_steps)
+      if 'replay' in outs:
+        train_replay.update(outs['replay'])
       agg.add(mets, prefix='train')
   train_driver.on_step(train_step)
 
@@ -117,20 +128,24 @@ def train_eval(
       eval_driver.reset(agent.init_policy)
       eval_driver(eval_policy, episodes=args.eval_eps)
       logger.add(eval_epstats.result(), prefix='epstats')
+      if len(train_replay):
+        mets, _ = agent.report(next(dataset_report), carry_report)
+        logger.add(mets, prefix='report')
       if len(eval_replay):
-        logger.add(agent.report(next(eval_dataset)), prefix='eval')
+        mets, _ = agent.report(next(dataset_eval), carry_report)
+        logger.add(mets, prefix='eval')
 
     train_driver(train_policy, steps=10)
 
     if should_log(step):
       logger.add(agg.result())
       logger.add(train_epstats.result(), prefix='epstats')
-      if len(train_replay):
-        logger.add(agent.report(next(train_dataset)), prefix='report')
       logger.add(embodied.timer.stats(), prefix='timer')
       logger.add(train_replay.stats(), prefix='replay')
       logger.add(usage.stats(), prefix='usage')
-      logger.write(fps=True)
+      logger.add({'fps/policy': policy_fps.result()})
+      logger.add({'fps/train': train_fps.result()})
+      logger.write()
 
     if should_save(step):
       checkpoint.save()

@@ -16,13 +16,15 @@ def train_holdout(
   logger = make_logger()
 
   logdir = embodied.Path(args.logdir)
-  logdir.mkdirs()
+  logdir.mkdir()
   print('Logdir', logdir)
   step = logger.step
   usage = embodied.Usage(**args.usage)
   agg = embodied.Agg()
   episodes = defaultdict(embodied.Agg)
   epstats = embodied.Agg()
+  policy_fps = embodied.FPS()
+  train_fps = embodied.FPS()
 
   batch_steps = args.batch_size * args.batch_length
   should_expl = embodied.when.Until(args.expl_until)
@@ -57,31 +59,40 @@ def train_holdout(
       result = episode.result()
       logger.add({
           'score': result.pop('score'),
-          'length': result.pop('length') - 1,
+          'length': result.pop('length'),
       }, prefix='episode')
       rew = result.pop('rewards')
-      result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
+      if len(rew) > 1:
+        result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
       epstats.add(result)
 
   fns = [bind(make_env, i) for i in range(args.num_envs)]
   driver = embodied.Driver(fns, args.driver_parallel)
   driver.on_step(lambda tran, _: step.increment())
+  driver.on_step(lambda tran, _: policy_fps.step())
   driver.on_step(train_replay.add)
   driver.on_step(log_step)
 
-  train_dataset = agent.dataset(
-      embodied.Batch([train_replay.dataset] * args.batch_size))
-  eval_dataset = agent.dataset(
-      embodied.Batch([eval_replay.dataset] * args.batch_size))
+  dataset_train = agent.dataset(
+      bind(train_replay.dataset, args.batch_size, args.batch_length))
+  dataset_report = agent.dataset(
+      bind(train_replay.dataset, args.batch_size, args.batch_length_eval))
+  dataset_eval = agent.dataset(
+      bind(eval_replay.dataset, args.batch_size, args.batch_length_eval))
 
   carry = [agent.init_train(args.batch_size)]
+  carry_report = agent.init_report(args.batch_size)
+
   def train_step(tran, worker):
     if len(train_replay) < args.batch_size or step < args.train_fill:
       return
     for _ in range(should_train(step)):
       with embodied.timer.section('dataset_next'):
-        batch = next(train_dataset)
+        batch = next(dataset_train)
       outs, carry[0], mets = agent.train(batch, carry[0])
+      train_fps.step(batch_steps)
+      if 'replay' in outs:
+        train_replay.update(outs['replay'])
       agg.add(mets, prefix='train')
   driver.on_step(train_step)
 
@@ -107,13 +118,17 @@ def train_holdout(
       logger.add(agg.result())
       logger.add(epstats.result(), prefix='epstats')
       if len(train_replay):
-        logger.add(agent.report(next(train_dataset)), prefix='report')
+        mets, _ = agent.report(next(dataset_report), init_report)
+        logger.add(mets, prefix='report')
       if len(eval_replay):
-        logger.add(agent.report(next(eval_dataset)), prefix='eval')
+        mets, _ = agent.report(next(dataset_eval), init_report)
+        logger.add(mets, prefix='eval')
       logger.add(embodied.timer.stats(), prefix='timer')
       logger.add(train_replay.stats(), prefix='replay')
       logger.add(usage.stats(), prefix='usage')
-      logger.write(fps=True)
+      logger.add({'fps/policy': policy_fps.result()})
+      logger.add({'fps/train': train_fps.result()})
+      logger.write()
 
     if should_save(step):
       checkpoint.save()

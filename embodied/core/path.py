@@ -102,7 +102,7 @@ class Path:
   def isdir(self):
     raise NotImplementedError
 
-  def mkdirs(self):
+  def mkdir(self):
     raise NotImplementedError
 
   def remove(self):
@@ -147,7 +147,7 @@ class LocalPath(Path):
   def isdir(self):
     return os.path.isdir(str(self))
 
-  def mkdirs(self):
+  def mkdir(self):
     os.makedirs(str(self), exist_ok=True)
 
   def remove(self):
@@ -210,7 +210,7 @@ class GFilePath(Path):
   def isdir(self):
     return self.gfile.isdir(str(self))
 
-  def mkdirs(self):
+  def mkdir(self):
     self.gfile.makedirs(str(self))
 
   def remove(self):
@@ -226,7 +226,7 @@ class GFilePath(Path):
     else:
       for folder, subdirs, files in self.gfile.walk(str(self)):
         target = type(self)(folder.replace(str(self), str(dest)))
-        target.exists() or target.mkdirs()
+        target.exists() or target.mkdir()
         for file in files:
           (type(self)(folder) / file).copy(target / file)
 

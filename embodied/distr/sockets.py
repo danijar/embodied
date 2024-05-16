@@ -158,6 +158,7 @@ class ServerSocket:
     self.socket.setsockopt(zmq.IPV6, ipv6)
     self.socket.setsockopt(zmq.LINGER, 0)
     self.socket.set_hwm(0)
+    print(f'Starting server at {addr}')
     self.socket.bind(addr)
     self.alive = {}
     self.rid = iter(itertools.count(0))
@@ -203,7 +204,8 @@ class ServerSocket:
 
   def send_result(self, addr, rid, payload):
     with self.lock:
-      self.socket.send_multipart([addr, Type.RESULT.value, rid, *payload])
+      self.socket.send_multipart(
+          [addr, Type.RESULT.value, rid, *payload], copy=False, track=True)
 
   def send_error(self, addr, rid, text):
     text = text.encode('utf-8')
@@ -217,12 +219,16 @@ class ServerSocket:
 
 def pack(data):
   data = {k: np.asarray(v) for k, v in data.items()}
+  for key, value in data.items():
+    assert value.data.c_contiguous, (
+        f'Value for key {key} is not contiguous in memory. Call arr.copy() ' +
+        'before passing the data into pack().')
   dtypes, shapes, buffers = [], [], []
   items = sorted(data.items(), key=lambda x: x[0])
   keys, vals = zip(*items) if items else ((), ())
   dtypes = [v.dtype.str for v in vals]
   shapes = [v.shape for v in vals]
-  buffers = [v.tobytes() for v in vals]
+  buffers = [v.data for v in vals]
   meta = (keys, dtypes, shapes)
   payload = [msgpack.packb(meta), *buffers]
   return payload

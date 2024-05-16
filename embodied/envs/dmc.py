@@ -12,7 +12,8 @@ class DMC(embodied.Env):
       locom_rodent=4,
   )
 
-  def __init__(self, env, repeat=1, render=True, size=(64, 64), camera=-1):
+  def __init__(
+      self, env, repeat=1, size=(64, 64), image=True, camera=-1):
     if 'MUJOCO_GL' not in os.environ:
       os.environ['MUJOCO_GL'] = 'egl'
     if isinstance(env, str):
@@ -39,15 +40,15 @@ class DMC(embodied.Env):
     self._env = from_dm.FromDM(self._dmenv)
     self._env = embodied.wrappers.ExpandScalars(self._env)
     self._env = embodied.wrappers.ActionRepeat(self._env, repeat)
-    self._render = render
     self._size = size
+    self._image = image
     self._camera = camera
 
   @functools.cached_property
   def obs_space(self):
     spaces = self._env.obs_space.copy()
-    if self._render:
-      spaces['image'] = embodied.Space(np.uint8, self._size + (3,))
+    key = 'image' if self._image else 'log_image'
+    spaces[key] = embodied.Space(np.uint8, self._size + (3,))
     return spaces
 
   @functools.cached_property
@@ -59,12 +60,9 @@ class DMC(embodied.Env):
       if not space.discrete:
         assert np.isfinite(action[key]).all(), (key, action[key])
     obs = self._env.step(action)
-    if self._render:
-      obs['image'] = self.render()
+    key = 'image' if self._image else 'log_image'
+    obs[key] = self._dmenv.physics.render(*self._size, camera_id=self._camera)
     for key, space in self.obs_space.items():
       if np.issubdtype(space.dtype, np.floating):
         assert np.isfinite(obs[key]).all(), (key, obs[key])
     return obs
-
-  def render(self):
-    return self._dmenv.physics.render(*self._size, camera_id=self._camera)

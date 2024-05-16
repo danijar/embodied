@@ -21,6 +21,10 @@ class FromGym(embodied.Env):
     self._info = None
 
   @property
+  def env(self):
+    return self._env
+
+  @property
   def info(self):
     return self._info
 

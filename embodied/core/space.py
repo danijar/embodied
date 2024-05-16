@@ -4,14 +4,14 @@ import numpy as np
 class Space:
 
   def __init__(self, dtype, shape=(), low=None, high=None):
-    # For integer types, high is the excluside upper bound.
+    # For integer types, high is one above the highest allowed value.
     shape = (shape,) if isinstance(shape, int) else shape
     self._dtype = np.dtype(dtype)
     assert self._dtype is not object, self._dtype
     assert isinstance(shape, tuple), shape
     self._low = self._infer_low(dtype, shape, low, high)
     self._high = self._infer_high(dtype, shape, low, high)
-    self._shape = self._infer_shape(dtype, shape, low, high)
+    self._shape = self._infer_shape(dtype, shape, self._low, self._high)
     self._discrete = (
         np.issubdtype(self.dtype, np.integer) or self.dtype == bool)
     self._random = np.random.RandomState()
@@ -35,6 +35,14 @@ class Space:
   @property
   def discrete(self):
     return self._discrete
+
+  @property
+  def classes(self):
+    assert self.discrete
+    classes = self._high - self._low
+    if not classes.ndim:
+      classes = int(classes.item())
+    return classes
 
   def __repr__(self):
     low = None if self.low is None else self.low.min()

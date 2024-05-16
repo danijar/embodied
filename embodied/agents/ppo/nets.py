@@ -1,241 +1,77 @@
-import einops
+from functools import partial as bind
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 from tensorflow_probability.substrates import jax as tfp
+f32 = jnp.float32
+tfd = tfp.distributions
+sg = lambda x: jax.tree.map(jax.lax.stop_gradient, x)
 
 from . import jaxutils
 from . import ninjax as nj
-
-f32 = jnp.float32
-tfd = tfp.distributions
-sg = lambda x: jax.tree_util.tree_map(jax.lax.stop_gradient, x)
 cast = jaxutils.cast_to_compute
 
 
-class RSSM(nj.Module):
+class GRU(nj.Module):
 
-  deter: int = 4096
-  hidden: int = 2048
-  stoch: int = 32
-  classes: int = 32
-  norm: str = 'rms'
-  act: str = 'gelu'
-  unroll: bool = False
-  unimix: float = 0.01
-  outscale: float = 1.0
-  imglayers: int = 2
-  obslayers: int = 1
-  dynlayers: int = 1
-  absolute: bool = False
-  cell: str = 'gru'
-  blocks: int = 8
-  block_fans: bool = False
-  block_norm: bool = False
+  def __init__(self, units=1024, bottleneck=-1, **kw):
+    self._units = units
+    self._bottleneck = bottleneck
+    self._kw = kw
 
-  def __init__(self, **kw):
-    self.kw = kw
+  def initial(self, batch_size):
+    return cast(jnp.zeros([batch_size, self._units], f32))
 
-  def initial(self, bsize):
-    carry = dict(
-        deter=jnp.zeros([bsize, self.deter], f32),
-        stoch=jnp.zeros([bsize, self.stoch, self.classes], f32))
-    if self.cell == 'stack':
-      carry['feat'] = jnp.zeros([bsize, self.hidden], f32)
-    return cast(carry)
+  def __call__(self, state, action, embed, reset, single=False):
+    state = cast(state)
+    if single:
+      state = self._step(state, action, embed, reset)
+      return state, state
+    state = jaxutils.scan(
+        lambda state, inputs: self._step(state, *inputs),
+        (action, embed, reset), state, axis=1)
+    return state, state[:, -1]
 
-  def outs_to_carry(self, outs):
-    keys = ('deter', 'stoch')
-    if self.cell == 'stack':
-      keys += ('feat',)
-    return {k: outs[k][:, -1] for k in keys}
+  def _step(self, state, action, embed, reset):
+    action = cast(jaxutils.concat_dict(action))
+    state = jaxutils.reset(state, reset)
+    action = jaxutils.reset(action, reset)
+    state = self._gru(state, action, embed)
+    return state
 
-  def observe(self, carry, action, embed, reset, bdims=2):
-    kw = dict(**self.kw, norm=self.norm, act=self.act)
-    assert bdims in (1, 2)
-    if isinstance(action, dict):
-      action = jaxutils.concat_dict(action)
-    carry, action, embed = cast((carry, action, embed))
-    if bdims == 2:
-      return jaxutils.scan(
-          lambda carry, inputs: self.observe(carry, *inputs, bdims=1),
-          carry, (action, embed, reset), self.unroll, axis=1)
-    deter, stoch, action = jaxutils.reset(
-        (carry['deter'], carry['stoch'], action), reset)
-    deter, feat = self._gru(deter, stoch, action)
-    x = embed if self.absolute else jnp.concatenate([feat, embed], -1)
-    for i in range(self.obslayers):
-      x = self.get(f'obs{i}', Linear, self.hidden, **kw)(x)
-    logit = self._logit('obslogit', x)
-    stoch = cast(self._dist(logit).sample(seed=nj.seed()))
-    carry = dict(deter=deter, stoch=stoch)
-    outs = dict(deter=deter, stoch=stoch, logit=logit)
-    if self.cell == 'stack':
-      carry['feat'] = feat
-      outs['feat'] = feat
-    return cast(carry), cast(outs)
-
-  def imagine(self, carry, action, bdims=2):
-    assert bdims in (1, 2)
-    if isinstance(action, dict):
-      action = jaxutils.concat_dict(action)
-    carry, action = cast((carry, action))
-    if bdims == 2:
-      return jaxutils.scan(
-          lambda carry, action: self.imagine(carry, action, bdims=1),
-          cast(carry), cast(action), self.unroll, axis=1)
-    deter, feat = self._gru(carry['deter'], carry['stoch'], action)
-    logit = self._prior(feat)
-    stoch = cast(self._dist(logit).sample(seed=nj.seed()))
-    carry = dict(deter=deter, stoch=stoch)
-    outs = dict(deter=deter, stoch=stoch, logit=logit)
-    if self.cell == 'stack':
-      carry['feat'] = feat
-      outs['feat'] = feat
-    return cast(carry), cast(outs)
-
-  def loss(self, outs, free=1.0):
-    metrics = {}
-    prior = self._prior(outs.get('feat', outs['deter']))
-    post = outs['logit']
-    dyn = self._dist(sg(post)).kl_divergence(self._dist(prior))
-    rep = self._dist(post).kl_divergence(self._dist(sg(prior)))
-    if free:
-      dyn = jnp.maximum(dyn, free)
-      rep = jnp.maximum(rep, free)
-    metrics.update(jaxutils.tensorstats(
-        self._dist(prior).entropy(), 'prior_ent'))
-    metrics.update(jaxutils.tensorstats(
-        self._dist(post).entropy(), 'post_ent'))
-    return {'dyn': dyn, 'rep': rep}, metrics
-
-  def _prior(self, feat):
-    kw = dict(**self.kw, norm=self.norm, act=self.act)
-    x = feat
-    for i in range(self.imglayers):
-      x = self.get(f'img{i}', Linear, self.hidden, **kw)(x)
-    return self._logit('imglogit', x)
-
-  def _gru(self, deter, stoch, action):
-    kw = dict(**self.kw, norm=self.norm, act=self.act)
-    inkw = {**self.kw, 'norm': self.norm, 'binit': False}
-    stoch = stoch.reshape((stoch.shape[0], -1))
+  def _gru(self, state, action, embed):
+    batch_shape = state.shape[:-1]
     action /= sg(jnp.maximum(1, jnp.abs(action)))
-    if self.cell == 'gru':
-      x0 = self.get('dynnorm', Norm, self.norm)(deter)
-      x1 = self.get('dynin1', Linear, self.hidden, **inkw)(stoch)
-      x2 = self.get('dynin2', Linear, self.hidden, **inkw)(action)
-      x = jnp.concatenate([x0, x1, x2], -1)
-      for i in range(self.dynlayers):
-        x = self.get(f'dyn{i}', Linear, self.hidden, **kw)(x)
-      x = self.get('dyncore', Linear, 3 * self.deter, **self.kw)(x)
-      reset, cand, update = jnp.split(x, 3, -1)
-      reset = jax.nn.sigmoid(reset)
-      cand = jnp.tanh(reset * cand)
-      update = jax.nn.sigmoid(update - 1)
-      deter = update * cand + (1 - update) * deter
-      out = deter
-    elif self.cell == 'mgu':
-      x0 = self.get('dynnorm', Norm, self.norm)(deter)
-      x1 = self.get('dynin1', Linear, self.hidden, **inkw)(stoch)
-      x2 = self.get('dynin2', Linear, self.hidden, **inkw)(action)
-      x = jnp.concatenate([x0, x1, x2], -1)
-      for i in range(self.dynlayers):
-        x = self.get(f'dyn{i}', Linear, self.hidden, **kw)(x)
-      x = self.get('dyncore', Linear, 2 * self.deter, **self.kw)(x)
-      cand, update = jnp.split(x, 2, -1)
-      update = jax.nn.sigmoid(update - 1)
-      cand = jnp.tanh((1 - update) * cand)
-      deter = update * cand + (1 - update) * deter
-      out = deter
-    elif self.cell == 'blockgru':
-      g = self.blocks
-      flat2group = lambda x: einops.rearrange(x, '... (g h) -> ... g h', g=g)
-      group2flat = lambda x: einops.rearrange(x, '... g h -> ... (g h)', g=g)
-      x0 = self.get('dynin0', Linear, self.hidden, **kw)(deter)
-      x1 = self.get('dynin1', Linear, self.hidden, **kw)(stoch)
-      x2 = self.get('dynin2', Linear, self.hidden, **kw)(action)
-      x = jnp.concatenate([x0, x1, x2], -1)[..., None, :].repeat(g, -2)
-      x = group2flat(jnp.concatenate([flat2group(deter), x], -1))
-      for i in range(self.dynlayers):
-        x = self.get(
-            f'dyn{i}', BlockLinear, self.deter, g, **kw,
-            block_norm=self.block_norm, block_fans=self.block_fans)(x)
-      x = self.get(
-          'dyncore', BlockLinear, 3 * self.deter, g, **self.kw,
-          block_fans=self.block_fans)(x)
-      gates = jnp.split(flat2group(x), 3, -1)
-      reset, cand, update = [group2flat(x) for x in gates]
-      reset = jax.nn.sigmoid(reset)
-      cand = jnp.tanh(reset * cand)
-      update = jax.nn.sigmoid(update - 1)
-      deter = update * cand + (1 - update) * deter
-      out = deter
-    elif self.cell == 'stack':
-      result = []
-      deters = jnp.split(deter, self.dynlayers, -1)
-      x = jnp.concatenate([stoch, action], -1)
-      x = self.get('in', Linear, self.hidden, **kw)(x)
-      for i in range(self.dynlayers):
-        skip = x
-        x = get_act(self.act)(jnp.concatenate([
-            self.get(f'dyngru{i}norm1', Norm, self.norm)(deters[i]),
-            self.get(f'dyngru{i}norm2', Norm, self.norm)(x)], -1))
-        x = self.get(
-            f'dyngru{i}core', Linear, 3 * deters[i].shape[-1], **self.kw)(x)
-        reset, cand, update = jnp.split(x, 3, -1)
-        reset = jax.nn.sigmoid(reset)
-        cand = jnp.tanh(reset * cand)
-        update = jax.nn.sigmoid(update - 1)
-        deter = update * cand + (1 - update) * deters[i]
-        result.append(deter)
-        x = self.get(f'dyngru{i}proj', Linear, self.hidden, **self.kw)(x)
-        x += skip
-        skip = x
-        x = self.get(f'dynmlp{i}norm', Norm, self.norm)(x)
-        x = self.get(
-            f'dynmlp{i}up', Linear, deters[i].shape[-1], **self.kw)(x)
-        x = get_act(self.act)(x)
-        x = self.get(f'dynmlp{i}down', Linear, self.hidden, **self.kw)(x)
-        x += skip
-      out = self.get('outnorm', Norm, self.norm)(x)
-      deter = jnp.concatenate(result, -1)
-    else:
-      raise NotImplementedError(self.cell)
-    return deter, out
-
-  def _logit(self, name, x):
-    kw = dict(**self.kw, outscale=self.outscale)
-    kw['binit'] = False
-    x = self.get(name, Linear, self.stoch * self.classes, **kw)(x)
-    logit = x.reshape(x.shape[:-1] + (self.stoch, self.classes))
-    if self.unimix:
-      probs = jax.nn.softmax(logit, -1)
-      uniform = jnp.ones_like(probs) / probs.shape[-1]
-      probs = (1 - self.unimix) * probs + self.unimix * uniform
-      logit = jnp.log(probs)
-    return logit
-
-  def _dist(self, logit):
-    return tfd.Independent(jaxutils.OneHotDist(logit.astype(f32)), 1)
+    x = jnp.concatenate([
+        cast(action).reshape((*batch_shape, -1)),
+        cast(embed).reshape((*batch_shape, -1)),
+    ], -1)
+    x = jnp.concatenate([state, x], -1)
+    kw = {**self._kw, 'units': 3 * self._units, 'act': 'none'}
+    x = self.get('gru', Linear, **kw)(x)
+    reset, cand, update = jnp.split(x, 3, -1)
+    reset = jax.nn.sigmoid(reset)
+    cand = jnp.tanh(reset * cand)
+    update = jax.nn.sigmoid(update - 1)
+    state = update * cand + (1 - update) * state
+    return state
 
 
-class SimpleEncoder(nj.Module):
+class ImpalaEncoder(nj.Module):
 
-  depth: int = 128
-  mults: tuple = (1, 2, 4, 2)
-  layers: int = 5
-  units: int = 1024
+  depth: int = 32
+  mults: tuple = (1, 2, 2)
+  outmult: int = 16
+  blocks: int = 2
+  act: str = 'relu'
+  norm: str = 'none'
   symlog: bool = True
-  norm: str = 'rms'
-  act: str = 'gelu'
-  kernel: int = 4
-  outer: bool = False
-  minres: int = 4
+  layers: int = 5
+  units: int = 512
 
   def __init__(self, spaces, **kw):
     assert all(len(s.shape) <= 3 for s in spaces.values()), spaces
-    self.spaces = spaces
     self.veckeys = [k for k, s in spaces.items() if len(s.shape) <= 2]
     self.imgkeys = [k for k, s in spaces.items() if len(s.shape) == 3]
     self.vecinp = Input(self.veckeys, featdims=1)
@@ -246,10 +82,6 @@ class SimpleEncoder(nj.Module):
   def __call__(self, data, bdims=2):
     kw = dict(**self.kw, norm=self.norm, act=self.act)
     outs = []
-
-    shape = data['is_first'].shape[:bdims]
-    data = {k: data[k] for k in self.spaces}
-    data = jaxutils.onehot_dict(data, self.spaces)
 
     if self.veckeys:
       x = self.vecinp(data, bdims, f32)
@@ -264,117 +96,32 @@ class SimpleEncoder(nj.Module):
       print('ENC')
       x = self.imginp(data, bdims, jaxutils.COMPUTE_DTYPE) - 0.5
       x = x.reshape((-1, *x.shape[bdims:]))
-      for i, depth in enumerate(self.depths):
-        stride = 1 if self.outer and i == 0 else 2
-        x = self.get(f'conv{i}', Conv2D, depth, self.kernel, stride, **kw)(x)
-      assert x.shape[-3] == x.shape[-2] == self.minres, x.shape
+      for s, depth in enumerate(self.depths):
+        x = self.get(f's{s}in', Conv2D, depth, 3)(x)
+        x = jax.lax.reduce_window(
+            x, -jnp.inf, jax.lax.max, (1, 3, 3, 1), (1, 2, 2, 1), 'same')
+        for b in range(self.blocks):
+          skip = x
+          x = self.get(f's{s}b{b}n1', Norm, self.norm, act=self.act)(x)
+          x = self.get(f's{s}b{b}c1', Conv2D, depth, 3, **self.kw)(x)
+          x = self.get(f's{s}b{b}n2', Norm, self.norm, act=self.act)(x)
+          x = self.get(f's{s}b{b}c2', Conv2D, depth, 3, **self.kw)(x)
+          x += skip
       x = x.reshape((x.shape[0], -1))
-      print(x.shape, 'out')
+      x = self.get('outn1', Norm, self.norm, act=self.act)(x)
+      x = self.get('outl', Linear, self.outmult * self.depth, **self.kw)(x)
+      x = self.get('outn2', Norm, self.norm, act=self.act)(x)
       outs.append(x)
 
     x = jnp.concatenate(outs, -1)
-    x = x.reshape((*shape, *x.shape[1:]))
+    x = x.reshape((*data['is_first'].shape, *x.shape[1:]))
     return x
-
-
-class SimpleDecoder(nj.Module):
-
-  inputs: tuple = ('deter', 'stoch')
-  depth: int = 128
-  mults: tuple = (1, 2, 4, 3)
-  sigmoid: bool = True
-  layers: int = 5
-  units: int = 1024
-  norm: str = 'rms'
-  act: str = 'gelu'
-  outscale: float = 1.0
-  vecdist: str = 'symlog_mse'
-  kernel: int = 4
-  outer: bool = False
-  block_fans: bool = False
-  block_norm: bool = False
-  block_space: int = 0
-  hidden_stoch: bool = False
-  space_hidden: int = 0
-  minres: int = 4
-
-  def __init__(self, spaces, **kw):
-    assert all(len(s.shape) <= 3 for s in spaces.values()), spaces
-    self.inp = Input(self.inputs, featdims=1)
-    self.veckeys = [k for k, s in spaces.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in spaces.items() if len(s.shape) == 3]
-    self.spaces = spaces
-    self.depths = tuple([self.depth * mult for mult in self.mults])
-    self.imgdep = sum(self.spaces[k].shape[-1] for k in self.imgkeys)
-    self.kw = kw
-
-  def __call__(self, lat, bdims=2):
-    kw = dict(**self.kw, norm=self.norm, act=self.act)
-    outs = {}
-
-    if self.veckeys:
-      inp = self.inp(lat, bdims, jaxutils.COMPUTE_DTYPE)
-      x = inp.reshape((-1, inp.shape[-1]))
-      for i in range(self.layers):
-        x = self.get(f'mlp{i}', Linear, self.units, **kw)(x)
-      x = x.reshape((*inp.shape[:bdims], *x.shape[1:]))
-      for k in self.veckeys:
-        dist = (
-            dict(dist='softmax', bins=self.spaces[k].classes)
-            if self.spaces[k].discrete else dict(dist=self.vecdist))
-        k = k.replace('/', '_')
-        outs[k] = self.get(f'out_{k}', Dist, self.spaces[k].shape, **dist)(x)
-
-    if self.imgkeys:
-      inp = self.inp(lat, bdims, jaxutils.COMPUTE_DTYPE)
-      print('DEC')
-      shape = (self.minres, self.minres, self.depths[-1])
-      x = inp.reshape((-1, inp.shape[-1]))
-
-      if self.space_hidden:
-        x = self.get('space0', Linear, self.space_hidden * self.units, **kw)(x)
-        x = self.get('space1', Linear, shape, **kw)(x)
-      elif self.block_space:
-        g = self.block_space
-        x0 = einops.rearrange(cast(lat['deter']), 'b t ... -> (b t) ...')
-        x1 = einops.rearrange(cast(lat['stoch']), 'b t l c -> (b t) (l c)')
-        x0 = self.get(
-            'space0', BlockLinear, int(np.prod(shape)), g, **self.kw,
-            block_fans=self.block_fans, block_norm=self.block_norm)(x0)
-        x0 = einops.rearrange(
-            x0, '... (g h w c) -> ... h w (g c)',
-            h=self.minres, w=self.minres, g=g)
-        if self.hidden_stoch:
-          x1 = self.get('space1hid', Linear, 2 * self.units, **kw)(x1)
-        x1 = self.get('space1', Linear, shape, **self.kw)(x1)
-        x = self.get('spacenorm', Norm, self.norm, act=self.act)(x0 + x1)
-      else:
-        x = self.get('space', Linear, shape, **kw)(x)
-
-      print(x.shape, 'in')
-      for i, depth in reversed(list(enumerate(self.depths[:-1]))):
-        x = self.get(
-            f'conv{i}', Conv2D, depth, self.kernel, 2, **kw, transp=True)(x)
-      outkw = dict(**self.kw, outscale=self.outscale, transp=True)
-      stride = 1 if self.outer else 2
-      x = self.get(
-          'imgout', Conv2D, self.imgdep, self.kernel, stride, **outkw)(x)
-      x = jax.nn.sigmoid(x) if self.sigmoid else x + 0.5
-      print(x.shape, 'out')
-      x = x.reshape((*inp.shape[:bdims], *x.shape[1:]))
-      split = np.cumsum([self.spaces[k].shape[-1] for k in self.imgkeys][:-1])
-      for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):
-        outs[k] = jaxutils.MSEDist(f32(out), 3, 'sum')
-
-    return outs
 
 
 class MLP(nj.Module):
 
   layers: int = None
   units: int = None
-  block_fans: bool = False
-  block_norm: bool = False
 
   def __init__(self, shape, dist='mse', inputs=['tensor'], **kw):
     shape = (shape,) if isinstance(shape, (int, np.integer)) else shape
@@ -433,7 +180,6 @@ class Dist(nj.Module):
   def inner(self, inputs):
     shape = self.shape
     padding = 0
-
     if 'twohot' in self.dist or self.dist == 'softmax':
       padding = int(self.bins % 2)
       shape = (*self.shape, self.bins + padding)
@@ -448,16 +194,7 @@ class Dist(nj.Module):
       std = std.reshape(inputs.shape[:-1] + self.shape).astype(f32)
 
     if self.dist == 'symlog_mse':
-      fwd, bwd = jaxutils.symlog, jaxutils.symexp
-      return jaxutils.TransformedMseDist(out, len(self.shape), fwd, bwd)
-
-    if self.dist == 'hyperbolic_mse':
-      fwd = lambda x, eps=1e-3: (
-          jnp.sign(x) * (jnp.sqrt(jnp.abs(x) + 1) - 1) + eps * x)
-      bwd = lambda x, eps=1e-3: jnp.sign(x) * (jnp.square(
-          jnp.sqrt(1 + 4 * eps * (eps + 1 + jnp.abs(x))) / 2 / eps -
-          1 / 2 / eps) - 1)
-      return jaxutils.TransformedMseDist(out, len(self.shape), fwd, bwd)
+      return jaxutils.SymlogDist(out, len(self.shape), 'mse', 'sum')
 
     if self.dist == 'symlog_and_twohot':
       bins = np.linspace(-20, 20, out.shape[-1])
@@ -475,7 +212,7 @@ class Dist(nj.Module):
         bins = jnp.concatenate([half, -half[::-1]], 0)
       return jaxutils.TwoHotDist(out, bins, len(self.shape))
 
-    if self.dist == 'hyperbolic_twohot':
+    if self.dist == 'parab_twohot':
       eps = 0.001
       f = lambda x: np.sign(x) * (np.square(np.sqrt(
           1 + 4 * eps * (eps + 1 + np.abs(x))) / 2 / eps - 1 / 2 / eps) - 1)
@@ -488,7 +225,11 @@ class Dist(nj.Module):
     if self.dist == 'huber':
       return jaxutils.HuberDist(out, len(self.shape), 'sum')
 
-    if self.dist == 'normal':
+    if self.dist == 'normal_logstd':
+      dist = tfd.Normal(out, jnp.exp(std) + 1e-8)
+      return tfd.Independent(dist, len(self.shape))
+
+    if self.dist == 'normal_sigmoidstd':
       lo, hi = self.minstd, self.maxstd
       std = (hi - lo) * jax.nn.sigmoid(std + 2.0) + lo
       dist = tfd.Normal(jnp.tanh(out), std)
@@ -536,6 +277,147 @@ class Dist(nj.Module):
     raise NotImplementedError(self.dist)
 
 
+class ConvBlock(nj.Module):
+
+  norm: str = 'rms'
+  act: str = 'gelu'
+
+  def __init__(self, impl, depth, kernel=4, **kw):
+    self.impl = impl
+    self.depth = depth
+    self.kernel = kernel
+    self.kw = kw
+
+  def __call__(self, x):
+    skip = x
+    if self.impl == 'naive':
+      kw = dict(**self.kw, norm=self.norm, act=self.act)
+      x = self.get('mix', Conv2D, self.depth, self.kernel, **kw)(x)
+      x = self.get('mix', Conv2D, self.depth, self.kernel, **kw)(x)
+    elif self.impl == 'convnext':
+      dkw = dict(**self.kw, groups=self.depth, norm=self.norm)
+      x = self.get('mix', Conv2D, self.depth, 7, **dkw)(x)
+      x = self.get('up', Linear, 4 * self.depth, act=self.act, **self.kw)(x)
+      # x = self.get('grn', Norm, 'grn')(x)
+      x = self.get('down', Linear, self.depth, **self.kw)(x)
+      x += skip
+    elif self.impl == 'convnextv2':
+      dkw = dict(**self.kw, groups=self.depth, norm=self.norm)
+      x = self.get('mix', Conv2D, self.depth, 7, **dkw)(x)
+      x = self.get('up', Linear, 4 * self.depth, act=self.act, **self.kw)(x)
+      x = self.get('grn', Norm, 'grn')(x)
+      x = self.get('down', Linear, self.depth, **self.kw)(x)
+      x += skip
+    elif self.impl == 'resnet':
+      x = self.get('norm1', Norm, self.norm, act=self.act)(x)
+      x = self.get('conv1', Conv2D, self.depth, self.kernel, **self.kw)(x)
+      x = self.get('norm2', Norm, self.norm, act=self.act)(x)
+      x = self.get('conv2', Conv2D, self.depth, self.kernel, **self.kw)(x)
+      x += skip
+    elif self.impl == 'resnet_scaled':
+      x = self.get('norm1', Norm, self.norm, act=self.act)(x)
+      x = self.get('conv1', Conv2D, self.depth, self.kernel, **self.kw)(x)
+      x = self.get('norm2', Norm, self.norm, act=self.act)(x)
+      x = self.get('conv2', Conv2D, self.depth, self.kernel, **self.kw)(x)
+      x = (x + skip) / float(np.sqrt(2))
+    elif self.impl == 'resnet_zeroinit':
+      x = self.get('norm1', Norm, self.norm, act=self.act)(x)
+      x = self.get('conv1', Conv2D, self.depth, self.kernel, **self.kw)(x)
+      x = self.get('norm2', Norm, self.norm, act=self.act)(x)
+      kw = dict(**self.kw, outscale=1e-10)
+      x = self.get('conv2', Conv2D, self.depth, self.kernel, **kw)(x)
+      x = (x + skip) / float(np.sqrt(2))
+    elif self.impl == 'taming':
+      x = self.get('norm1', Norm, self.norm, act=self.act)(x)
+      x = self.get('conv1', Conv2D, self.depth, 3, **self.kw)(x)
+      x = self.get('norm2', Norm, self.norm, act=self.act)(x)
+      x = self.get('conv2', Conv2D, self.depth, 3, **self.kw)(x)
+      if skip.shape[-1] != self.depth:
+        skip = self.get('skip', Conv2D, self.depth, 1, **self.kw)(skip)
+      x += skip
+    else:
+      raise NotImplementedError(self.impl)
+    print(x.shape, self.path)
+    return x
+
+
+class ConvDown(nj.Module):
+
+  norm: str = 'rms'
+  act: str = 'gelu'
+
+  def __init__(self, impl, depth, kernel=4, **kw):
+    self.impl = impl
+    self.depth = depth
+    self.kernel = kernel
+    self.kw = kw
+
+  def __call__(self, x):
+    b, h, w, c = x.shape
+    d, k = self.depth, self.kernel
+    if self.impl == 'stride_act':
+      kw = dict(**self.kw, norm=self.norm, act=self.act)
+      x = self.get('conv', Conv2D, d, k, 2, **kw)(x)
+    elif self.impl == 'stride':
+      x = self.get('conv', Conv2D, d, k, 2, **self.kw)(x)
+    elif self.impl == 'norm_stride':
+      x = self.get('norm', Norm, self.norm)(x)
+      x = self.get('conv', Conv2D, d, k, 2, **self.kw)(x)
+    elif self.impl == 'stride_norm':
+      x = self.get('conv', Conv2D, d, k, 2, **self.kw)(x)
+      x = self.get('norm', Norm, self.norm)(x)
+    elif self.impl == 'average_conv':
+      x = x.reshape((b, h // 2, w // 2, 4, d)).mean(-2)
+      x = self.get('conv', Conv2D, d, k, **self.kw)(x)
+    elif self.impl == 'bilinear_conv':
+      x = jax.image.resize(x, (b, h // 2, w // 2, d), 'bilinear')
+      x = self.get('conv', Conv2D, d, k, **self.kw)(x)
+    else:
+      raise NotImplementedError(self.impl)
+    print(x.shape, self.path)
+    return x
+
+
+class ConvUp(nj.Module):
+
+  norm: str = 'rms'
+  act: str = 'gelu'
+
+  def __init__(self, impl, depth, kernel=4, **kw):
+    self.impl = impl
+    self.depth = depth
+    self.kernel = kernel
+    self.kw = kw
+
+  def __call__(self, x):
+    b, h, w, c = x.shape
+    d, k = self.depth, self.kernel
+    if self.impl == 'stride_act':
+      kw = dict(**self.kw, norm=self.norm, act=self.act)
+      x = self.get('conv', Conv2D, d, k, 2, **kw, transp=True)(x)
+    elif self.impl == 'stride':
+      x = self.get('conv', Conv2D, d, k, 2, **self.kw, transp=True)(x)
+    elif self.impl == 'norm_stride':
+      x = self.get('norm', Norm, self.norm)(x)
+      x = self.get('conv', Conv2D, d, k, 2, **self.kw, transp=True)(x)
+    elif self.impl == 'stride_norm':
+      x = self.get('conv', Conv2D, d, k, 2, **self.kw, transp=True)(x)
+      x = self.get('norm', Norm, self.norm)(x)
+    elif self.impl == 'nearest_conv':
+      x = x.reshape((b, h, 1, w, 1, c))
+      x = jnp.tile(x, [1, 1, 2, 1, 2, 1])
+      x = x.reshape((b, h * 2, w * 2, c))
+      # x = x.repeat(2, -3).repeat(2, -2)
+      x = self.get('conv', Conv2D, d, k, **self.kw)(x)
+    elif self.impl == 'bilinear_conv':
+      x = jax.image.resize(x, (b, h * 2, w * 2, d), 'bilinear')
+      x = self.get('conv', Conv2D, d, k, **self.kw)(x)
+    else:
+      raise NotImplementedError(self.impl)
+    print(x.shape, self.path)
+    return x
+
+
 class Conv2D(nj.Module):
 
   groups: int = 1
@@ -568,13 +450,13 @@ class Conv2D(nj.Module):
   def _layer(self, x):
     if self.transp:
       assert self.groups == 1, self.groups
-      shape = (self.kernel, self.kernel, x.shape[-1], self.depth)
+      shape = (self.kernel, self.kernel, self.depth, x.shape[-1])
       kernel = self.get('kernel', self._winit, shape)
       kernel = jaxutils.cast_to_compute(kernel)
       flops = int(np.prod(shape)) * x.shape[-3] * x.shape[-2]
       x = jax.lax.conv_transpose(
           x, kernel, (self.stride, self.stride), self.pad.upper(),
-          dimension_numbers=('NHWC', 'HWIO', 'NHWC'))
+          dimension_numbers=('NHWC', 'HWOI', 'NHWC'))
     else:
       G = self.groups
       shape = (self.kernel, self.kernel, x.shape[-1] // G, self.depth)
@@ -593,6 +475,9 @@ class Conv2D(nj.Module):
       x += self.get('bias', *args).astype(x.dtype)
       flops += int(np.prod(x.shape[-3:]))
     assert x.dtype == jaxutils.COMPUTE_DTYPE, (x.dtype, x.shape)
+    jaxutils.TRACKSHAPES.append((self.path, x.shape[-3:]))
+    jaxutils.TRACKACTS.append((self.path, x.shape))
+    jaxutils.TRACKFLOPS.append((self.path, flops))
     return x
 
 
@@ -606,12 +491,10 @@ class Linear(nj.Module):
   binit: bool = False
   fan: str = 'in'
   dtype: str = 'default'
-  fanin: int = 0
 
   def __init__(self, units):
     self.units = (units,) if isinstance(units, int) else tuple(units)
-    self._winit = Initializer(
-        self.winit, self.outscale, self.fan, self.dtype)
+    self._winit = Initializer(self.winit, self.outscale, self.fan, self.dtype)
     self._binit = Initializer('zeros', 1.0, self.fan, self.dtype)
     self._norm = Norm(self.norm, name='norm')
 
@@ -624,8 +507,7 @@ class Linear(nj.Module):
 
   def _layer(self, x):
     shape = (x.shape[-1], int(np.prod(self.units)))
-    fan_shape = (self.fanin, shape[1]) if self.fanin else None
-    x = x @ self.get('kernel', self._winit, shape, fan_shape).astype(x.dtype)
+    x = x @ self.get('kernel', self._winit, shape).astype(x.dtype)
     flops = int(np.prod(shape))
     if self.bias:
       if self.binit:
@@ -635,6 +517,9 @@ class Linear(nj.Module):
       x += self.get('bias', *args).astype(x.dtype)
       flops += int(np.prod(self.units))
     assert x.dtype == jaxutils.COMPUTE_DTYPE, (x.dtype, x.shape)
+    jaxutils.TRACKSHAPES.append((self.path, x.shape[-1:]))
+    jaxutils.TRACKACTS.append((self.path, x.shape))
+    jaxutils.TRACKFLOPS.append((self.path, flops))
     if len(self.units) > 1:
       x = x.reshape(x.shape[:-1] + self.units)
     return x
@@ -650,31 +535,19 @@ class BlockLinear(nj.Module):
   binit: bool = False
   fan: str = 'in'
   dtype: str = 'default'
-  block_fans: bool = False
-  block_norm: bool = False
 
   def __init__(self, units, groups):
     self.units = (units,) if isinstance(units, int) else tuple(units)
     assert groups <= np.prod(units), (groups, units)
     self.groups = groups
-    self._winit = Initializer(
-        self.winit, self.outscale, self.fan, self.dtype,
-        block_fans=self.block_fans)
+    self._winit = Initializer(self.winit, self.outscale, self.fan, self.dtype)
     self._binit = Initializer('zeros', 1.0, self.fan, self.dtype)
-    if self.block_norm:
-      self._norm = [
-          Norm(self.norm, name=f'norm{i}') for i in range(self.groups)]
-    else:
-      self._norm = Norm(self.norm, name='norm')
+    self._norm = Norm(self.norm, name='norm')
 
   def __call__(self, x):
     assert x.dtype == jaxutils.COMPUTE_DTYPE, (x.dtype, x.shape)
     x = self._layer(x)
-    if self.block_norm and self._norm != 'none':
-      x = jnp.concatenate([
-          f(y) for f, y in zip(self._norm, jnp.split(x, self.groups, -1))], -1)
-    else:
-      x = self._norm(x)
+    x = self._norm(x)
     x = get_act(self.act)(x)
     return x
 
@@ -687,7 +560,7 @@ class BlockLinear(nj.Module):
     assert indim % self.groups == outdim % self.groups == 0, (
         indim, outdim, self.groups, self.units)
     shape = (self.groups, indim // self.groups, outdim // self.groups)
-    kernel = self.get('kernel', self._winit, shape, shape).astype(x.dtype)
+    kernel = self.get('kernel', self._winit, shape).astype(x.dtype)
     flops = int(np.prod(shape))
     x = x.reshape((*bdims, self.groups, indim // self.groups))
     x = jnp.einsum('...ki,kio->...ko', x, kernel)
@@ -703,27 +576,10 @@ class BlockLinear(nj.Module):
     if len(self.units) > 1:
       x = x.reshape(x.shape[:-1] + self.units)
     assert x.dtype == jaxutils.COMPUTE_DTYPE, (x.dtype, x.shape)
+    jaxutils.TRACKSHAPES.append((self.path, x.shape[-1:]))
+    jaxutils.TRACKACTS.append((self.path, x.shape))
+    jaxutils.TRACKFLOPS.append((self.path, flops))
     return x
-
-
-class Embed(nj.Module):
-
-  outscale: float = 1.0
-  winit: str = 'normal'
-  fan: str = 'in'
-  dtype: str = 'default'
-
-  def __init__(self, count, units):
-    self.count = count
-    self.units = units
-    self._winit = Initializer(self.winit, self.outscale, self.fan, self.dtype)
-
-  def __call__(self, x):
-    assert x.dtype in (jnp.uint32, jnp.int32), x.dtype
-    shape = (self.count, self.units)
-    fan_shape = (1, self.units)
-    w = self.get('embed', self._winit, shape, fan_shape).astype(x.dtype)
-    return jnp.take(w, x, axis=0)
 
 
 class Norm(nj.Module):
@@ -756,11 +612,14 @@ class Norm(nj.Module):
       x = (x - mean) * mult + offset
       return cast(x)
     elif self._impl == 'rms':
-      dtype = x.dtype
-      x = f32(x) if x.dtype == jnp.float16 else x
+      x = x.astype(f32)
+      scale = self.get('scale', jnp.ones, x.shape[-1], f32)
+      mult = jax.lax.rsqrt((x * x).mean(-1)[..., None] + self._eps) * scale
+      return cast(x * mult)
+    elif self._impl == 'rms_lowprec':
       scale = self.get('scale', jnp.ones, x.shape[-1], f32).astype(x.dtype)
       mult = jax.lax.rsqrt((x * x).mean(-1)[..., None] + self._eps) * scale
-      return (x * mult).astype(dtype)
+      return x * mult
     elif self._impl == 'rms_instance':
       x = x.astype(f32)
       scale = self.get('scale', jnp.ones, x.shape[-1], f32)
@@ -820,16 +679,11 @@ class Input:
 
 class Initializer:
 
-  VARIANCE_FACTOR = 1.0
-
-  def __init__(
-      self, dist='normal', scale=1.0, fan='in', dtype='default',
-      block_fans=False):
+  def __init__(self, dist='normed', scale=1.0, fan='in', dtype='default'):
     self.dist = dist
     self.scale = scale
     self.fan = fan
     self.dtype = dtype
-    self.block_fans = block_fans
 
   def __call__(self, shape, fan_shape=None):
     shape = (shape,) if isinstance(shape, (int, np.integer)) else tuple(shape)
@@ -840,16 +694,16 @@ class Initializer:
     fan = {'avg': (fanin + fanout) / 2, 'in': fanin, 'out': fanout}[self.fan]
     if self.dist == 'zeros':
       value = jnp.zeros(shape, dtype)
-    elif self.dist == 'uniform':
-      limit = np.sqrt(self.VARIANCE_FACTOR / fan)
-      value = jax.random.uniform(nj.seed(), shape, dtype, -limit, limit)
-    elif self.dist == 'normal':
-      value = jax.random.truncated_normal(nj.seed(), -2, 2, shape)
-      value *= 1.1368 * np.sqrt(self.VARIANCE_FACTOR / fan)
-      value = value.astype(dtype)
     elif self.dist == 'normed':
       value = jax.random.uniform(nj.seed(), shape, dtype, -1, 1)
       value /= jnp.linalg.norm(value.reshape((-1, shape[-1])), 2, 0)
+    elif self.dist == 'uniform':
+      limit = np.sqrt(1 / fan)
+      value = jax.random.uniform(nj.seed(), shape, dtype, -limit, limit)
+    elif self.dist == 'normal':
+      value = jax.random.truncated_normal(nj.seed(), -2, 2, shape)
+      value *= 1.137 * np.sqrt(1 / fan)
+      value = value.astype(dtype)
     elif self.dist == 'complex':
       assert jnp.issubdtype(dtype, jnp.complexfloating), dtype
       realdt = jnp.finfo(dtype).dtype
@@ -878,8 +732,6 @@ class Initializer:
       return (1, shape[0])
     elif len(shape) == 2:
       return shape
-    elif len(shape) == 3 and self.block_fans:
-      return shape[1:]
     else:
       space = int(np.prod(shape[:-2]))
       return (shape[-2] * space, shape[-1] * space)

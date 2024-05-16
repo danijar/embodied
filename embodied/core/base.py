@@ -7,23 +7,27 @@ class Agent:
 
   def init_policy(self, batch_size):
     raise NotImplementedError(
-        "init_policy(batch_size) -> state")
+        "init_policy(batch_size) -> carry")
 
   def init_train(self, batch_size):
     raise NotImplementedError(
-        "init_train(batch_size) -> state")
+        "init_train(batch_size) -> carry")
 
-  def policy(self, obs, state=None, mode='train'):
+  def init_report(self, batch_size):
     raise NotImplementedError(
-        "policy(obs, state=None, mode='train') -> act, state")
+        "init_report(batch_size) -> carry")
 
-  def train(self, data, state=None):
+  def policy(self, obs, carry=None, mode='train'):
     raise NotImplementedError(
-        'train(data, state=None) -> outs, state, metrics')
+        "policy(obs, carry=None, mode='train') -> act, out, carry")
 
-  def report(self, data):
+  def train(self, data, carry=None):
     raise NotImplementedError(
-        'report(data) -> metrics')
+        'train(data, carry=None) -> outs, carry, metrics')
+
+  def report(self, data, carry=None):
+    raise NotImplementedError(
+        'report(data, carry=None) -> metrics, carry')
 
   def dataset(self, generator_fn):
     raise NotImplementedError(

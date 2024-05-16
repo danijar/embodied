@@ -13,7 +13,7 @@ def eval_only(make_agent, make_env, make_logger, args):
   logger = make_logger()
 
   logdir = embodied.Path(args.logdir)
-  logdir.mkdirs()
+  logdir.mkdir()
   print('Logdir', logdir)
   step = logger.step
   usage = embodied.Usage(**args.usage)
@@ -21,6 +21,7 @@ def eval_only(make_agent, make_env, make_logger, args):
   epstats = embodied.Agg()
   episodes = defaultdict(embodied.Agg)
   should_log = embodied.when.Clock(args.log_every)
+  policy_fps = embodied.FPS()
 
   @embodied.timer.section('log_step')
   def log_step(tran, worker):
@@ -52,12 +53,14 @@ def eval_only(make_agent, make_env, make_logger, args):
           'length': result.pop('length') - 1,
       }, prefix='episode')
       rew = result.pop('rewards')
-      result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
+      if len(rew) > 1:
+        result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
       epstats.add(result)
 
   fns = [bind(make_env, i) for i in range(args.num_envs)]
   driver = embodied.Driver(fns, args.driver_parallel)
   driver.on_step(lambda tran, _: step.increment())
+  driver.on_step(lambda tran, _: policy_fps.step())
   driver.on_step(log_step)
 
   checkpoint = embodied.Checkpoint()
@@ -74,6 +77,7 @@ def eval_only(make_agent, make_env, make_logger, args):
       logger.add(epstats.result(), prefix='epstats')
       logger.add(embodied.timer.stats(), prefix='timer')
       logger.add(usage.stats(), prefix='usage')
-      logger.write(fps=True)
+      logger.add({'fps/policy': policy_fps.result()})
+      logger.write()
 
   logger.close()

@@ -2,8 +2,8 @@ import concurrent.futures
 import pickle
 import time
 
-from . import basics
 from . import path
+from . import printing
 from . import timer
 
 
@@ -50,7 +50,7 @@ class Checkpoint:
   def save(self, filename=None, keys=None):
     assert self._filename or filename
     filename = path.Path(filename or self._filename)
-    basics.print_(f'Writing checkpoint: {filename}')
+    printing.print_(f'Writing checkpoint: {filename}')
     if self._parallel:
       self._promise and self._promise.result()
       self._promise = self._worker.submit(self._save, filename, keys)
@@ -63,7 +63,7 @@ class Checkpoint:
     assert all([not k.startswith('_') for k in keys]), keys
     data = {k: self._values[k].save() for k in keys}
     data['_timestamp'] = time.time()
-    filename.parent.mkdirs()
+    filename.parent.mkdir()
     content = pickle.dumps(data)
     if str(filename).startswith('gs://'):
       filename.write(content, mode='wb')
@@ -81,7 +81,7 @@ class Checkpoint:
     assert self._filename or filename
     self._promise and self._promise.result()  # Wait for last save.
     filename = path.Path(filename or self._filename)
-    basics.print_(f'Loading checkpoint: {filename}')
+    printing.print_(f'Loading checkpoint: {filename}')
     data = pickle.loads(filename.read('rb'))
     keys = tuple(data.keys() if keys is None else keys)
     for key in keys:
@@ -93,7 +93,7 @@ class Checkpoint:
         print(f"Error loading '{key}' from checkpoint.")
         raise
     age = time.time() - data['_timestamp']
-    basics.print_(f'Loaded checkpoint from {age:.0f} seconds ago.')
+    printing.print_(f'Loaded checkpoint from {age:.0f} seconds ago.')
 
   def load_or_save(self):
     if self.exists():

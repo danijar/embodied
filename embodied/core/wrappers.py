@@ -183,6 +183,46 @@ class FlattenTwoDimActions(base.Wrapper):
     return self.env.step(action)
 
 
+class ForceDtypes(base.Wrapper):
+
+  def __init__(self, env):
+    super().__init__(env)
+    self._obs_space, _, self._obs_outer = self._convert(env.obs_space)
+    self._act_space, self._act_inner, _ = self._convert(env.act_space)
+
+  @property
+  def obs_space(self):
+    return self._obs_space
+
+  @property
+  def act_space(self):
+    return self._act_space
+
+  def step(self, action):
+    action = action.copy()
+    for key, dtype in self._act_inner.items():
+      action[key] = np.asarray(action[key], dtype)
+    obs = self.env.step(action)
+    for key, dtype in self._obs_outer.items():
+      obs[key] = np.asarray(obs[key], dtype)
+    return obs
+
+  def _convert(self, spaces):
+    results, befores, afters = {}, {}, {}
+    for key, space in spaces.items():
+      before = after = space.dtype
+      if np.issubdtype(before, np.floating):
+        after = np.float32
+      elif np.issubdtype(before, np.uint8):
+        after = np.uint8
+      elif np.issubdtype(before, np.integer):
+        after = np.int32
+      befores[key] = before
+      afters[key] = after
+      results[key] = spacelib.Space(after, space.shape, space.low, space.high)
+    return results, befores, afters
+
+
 class CheckSpaces(base.Wrapper):
 
   def __init__(self, env):
@@ -278,6 +318,28 @@ class RenderImage(base.Wrapper):
   def step(self, action):
     obs = self.env.step(action)
     obs[self._key] = self.env.render()
+    return obs
+
+
+class BackwardReturn(base.Wrapper):
+
+  def __init__(self, env, horizon):
+    super().__init__(env)
+    self._discount = 1 - 1 / horizon
+    self._bwreturn = 0.0
+
+  @functools.cached_property
+  def obs_space(self):
+    return {
+        **self.env.obs_space,
+        'bwreturn': spacelib.Space(np.float32),
+    }
+
+  def step(self, action):
+    obs = self.env.step(action)
+    self._bwreturn *= (1 - obs['is_first']) * self._discount
+    self._bwreturn += obs['reward']
+    obs['bwreturn'] = np.float32(self._bwreturn)
     return obs
 
 

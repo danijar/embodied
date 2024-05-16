@@ -47,7 +47,7 @@ class PinPad(embodied.Env):
   @property
   def act_space(self):
     return {
-        'action': embodied.Space(np.int64, (), 0, 5),
+        'action': embodied.Space(np.int32, (), 0, 5),
         'reset': embodied.Space(bool),
     }
 
@@ -113,8 +113,12 @@ class PinPad(embodied.Env):
 
   def _obs(self, reward, is_first=False, is_last=False, is_terminal=False):
     return dict(
-        image=self.render(), reward=reward, is_first=is_first, is_last=is_last,
-        is_terminal=is_terminal)
+        image=self.render(),
+        reward=np.float32(reward),
+        is_first=is_first,
+        is_last=is_last,
+        is_terminal=is_terminal,
+    )
 
 
 LAYOUT_THREE = """

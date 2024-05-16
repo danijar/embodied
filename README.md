@@ -29,12 +29,13 @@ embodied/
 ```python
 class Agent:
   __init__(obs_space, act_space, config)
-  policy(obs, state=None, mode='train') -> act, state
-  train(data, state=None) -> state, metrics
-  report(data) -> metrics
+  policy(obs, carry, mode='train') -> act, carry
+  train(data, carry) -> metrics, carry
+  report(data, carry) -> metrics, carry
+  init_policy(batch_size) -> carry
+  init_train(batch_size) -> carry
+  init_report(batch_size) -> carry
   dataset(generator) -> generator
-  init_policy(batch_size) -> state
-  init_train(batch_size) -> state
 ```
 
 ## Env API
@@ -44,7 +45,7 @@ class Env:
   __len__() -> int
   @obs_space -> dict of spaces
   @act_space -> dict of spaces
-  step(action) -> obs dict
+  step(act) -> obs dict
   render() -> array
   close()
 ```
