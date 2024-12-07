@@ -27,10 +27,7 @@ setuptools.setup(
     long_description_content_type='text/markdown',
     packages=setuptools.find_packages(),
     include_package_data=True,
-    install_requires=parse_reqs('embodied/requirements.txt'),
-    extras_require={
-        'dreamerv3': parse_reqs('embodied/agents/dreamerv3/requirements.txt'),
-    },
+    install_requires=parse_reqs('requirements.txt'),
     classifiers=[
         'Intended Audience :: Science/Research',
         'License :: OSI Approved :: MIT License',

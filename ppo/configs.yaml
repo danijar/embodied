@@ -1,0 +1,131 @@
+defaults:
+
+  logdir: ~/logdir/{timestamp}
+  replica: 0
+  replicas: 1
+  method: name
+  task: dummy_disc
+  seed: 0
+  script: train
+  batch_size: 16
+  batch_length: 64
+  report_length: 32
+  consec_train: 1
+  consec_report: 1
+  replay_context: 1
+  random_agent: False
+  clock_addr: ''
+  clock_port: ''
+  ipv6: False
+
+  logger:
+    outputs: [jsonl, scope]
+    filter: 'score|length|fps|ratio|train/loss/|train/rand/'
+    timer: True
+    fps: 15
+    user: ''
+
+  env:
+    atari: {size: [96, 96], repeat: 4, sticky: True, gray: True, actions: all, lives: unused, noops: 30, autostart: False, pooling: 2, aggregate: max, resize: pillow, clip_reward: False}
+    procgen: {size: [96, 96], resize: pillow}
+    crafter: {size: [64, 64], logs: False}
+    atari100k: {size: [64, 64], repeat: 4, sticky: False, gray: False, actions: needed, lives: unused, noops: 30, autostart: False, resize: pillow, clip_reward: False}
+    dmlab: {size: [64, 64], repeat: 4, episodic: True, use_seed: True}
+    minecraft: {size: [64, 64], break_speed: 100.0, logs: False}
+    dmc: {size: [64, 64], repeat: 2, proprio: True, image: True, camera: -1}
+    loconav: {size: [64, 64], repeat: 1, camera: -1}
+
+  replay:
+    size: 1e5
+    online: True
+    fracs: {uniform: 1.0, priority: 0.0, recency: 0.0}
+    prio: {exponent: 0.8, maxfrac: 0.5, initial: inf, zero_on_sample: True}
+    priosignal: model
+    recexp: 1.0
+    chunksize: 1024
+
+  run:
+    steps: 1e10
+    duration: 0
+    train_ratio: 3.0
+    log_every: 120
+    report_every: 300
+    save_every: 900
+    envs: 16
+    eval_envs: 4
+    eval_eps: 1
+    report_batches: 1
+    from_checkpoint: ''
+    episode_timeout: 180
+    actor_addr: 'localhost:{auto}'
+    replay_addr: 'localhost:{auto}'
+    logger_addr: 'localhost:{auto}'
+    actor_batch: -1
+    actor_threads: 1
+    agent_process: False
+    remote_replay: False
+    remote_envs: False
+    usage: {psutil: True, nvsmi: True, gputil: False, malloc: False, gc: False}
+    debug: True
+
+  jax:
+    platform: cuda
+    compute_dtype: bfloat16
+    policy_devices: [0]
+    train_devices: [0]
+    mock_devices: 0
+    prealloc: True
+    jit: True
+    debug: False
+    expect_devices: 0
+    enable_policy: True
+    coordinator_address: ''
+    deterministic: False
+
+  agent:
+    enc:
+      typ: impala
+      impala: {depth: 32, mults: [1, 2, 2], layers: 5, units: 1024, act: relu, norm: none, winit: trunc_normal_in, symlog: True, outmult: 16}
+    recurrent: True
+    rnn: {units: 1024, norm: layer, winit: trunc_normal_in}
+    rnnact: True
+    actemb: {units: 1024}
+    policy: {layers: 0, units: 1024, act: relu, norm: layer, minstd: 0.1, maxstd: 1.0, outscale: 0.0, unimix: 0.0, winit: trunc_normal_in}
+    policy_dist_disc: categorical
+    policy_dist_cont: bounded_normal
+    value: {layers: 0, units: 1024, act: relu, norm: layer, output: mse, outscale: 0.0, winit: trunc_normal_in, bins: 255}
+    ppo_loss: {actent: 1e-2, hor: 200, lam: 0.8, trclip: 0.2, tarclip: 10.0}
+    loss_scales: {policy: 1.0, value: 0.5}
+    valnorm: {impl: meanstd, rate: 0.01, limit: 1e-8}
+    advnorm: {impl: meanstd, rate: 0.01, limit: 1e-8}
+    opt: {lr: 3e-4, eps: 1e-7, clip: 10.0, wd: 0.0, warmup: 1000}
+
+openai:
+  opt.eps: 1e-8
+  opt.clip: 0.5
+  policy.outscale: 0.01
+  value.outscale: 1.0
+  policy_dist_cont: normal_logstd
+  horizon: 1000
+  return_lambda: 0.95
+  rnnact: False
+  replay.size: 1e4
+
+multicpu:
+  batch_size: 12
+  batch_length: 10
+  jax.mock_devices: 8
+  jax.policy_devices: [0, 1]
+  jax.train_devices: [2, 3, 4, 5, 6, 7]
+
+debug:
+  batch_size: 8
+  batch_length: 12
+  report_length: 12
+  jax: {platform: cpu, debug: True, prealloc: False}
+  run: {envs: 4, report_every: 10, log_every: 5, save_every: 15, train_ratio: 8, debug: True}
+  replay.size: 1e4
+  agent:
+    enc.impala: {depth: 2, outmult: 2}
+    .*\.layers: 1
+    .*\.units: 8

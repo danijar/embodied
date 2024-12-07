@@ -1,10 +1,6 @@
 import collections
-import pathlib
-import sys
 import threading
 import time
-
-sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
 import elements
 import embodied

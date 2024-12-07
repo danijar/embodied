@@ -1,5 +1,4 @@
-[![PyPI](https://img.shields.io/pypi/v/embodied.svg)](https://pypi.python.org/pypi/embodied/#history) &nbsp;
-[![Docs](https://readthedocs.org/projects/embodied/badge)](https://embodied.readthedocs.org)
+[![PyPI](https://img.shields.io/pypi/v/embodied.svg)](https://pypi.python.org/pypi/embodied/#history)
 
 # Embodied
 
